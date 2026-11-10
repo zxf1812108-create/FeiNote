@@ -23,6 +23,7 @@ data class NoteEntity(
     val bulletType: BulletType = BulletType.SQUARE,
     val orderIndex: Int = 0,
     val isDeleted: Boolean = false,
+    val deletedAt: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )
