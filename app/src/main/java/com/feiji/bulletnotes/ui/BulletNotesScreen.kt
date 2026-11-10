@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.shape.CircleShape
@@ -115,6 +116,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     val displayNotes = remember { mutableStateListOf<NoteEntity>() }
     var draggingNoteId by remember { mutableStateOf<Long?>(null) }
     var draggingOffset by remember { mutableStateOf(0f) }
+    var dragAnchorTop by remember { mutableStateOf(0f) }
     var dragStartIndex by remember { mutableStateOf(-1) }
 
     LaunchedEffect(notes, draggingNoteId) {
@@ -286,10 +288,17 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 
                         BulletNoteRow(
                             modifier = Modifier
-                                .animateItem()
+                                // 正在拖动的条目不参与 LazyColumn 的位置动画，避免双重动画造成反向跳动。
+                                .then(if (draggingNoteId == note.id) Modifier else Modifier.animateItem())
+                                .zIndex(if (draggingNoteId == note.id) 1f else 0f)
                                 .graphicsLayer {
                                     if (draggingNoteId == note.id) {
-                                        translationY = draggingOffset
+                                        // 使用手指起点的绝对屏幕位置减去当前布局位置。
+                                        // 列表交换位置时布局坐标会改变，但视觉坐标保持连续。
+                                        val currentTop = listState.layoutInfo.visibleItemsInfo
+                                            .firstOrNull { it.key == note.id }?.offset?.toFloat()
+                                            ?: dragAnchorTop
+                                        translationY = dragAnchorTop + draggingOffset - currentTop
                                         shadowElevation = 12.dp.toPx()
                                     }
                                 },
@@ -309,28 +318,47 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 }
                             },
                             onDragStart = {
-                                draggingNoteId = note.id
-                                dragStartIndex = notes.indexOfFirst { it.id == note.id }
-                                draggingOffset = 0f
+                                val info = listState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { it.key == note.id }
+                                if (info != null) {
+                                    dragAnchorTop = info.offset.toFloat()
+                                    draggingOffset = 0f
+                                    dragStartIndex = notes.indexOfFirst { it.id == note.id }
+                                    draggingNoteId = note.id
+                                }
                             },
                             onDragDelta = { delta ->
                                 if (draggingNoteId == note.id) {
+                                    // 不在交换位置时重置或减去拖动距离。
                                     draggingOffset += delta
                                     val current = displayNotes.indexOfFirst { it.id == note.id }
-                                    if (current >= 0) {
-                                        val itemHeight = listState.layoutInfo.visibleItemsInfo
-                                            .firstOrNull { it.key == note.id }?.size?.toFloat() ?: 56f
-                                        val threshold = itemHeight * 0.55f
+                                    val visible = listState.layoutInfo.visibleItemsInfo
+                                    val dragged = visible.firstOrNull { it.key == note.id }
+                                    if (current >= 0 && dragged != null) {
+                                        val visualCenter = dragAnchorTop + draggingOffset + dragged.size / 2f
+                                        // 只有手指带着条目越过相邻条目的中心点才交换。
+                                        // 这样不会在阈值附近反复触发反向移动。
                                         val direction = when {
-                                            draggingOffset > threshold -> 1
-                                            draggingOffset < -threshold -> -1
+                                            delta > 0f -> 1
+                                            delta < 0f -> -1
                                             else -> 0
                                         }
                                         val target = current + direction
-                                        if (direction != 0 && target in displayNotes.indices) {
-                                            val moved = displayNotes.removeAt(current)
-                                            displayNotes.add(target, moved)
-                                            draggingOffset -= direction * itemHeight
+                                        if (target in displayNotes.indices) {
+                                            val neighborId = displayNotes[target].id
+                                            val neighbor = visible.firstOrNull { it.key == neighborId }
+                                            if (neighbor != null) {
+                                                val neighborCenter = neighbor.offset + neighbor.size / 2f
+                                                val crossed = if (direction > 0) {
+                                                    visualCenter > neighborCenter
+                                                } else {
+                                                    visualCenter < neighborCenter
+                                                }
+                                                if (crossed) {
+                                                    val moved = displayNotes.removeAt(current)
+                                                    displayNotes.add(target, moved)
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -344,6 +372,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 }
                                 draggingNoteId = null
                                 draggingOffset = 0f
+                                dragAnchorTop = 0f
                                 dragStartIndex = -1
                             },
                             onContentChange = { newText ->
