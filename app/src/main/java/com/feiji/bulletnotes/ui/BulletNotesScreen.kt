@@ -21,6 +21,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -107,6 +111,24 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
 
     val listState = rememberLazyListState()
+    // 拖动期间只更新内存中的显示顺序；松手后再保存到数据库。
+    val displayNotes = remember { mutableStateListOf<NoteEntity>() }
+    var draggingNoteId by remember { mutableStateOf<Long?>(null) }
+    var draggingOffset by remember { mutableStateOf(0f) }
+    var dragStartIndex by remember { mutableStateOf(-1) }
+
+    LaunchedEffect(notes, draggingNoteId) {
+        if (draggingNoteId == null) {
+            if (displayNotes.map { it.id } != notes.map { it.id }) {
+                displayNotes.clear()
+                displayNotes.addAll(notes)
+            } else {
+                notes.forEachIndexed { index, item ->
+                    if (displayNotes[index] != item) displayNotes[index] = item
+                }
+            }
+        }
+    }
 
 
     // 显示提示 Toast
@@ -228,7 +250,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     focusManager.clearFocus()
                 }
         ) {
-            if (notes.isEmpty()) {
+            if (displayNotes.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -259,10 +281,18 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    itemsIndexed(notes, key = { _, note -> note.id }) { index, note ->
+                    itemsIndexed(displayNotes, key = { _, note -> note.id }) { index, note ->
                         val isEditing = (editingNoteId == note.id)
 
                         BulletNoteRow(
+                            modifier = Modifier
+                                .animateItem()
+                                .graphicsLayer {
+                                    if (draggingNoteId == note.id) {
+                                        translationY = draggingOffset
+                                        shadowElevation = 12.dp.toPx()
+                                    }
+                                },
                             note = note,
                             isEditing = isEditing,
                             onBulletClick = { viewModel.cycleBulletType(note) },
@@ -278,9 +308,44 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                     viewModel.setEditingNoteId(note.id)
                                 }
                             },
-                            onLongDragMove = { from, to -> viewModel.reorderNotes(from, to) },
-                            listIndex = index,
-                            listState = listState,
+                            onDragStart = {
+                                draggingNoteId = note.id
+                                dragStartIndex = notes.indexOfFirst { it.id == note.id }
+                                draggingOffset = 0f
+                            },
+                            onDragDelta = { delta ->
+                                if (draggingNoteId == note.id) {
+                                    draggingOffset += delta
+                                    val current = displayNotes.indexOfFirst { it.id == note.id }
+                                    if (current >= 0) {
+                                        val itemHeight = listState.layoutInfo.visibleItemsInfo
+                                            .firstOrNull { it.key == note.id }?.size?.toFloat() ?: 56f
+                                        val threshold = itemHeight * 0.55f
+                                        val direction = when {
+                                            draggingOffset > threshold -> 1
+                                            draggingOffset < -threshold -> -1
+                                            else -> 0
+                                        }
+                                        val target = current + direction
+                                        if (direction != 0 && target in displayNotes.indices) {
+                                            val moved = displayNotes.removeAt(current)
+                                            displayNotes.add(target, moved)
+                                            draggingOffset -= direction * itemHeight
+                                        }
+                                    }
+                                }
+                            },
+                            onDragFinish = {
+                                if (draggingNoteId == note.id) {
+                                    val endIndex = displayNotes.indexOfFirst { it.id == note.id }
+                                    if (dragStartIndex >= 0 && endIndex >= 0 && dragStartIndex != endIndex) {
+                                        viewModel.reorderNotes(dragStartIndex, endIndex)
+                                    }
+                                }
+                                draggingNoteId = null
+                                draggingOffset = 0f
+                                dragStartIndex = -1
+                            },
                             onContentChange = { newText ->
                                 viewModel.updateNoteContent(note.id, newText)
                             },
@@ -304,7 +369,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             trashNotes = trashNotes,
             onDismiss = { showTrashDialog = false },
             onRestore = { id -> viewModel.restoreFromTrash(id) },
-            onDeleteOlderThanWeek = { viewModel.deleteTrashOlderThanWeek() }
+            onDeleteBeforeToday = { viewModel.deleteTrashBeforeToday() }
         )
     }
 
@@ -361,18 +426,22 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 fun BulletNoteRow(
     note: NoteEntity,
     isEditing: Boolean,
+    modifier: Modifier = Modifier,
     onBulletClick: () -> Unit,
     onBulletLongClick: () -> Unit,
     onContentClick: () -> Unit,
     onContentChange: (String) -> Unit,
     onEnterPressed: () -> Unit,
     onDelete: () -> Unit,
-    onLongDragMove: (Int, Int) -> Unit,
-    listIndex: Int,
-    listState: androidx.compose.foundation.lazy.LazyListState
+    onDragStart: () -> Unit,
+    onDragDelta: (Float) -> Unit,
+    onDragFinish: () -> Unit
 ) {
-    val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
+    // 只在进入编辑状态时初始化光标；输入过程中保持 TextFieldValue 的选区。
+    var editValue by remember(note.id, isEditing) {
+        mutableStateOf(TextFieldValue(note.content, selection = TextRange(note.content.length)))
+    }
 
     LaunchedEffect(isEditing) {
         if (isEditing) {
@@ -381,7 +450,7 @@ fun BulletNoteRow(
     }
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
             .background(if (isEditing) MaterialTheme.colorScheme.surface else Color.Transparent)
@@ -443,29 +512,15 @@ fun BulletNoteRow(
             modifier = Modifier
                 .weight(1f)
                 .then(
-                    if (!isEditing) Modifier.pointerInput(note.id, listIndex) {
-                        var dragDistance = 0f
-                        var currentIndex = listIndex
+                    if (!isEditing) Modifier.pointerInput(note.id) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = { dragDistance = 0f; currentIndex = listIndex },
+                            onDragStart = { onDragStart() },
                             onDrag = { change, amount ->
                                 change.consume()
-                                dragDistance += amount.y
-                                val visible = listState.layoutInfo.visibleItemsInfo
-                                val height = visible.firstOrNull { it.index == currentIndex }?.size?.toFloat() ?: 56f
-                                if (kotlin.math.abs(dragDistance) >= height * 0.65f) {
-                                    val target = currentIndex + if (dragDistance > 0) 1 else -1
-                                    if (target in 0 until listState.layoutInfo.totalItemsCount) {
-                                        currentIndex = target
-                                        dragDistance = 0f
-                                    }
-                                }
+                                onDragDelta(amount.y)
                             },
-                            onDragEnd = {
-                                if (currentIndex != listIndex) onLongDragMove(listIndex, currentIndex)
-                                dragDistance = 0f
-                            },
-                            onDragCancel = { dragDistance = 0f }
+                            onDragEnd = onDragFinish,
+                            onDragCancel = onDragFinish
                         )
                     } else Modifier
                 )
@@ -485,8 +540,11 @@ fun BulletNoteRow(
             } else {
                 // 编辑状态：显示完整笔记内容，支持多行，回车在末尾创建下一条笔记
                 BasicTextField(
-                    value = note.content,
-                    onValueChange = onContentChange,
+                    value = editValue,
+                    onValueChange = { newValue ->
+                        editValue = newValue
+                        if (newValue.text != note.content) onContentChange(newValue.text)
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(focusRequester)
@@ -509,7 +567,7 @@ fun BulletNoteRow(
                         onNext = { onEnterPressed() }
                     ),
                     decorationBox = { innerTextField ->
-                        if (note.content.isEmpty()) {
+                        if (editValue.text.isEmpty()) {
                             Text(
                                 text = "输入笔记内容...",
                                 style = MaterialTheme.typography.bodyLarge.copy(color = SlateMuted)
