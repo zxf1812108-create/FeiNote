@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.time.ZoneId
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -23,6 +26,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getInstance(application)
     private val noteDao = db.noteDao()
+    private val contentWriteMutex = Mutex()
 
     val dateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.CHINA)
     val displayDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy年MM月dd日 EEEE", Locale.CHINA)
@@ -128,10 +132,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      * 更新笔记内容
      */
     fun updateNoteContent(id: Long, newContent: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentList = notes.value
-            val target = currentList.find { it.id == id } ?: return@launch
-            noteDao.updateNote(target.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+        // 串行写入，避免快速输入时旧内容覆盖新内容；只更新正文，不覆盖排序等字段。
+        viewModelScope.launch {
+            contentWriteMutex.withLock {
+                noteDao.updateNoteContent(id, newContent, System.currentTimeMillis())
+            }
         }
     }
 
@@ -225,10 +230,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 清空回收站全部删除
      */
-    fun deleteTrashOlderThanWeek() {
+    fun deleteTrashBeforeToday() {
         viewModelScope.launch(Dispatchers.IO) {
-            val count = noteDao.deleteTrashOlderThan(System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000)
-            _userMessage.value = "已删除超过一周的 $count 条笔记"
+            val todayStart = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+            val count = noteDao.deleteTrashOlderThan(todayStart - 1L)
+            _userMessage.value = "已删除昨天及以前的 $count 条回收站笔记"
         }
     }
 
