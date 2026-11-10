@@ -225,10 +225,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 清空回收站全部删除
      */
-    fun clearAllTrash() {
+    fun deleteTrashOlderThanWeek() {
         viewModelScope.launch(Dispatchers.IO) {
-            val count = noteDao.clearTrash()
-            _userMessage.value = "已彻底清空回收站 ($count 条笔记)"
+            val count = noteDao.deleteTrashOlderThan(System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000)
+            _userMessage.value = "已删除超过一周的 $count 条笔记"
         }
     }
 
