@@ -176,7 +176,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             modifier = Modifier.padding(vertical = 4.dp, horizontal = 4.dp)
                         ) {
                             Text(
-                                text = selectedDate.format(viewModel.displayDateFormatter),
+                                text = selectedDate.format(viewModel.displayDateFormatter) + " " + "一二三四五六日"[selectedDate.dayOfWeek.value - 1],
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -289,7 +289,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         BulletNoteRow(
                             modifier = Modifier
                                 // 正在拖动的条目不参与 LazyColumn 的位置动画，避免双重动画造成反向跳动。
-                                .then(if (draggingNoteId == note.id) Modifier else Modifier.animateItem())
+                                .then(if (draggingNoteId == note.id || editingNoteId != null) Modifier else Modifier.animateItem())
                                 .zIndex(if (draggingNoteId == note.id) 1f else 0f)
                                 .graphicsLayer {
                                     if (draggingNoteId == note.id) {
@@ -484,12 +484,12 @@ fun BulletNoteRow(
             .clip(RoundedCornerShape(6.dp))
             .background(if (isEditing) MaterialTheme.colorScheme.surface else Color.Transparent)
             .padding(horizontal = 6.dp, vertical = 6.dp),
-        verticalAlignment = if (isEditing) Alignment.Top else Alignment.CenterVertically
+        verticalAlignment = Alignment.Top
     ) {
         // 标识符区域：方框 (SQUARE) / 对勾 (CHECKED) / 实心圆点 (BULLET_DOT)
         Box(
             modifier = Modifier
-                .padding(top = if (isEditing) 4.dp else 0.dp)
+                .padding(top = 4.dp)
                 .size(28.dp)
                 .clip(RoundedCornerShape(4.dp))
                 .combinedClickable(
