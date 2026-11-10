@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">飞记</string>
+    <string name="today">今天</string>
+    <string name="back_to_today">回到今天</string>
+    <string name="recycle_bin">回收站</string>
+    <string name="delete_all">全部删除</string>
+    <string name="confirm_restore_today_backup">是否恢复今天初始数据备份？</string>
+    <string name="yes">是</string>
+    <string name="cancel">取消</string>
+    <string name="new_note_placeholder">记录一条想法...</string>
+</resources>

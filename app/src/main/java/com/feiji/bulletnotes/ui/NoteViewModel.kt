@@ -1,0 +1,256 @@
+package com.feiji.bulletnotes.ui
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.feiji.bulletnotes.data.AppDatabase
+import com.feiji.bulletnotes.data.BackupManager
+import com.feiji.bulletnotes.data.BulletType
+import com.feiji.bulletnotes.data.NoteEntity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+class NoteViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val db = AppDatabase.getInstance(application)
+    private val noteDao = db.noteDao()
+
+    val dateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.CHINA)
+    val displayDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy年MM月dd日 EEEE", Locale.CHINA)
+
+    // 今天日期
+    private val _today = MutableStateFlow(LocalDate.now())
+    val today: StateFlow<LocalDate> = _today.asStateFlow()
+
+    // 当前选中的查看日期
+    private val _selectedDate = MutableStateFlow(LocalDate.now())
+    val selectedDate: StateFlow<LocalDate> = _selectedDate.asStateFlow()
+
+    // 当前日期对应的格式化字符串
+    val selectedDateString: StateFlow<String> = MutableStateFlow(
+        LocalDate.now().format(dateFormatter)
+    )
+
+    // 当前是否停留在今天
+    private val _isToday = MutableStateFlow(true)
+    val isToday: StateFlow<Boolean> = _isToday.asStateFlow()
+
+    // 当前处于编辑状态的笔记 ID（null 表示无单项进入多行编辑）
+    private val _editingNoteId = MutableStateFlow<Long?>(null)
+    val editingNoteId: StateFlow<Long?> = _editingNoteId.asStateFlow()
+
+    // 当前日期的有效笔记列表（根据当前日期流式响应）
+    val notes: StateFlow<List<NoteEntity>> = _selectedDate
+        .flatMapLatest { date ->
+            val dateStr = date.format(dateFormatter)
+            noteDao.getNotesByDate(dateStr)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 回收站笔记列表
+    val trashNotes: StateFlow<List<NoteEntity>> = noteDao.getDeletedNotes()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 提示信息 / Toast 弹窗
+    private val _userMessage = MutableStateFlow<String?>(null)
+    val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
+
+    init {
+        // App 启动时自动检查并执行每日首次自动备份
+        checkDailyBackup()
+    }
+
+    fun clearUserMessage() {
+        _userMessage.value = null
+    }
+
+    /**
+     * 选择日期：更新当前日期，同步更新今天/回到今天状态
+     */
+    fun selectDate(newDate: LocalDate) {
+        _selectedDate.value = newDate
+        _isToday.value = (newDate == _today.value)
+        _editingNoteId.value = null
+    }
+
+    /**
+     * 回到今天：日期恢复为今天，标识恢复为“今天”
+     */
+    fun returnToToday() {
+        val now = LocalDate.now()
+        _today.value = now
+        _selectedDate.value = now
+        _isToday.value = true
+        _editingNoteId.value = null
+    }
+
+    /**
+     * 设置编辑中的笔记 ID
+     */
+    fun setEditingNoteId(id: Long?) {
+        _editingNoteId.value = id
+    }
+
+    /**
+     * 点击标识符：在 方框 (SQUARE) -> 对勾 (CHECKED) -> 实心圆点 (BULLET_DOT) 之间轮流切换
+     */
+    fun cycleBulletType(note: NoteEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val nextType = note.bulletType.next()
+            noteDao.updateNote(note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis()))
+        }
+    }
+
+    /**
+     * 长按标识符修改笔记日期：
+     * 若所选日期与当前展示日期不同，该笔记将自动从当前列表视图中移除（因为仅显示匹配当前日期的笔记）
+     */
+    fun changeNoteDate(note: NoteEntity, newDate: LocalDate) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val newDateStr = newDate.format(dateFormatter)
+            noteDao.updateNote(note.copy(dateString = newDateStr, updatedAt = System.currentTimeMillis()))
+            if (newDate != _selectedDate.value) {
+                _userMessage.value = "笔记已移动至 $newDateStr"
+            }
+        }
+    }
+
+    /**
+     * 更新笔记内容
+     */
+    fun updateNoteContent(id: Long, newContent: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentList = notes.value
+            val target = currentList.find { it.id == id } ?: return@launch
+            noteDao.updateNote(target.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+        }
+    }
+
+    /**
+     * 在某条笔记后按回车，新增下一条笔记，附加当前选中的日期属性
+     */
+    fun insertNoteAfter(referenceNote: NoteEntity?, initialContent: String = "") {
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentDateStr = _selectedDate.value.format(dateFormatter)
+            val currentList = notes.value
+
+            val newOrder = if (referenceNote != null) {
+                referenceNote.orderIndex + 1
+            } else {
+                (currentList.maxOfOrNull { it.orderIndex } ?: 0) + 1
+            }
+
+            // 更新后续项的 orderIndex
+            val updatedList = currentList.map { item ->
+                if (item.orderIndex >= newOrder) {
+                    item.copy(orderIndex = item.orderIndex + 1)
+                } else {
+                    item
+                }
+            }
+            if (updatedList.isNotEmpty()) {
+                noteDao.updateNotes(updatedList)
+            }
+
+            val newNote = NoteEntity(
+                content = initialContent,
+                dateString = currentDateStr,
+                bulletType = BulletType.SQUARE,
+                orderIndex = newOrder
+            )
+            val newId = noteDao.insertNote(newNote)
+            _editingNoteId.value = newId
+        }
+    }
+
+    /**
+     * 拖拽重排序
+     */
+    fun reorderNotes(fromIndex: Int, toIndex: Int) {
+        val currentList = notes.value.toMutableList()
+        if (fromIndex !in currentList.indices || toIndex !in currentList.indices || fromIndex == toIndex) return
+
+        val movedItem = currentList.removeAt(fromIndex)
+        currentList.add(toIndex, movedItem)
+
+        // 重新分配连续 orderIndex
+        val updatedList = currentList.mapIndexed { index, note ->
+            note.copy(orderIndex = index)
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            noteDao.updateNotes(updatedList)
+        }
+    }
+
+    /**
+     * 删除笔记放入回收站 (软删除)
+     */
+    fun moveToTrash(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            noteDao.softDeleteNote(id)
+            if (_editingNoteId.value == id) {
+                _editingNoteId.value = null
+            }
+        }
+    }
+
+    /**
+     * 从回收站恢复笔记
+     */
+    fun restoreFromTrash(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            noteDao.restoreNote(id)
+        }
+    }
+
+    /**
+     * 彻底删除单条笔记
+     */
+    fun permanentlyDelete(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            noteDao.deletePermanently(id)
+        }
+    }
+
+    /**
+     * 清空回收站全部删除
+     */
+    fun clearAllTrash() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val count = noteDao.clearTrash()
+            _userMessage.value = "已彻底清空回收站 ($count 条笔记)"
+        }
+    }
+
+    /**
+     * 检查并执行每日首次自动备份
+     */
+    private fun checkDailyBackup() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            BackupManager.checkAndPerformDailyBackup(app, noteDao)
+        }
+    }
+
+    /**
+     * 恢复今天初始数据备份
+     */
+    fun restoreTodayBackup(onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val (success, message) = BackupManager.restoreTodayBackup(app, noteDao)
+            _userMessage.value = message
+            kotlinx.coroutines.withContext(Dispatchers.Main) { onResult(success, message) }
+        }
+    }
+}
