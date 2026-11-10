@@ -54,8 +54,7 @@ fun TrashBinDialog(
     trashNotes: List<NoteEntity>,
     onDismiss: () -> Unit,
     onRestore: (Long) -> Unit,
-    onDeletePermanently: (Long) -> Unit,
-    onClearAll: () -> Unit
+    onDeleteOlderThanWeek: () -> Unit
 ) {
     var showConfirmClearAllDialog by remember { mutableStateOf(false) }
 
@@ -104,12 +103,12 @@ fun TrashBinDialog(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DeleteForever,
-                                contentDescription = "全部删除",
+                                contentDescription = "删除一周前",
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "全部删除",
+                                text = "删除一周前",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -198,18 +197,6 @@ fun TrashBinDialog(
                                         )
                                     }
 
-                                    // 彻底删除单条按钮
-                                    IconButton(
-                                        onClick = { onDeletePermanently(note.id) },
-                                        modifier = Modifier.size(32.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.DeleteForever,
-                                            contentDescription = "彻底删除",
-                                            tint = AccentDanger,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
                                 }
                             }
                         }
@@ -223,17 +210,17 @@ fun TrashBinDialog(
     if (showConfirmClearAllDialog) {
         AlertDialog(
             onDismissRequest = { showConfirmClearAllDialog = false },
-            title = { Text(text = "清空回收站", fontWeight = FontWeight.Bold) },
-            text = { Text(text = "确定要彻底删除回收站中的所有笔记吗？此操作无法撤销。") },
+            title = { Text(text = "删除一周前的笔记", fontWeight = FontWeight.Bold) },
+            text = { Text(text = "仅永久删除进入回收站已超过7天的笔记。最近7天删除的笔记会保留。旧版本中无法确定删除时间的笔记也会保留。此操作无法撤销。") },
             confirmButton = {
                 TextButton(
                     onClick = {
                         showConfirmClearAllDialog = false
-                        onClearAll()
+                        onDeleteOlderThanWeek()
                     },
                     colors = ButtonDefaults.textButtonColors(contentColor = AccentDanger)
                 ) {
-                    Text(text = "全部清空", fontWeight = FontWeight.Bold)
+                    Text(text = "确认删除", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
