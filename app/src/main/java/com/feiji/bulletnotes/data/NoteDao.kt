@@ -32,6 +32,9 @@ interface NoteDao {
     @Update
     suspend fun updateNote(note: NoteEntity)
 
+    @Query("UPDATE notes SET content = :content, updatedAt = :updatedAt WHERE id = :id AND isDeleted = 0")
+    suspend fun updateNoteContent(id: Long, content: String, updatedAt: Long)
+
     @Update
     suspend fun updateNotes(notes: List<NoteEntity>)
 
