@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +23,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.clearFocus
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -87,6 +92,7 @@ import java.time.LocalDate
 @Composable
 fun BulletNotesScreen(viewModel: NoteViewModel) {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -102,10 +108,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
 
     val listState = rememberLazyListState()
-    val dragDropState = rememberDragDropState(
-        lazyListState = listState,
-        onMove = { from, to -> viewModel.reorderNotes(from, to) }
-    )
+
 
     // 显示提示 Toast
     LaunchedEffect(userMessage) {
@@ -123,6 +126,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
+                    .statusBarsPadding()
                     .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
             ) {
                 Row(
@@ -213,19 +217,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                 Spacer(modifier = Modifier.height(8.dp))
                 HorizontalDivider(color = LineBorder.copy(alpha = 0.6f))
             }
-        },
-        floatingActionButton = {
-            // 快速新增浮动按钮（当列表为空或想直接添加时使用）
-            FloatingActionButton(
-                onClick = {
-                    viewModel.insertNoteAfter(notes.lastOrNull(), "")
-                },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                shape = CircleShape
-            ) {
-                Icon(imageVector = Icons.Default.Add, contentDescription = "新增笔记")
-            }
         }
     ) { innerPadding ->
 
@@ -233,6 +224,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .clickable(enabled = editingNoteId != null) {
+                    viewModel.setEditingNoteId(null)
+                    focusManager.clearFocus()
+                }
         ) {
             if (notes.isEmpty()) {
                 Box(
@@ -251,7 +246,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "点击此处或右下角 + 开始记录",
+                            text = "点击此处开始记录",
                             style = MaterialTheme.typography.bodyMedium,
                             color = SlateMuted.copy(alpha = 0.7f)
                         )
@@ -262,7 +257,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     state = listState,
                     modifier = Modifier
                         .fillMaxSize()
-                        .dragContainer(dragDropState)
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -278,8 +272,16 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 noteToChangeDate = note
                             },
                             onContentClick = {
-                                viewModel.setEditingNoteId(note.id)
+                                if (editingNoteId == note.id) {
+                                    viewModel.setEditingNoteId(null)
+                                    focusManager.clearFocus()
+                                } else {
+                                    viewModel.setEditingNoteId(note.id)
+                                }
                             },
+                            onLongDragMove = { from, to -> viewModel.reorderNotes(from, to) },
+                            listIndex = index,
+                            listState = listState,
                             onContentChange = { newText ->
                                 viewModel.updateNoteContent(note.id, newText)
                             },
@@ -303,8 +305,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             trashNotes = trashNotes,
             onDismiss = { showTrashDialog = false },
             onRestore = { id -> viewModel.restoreFromTrash(id) },
-            onDeletePermanently = { id -> viewModel.permanentlyDelete(id) },
-            onClearAll = { viewModel.clearAllTrash() }
+            onDeleteOlderThanWeek = { viewModel.deleteTrashOlderThanWeek() }
         )
     }
 
@@ -366,7 +367,10 @@ fun BulletNoteRow(
     onContentClick: () -> Unit,
     onContentChange: (String) -> Unit,
     onEnterPressed: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onLongDragMove: (Int, Int) -> Unit,
+    listIndex: Int,
+    listState: androidx.compose.foundation.lazy.LazyListState
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -439,6 +443,33 @@ fun BulletNoteRow(
         Box(
             modifier = Modifier
                 .weight(1f)
+                .then(
+                    if (!isEditing) Modifier.pointerInput(note.id, listIndex) {
+                        var dragDistance = 0f
+                        var currentIndex = listIndex
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { dragDistance = 0f; currentIndex = listIndex },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragDistance += amount.y
+                                val visible = listState.layoutInfo.visibleItemsInfo
+                                val height = visible.firstOrNull { it.index == currentIndex }?.size?.toFloat() ?: 56f
+                                if (kotlin.math.abs(dragDistance) >= height * 0.65f) {
+                                    val target = currentIndex + if (dragDistance > 0) 1 else -1
+                                    if (target in 0 until listState.layoutInfo.totalItemsCount) {
+                                        currentIndex = target
+                                        dragDistance = 0f
+                                    }
+                                }
+                            },
+                            onDragEnd = {
+                                if (currentIndex != listIndex) onLongDragMove(listIndex, currentIndex)
+                                dragDistance = 0f
+                            },
+                            onDragCancel = { dragDistance = 0f }
+                        )
+                    } else Modifier
+                )
                 .clickable(enabled = !isEditing) { onContentClick() }
         ) {
             if (!isEditing) {
@@ -505,20 +536,7 @@ fun BulletNoteRow(
                         modifier = Modifier.size(18.dp)
                     )
                 }
-                IconButton(
-                    onClick = {
-                        keyboardController?.hide()
-                        onContentClick() // 退出编辑
-                    },
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "完成",
-                        tint = AccentPrimary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
+
             }
         }
     }
