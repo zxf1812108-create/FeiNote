@@ -17,6 +17,9 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE isDeleted = 1 ORDER BY updatedAt DESC")
     fun getDeletedNotes(): Flow<List<NoteEntity>>
 
+    @Query("SELECT * FROM notes WHERE id = :id LIMIT 1")
+    suspend fun getNoteById(id: Long): NoteEntity?
+
     @Query("SELECT * FROM notes WHERE isDeleted = 0")
     suspend fun getAllActiveNotes(): List<NoteEntity>
 
