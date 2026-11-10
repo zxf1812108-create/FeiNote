@@ -54,7 +54,7 @@ fun TrashBinDialog(
     trashNotes: List<NoteEntity>,
     onDismiss: () -> Unit,
     onRestore: (Long) -> Unit,
-    onDeleteOlderThanWeek: () -> Unit
+    onDeleteBeforeToday: () -> Unit
 ) {
     var showConfirmClearAllDialog by remember { mutableStateOf(false) }
 
@@ -103,12 +103,12 @@ fun TrashBinDialog(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DeleteForever,
-                                contentDescription = "删除一周前",
+                                contentDescription = "删除一天前",
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "删除一周前",
+                                text = "删除一天前",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -210,13 +210,13 @@ fun TrashBinDialog(
     if (showConfirmClearAllDialog) {
         AlertDialog(
             onDismissRequest = { showConfirmClearAllDialog = false },
-            title = { Text(text = "删除一周前的笔记", fontWeight = FontWeight.Bold) },
-            text = { Text(text = "仅永久删除进入回收站已超过7天的笔记。最近7天删除的笔记会保留。旧版本中无法确定删除时间的笔记也会保留。此操作无法撤销。") },
+            title = { Text(text = "删除一天前的笔记", fontWeight = FontWeight.Bold) },
+            text = { Text(text = "永久删除昨天及更早移入回收站的笔记，保留今天移入回收站的笔记。无法确定删除时间的旧笔记也会保留。此操作无法撤销。") },
             confirmButton = {
                 TextButton(
                     onClick = {
                         showConfirmClearAllDialog = false
-                        onDeleteOlderThanWeek()
+                        onDeleteBeforeToday()
                     },
                     colors = ButtonDefaults.textButtonColors(contentColor = AccentDanger)
                 ) {
