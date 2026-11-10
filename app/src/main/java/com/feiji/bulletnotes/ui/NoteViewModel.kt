@@ -29,7 +29,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val contentWriteMutex = Mutex()
 
     val dateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.CHINA)
-    val displayDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy年MM月dd日 EEEE", Locale.CHINA)
+    val displayDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yy-MM-dd", Locale.CHINA)
 
     // 今天日期
     private val _today = MutableStateFlow(LocalDate.now())
@@ -83,7 +83,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun selectDate(newDate: LocalDate) {
         _selectedDate.value = newDate
         _isToday.value = (newDate == _today.value)
-        _editingNoteId.value = null
+        setEditingNoteId(null)
     }
 
     /**
@@ -94,14 +94,27 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         _today.value = now
         _selectedDate.value = now
         _isToday.value = true
-        _editingNoteId.value = null
+        setEditingNoteId(null)
     }
 
     /**
      * 设置编辑中的笔记 ID
      */
     fun setEditingNoteId(id: Long?) {
+        val previousId = _editingNoteId.value
+        if (previousId == id) return
         _editingNoteId.value = id
+        if (previousId != null) {
+            // 与逐字保存共用互斥锁：先完成已经排队的文字写入，再检查空笔记。
+            viewModelScope.launch {
+                contentWriteMutex.withLock {
+                    val previous = noteDao.getNoteById(previousId)
+                    if (previous != null && !previous.isDeleted && previous.content.isBlank()) {
+                        noteDao.deletePermanently(previousId)
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -173,7 +186,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 orderIndex = newOrder
             )
             val newId = noteDao.insertNote(newNote)
-            _editingNoteId.value = newId
+            kotlinx.coroutines.withContext(Dispatchers.Main) { setEditingNoteId(newId) }
         }
     }
 
