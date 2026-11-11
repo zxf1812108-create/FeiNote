@@ -352,7 +352,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 if (editingNoteId == note.id) {
                                     closeEditor()
                                 } else {
-                                    focusManager.clearFocus()
+                                    // 在两条笔记之间切换时不要主动清除焦点，
+                                    // 否则输入法会先收起再弹出，造成列表大幅上下跳动。
+                                    // 新笔记的 LaunchedEffect(isEditing) 会主动请求焦点。
                                     viewModel.setEditingNoteId(note.id)
                                 }
                             },
