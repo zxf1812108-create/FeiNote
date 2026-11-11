@@ -9,6 +9,10 @@ import com.feiji.bulletnotes.data.BackupManager
 import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.NoteEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -69,30 +73,86 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val _userMessage = MutableStateFlow<String?>(null)
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
 
-    // 首次备份授权提示：每次应用进程最多提示一次，避免取消后反复弹窗。
+    // 文件夹首次授权与备份列表
     private val _needsBackupSetup = MutableStateFlow(false)
     val needsBackupSetup: StateFlow<Boolean> = _needsBackupSetup.asStateFlow()
-    private var backupPromptShown = false
+    private val _backupFiles = MutableStateFlow<List<BackupManager.BackupFile>>(emptyList())
+    val backupFiles: StateFlow<List<BackupManager.BackupFile>> = _backupFiles.asStateFlow()
+    private val backupMutex = Mutex()
+    private var lastSnapshot: String? = null
+    private var backupLoop: Job? = null
 
     fun dismissBackupSetup() { _needsBackupSetup.value = false }
 
-    fun onBackupDocumentSelected(uri: Uri, flags: Int) {
+    fun onBackupFolderSelected(uri: Uri, flags: Int) {
         _needsBackupSetup.value = false
         viewModelScope.launch(Dispatchers.IO) {
             val app = getApplication<Application>()
             try {
-                BackupManager.setBackupDocument(app, uri, flags)
-                val success = BackupManager.checkAndPerformDailyBackup(app, noteDao)
-                _userMessage.value = if (success) "今日备份已保存" else "备份未成功，请重新选择可写入的文件"
+                BackupManager.setBackupFolder(app, uri, flags)
+                backupMutex.withLock {
+                    BackupManager.cleanOldBackupsOncePerDay(app)
+                    val success = BackupManager.exportBackup(app, noteDao)
+                    if (success) lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                    _userMessage.value = if (success) "备份文件夹已设置，今日备份已保存" else "文件夹已设置，但备份写入失败"
+                }
+                startBackupLoop()
             } catch (e: Exception) {
-                _userMessage.value = "备份文件授权失败：${e.localizedMessage ?: "未知错误"}"
+                _userMessage.value = "备份文件夹授权失败：${e.localizedMessage ?: "未知错误"}"
+                _needsBackupSetup.value = true
+            }
+        }
+    }
+
+    fun loadBackupFiles() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _backupFiles.value = BackupManager.listBackups(getApplication())
+                if (_backupFiles.value.isEmpty()) _userMessage.value = "备份文件夹中没有可恢复的备份"
+            } catch (e: Exception) {
+                _backupFiles.value = emptyList()
+                _userMessage.value = "读取备份列表失败：${e.localizedMessage ?: "未知错误"}"
+            }
+        }
+    }
+
+    fun restoreSelectedBackup(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            backupMutex.withLock {
+                val app = getApplication<Application>()
+                val (ok, message) = BackupManager.restoreBackup(app, noteDao, uri)
+                _userMessage.value = message
+                if (ok) lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+            }
+        }
+    }
+
+    private fun startBackupLoop() {
+        if (backupLoop?.isActive == true) return
+        backupLoop = viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            if (!BackupManager.hasBackupFolder(app)) return@launch
+            try { BackupManager.cleanOldBackupsOncePerDay(app) } catch (e: Exception) {
+                _userMessage.value = "清理旧备份失败：${e.localizedMessage ?: "未知错误"}"
+            }
+            // 启动时记录当前数据；以后每分钟检查一次，有变化才覆盖当日文件。
+            lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+            while (isActive) {
+                delay(60_000L)
+                backupMutex.withLock {
+                    val current = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                    if (current != lastSnapshot) {
+                        if (BackupManager.exportBackup(app, noteDao)) lastSnapshot = current
+                        else _userMessage.value = "自动备份失败，请检查备份文件夹权限"
+                    }
+                }
             }
         }
     }
 
     init {
-        // App 启动时自动检查并执行每日首次自动备份
-        checkDailyBackup()
+        if (BackupManager.hasBackupFolder(application)) startBackupLoop()
+        else _needsBackupSetup.value = true
     }
 
     fun clearUserMessage() {
@@ -273,36 +333,4 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * 检查并执行每日首次自动备份
-     */
-    private fun checkDailyBackup() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val app = getApplication<Application>()
-            if (!BackupManager.hasBackupDocument(app)) {
-                if (!backupPromptShown) {
-                    backupPromptShown = true
-                    _needsBackupSetup.value = true
-                }
-            } else {
-                val result = BackupManager.checkAndPerformDailyBackup(app, noteDao)
-                if (!result && !BackupManager.hasBackupDocument(app) && !backupPromptShown) {
-                    backupPromptShown = true
-                    _needsBackupSetup.value = true
-                }
-            }
-        }
-    }
-
-    /**
-     * 恢复今天初始数据备份
-     */
-    fun restoreTodayBackup(onResult: (Boolean, String) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val app = getApplication<Application>()
-            val (success, message) = BackupManager.restoreTodayBackup(app, noteDao)
-            _userMessage.value = message
-            kotlinx.coroutines.withContext(Dispatchers.Main) { onResult(success, message) }
-        }
-    }
 }
