@@ -117,7 +117,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     val userMessage by viewModel.userMessage.collectAsState()
 
     var showTrashDialog by remember { mutableStateOf(false) }
-    var showRestoreConfirmDialog by remember { mutableStateOf(false) }
+    var showBackupPicker by remember { mutableStateOf(false) }
+    var backupToRestore by remember { mutableStateOf<com.feiji.bulletnotes.data.BackupManager.BackupFile?>(null) }
+    val backupFiles by viewModel.backupFiles.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
 
     // 点击当前编辑项之外的区域时，统一退出编辑并触发已有的空笔记清理逻辑。
@@ -135,8 +137,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var draggingOffset by remember { mutableStateOf(0f) }
     var dragAnchorTop by remember { mutableStateOf(0f) }
     var dragStartIndex by remember { mutableStateOf(-1) }
-    // 从编辑模式直接长按开始拖动时，禁用本次拖动的相邻项动画，避免键盘收起与列表动画叠加。
-    var suppressDragAnimation by remember { mutableStateOf(false) }
 
     LaunchedEffect(notes, draggingNoteId) {
         if (draggingNoteId == null) {
@@ -218,7 +218,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 closeEditor()
                                 if (isToday) {
                                     // 点击“今天”：弹出对话框询问用户是否恢复今天初始数据备份
-                                    showRestoreConfirmDialog = true
+                                    showBackupPicker = true
+                                    viewModel.loadBackupFiles()
                                 } else {
                                     // 点击“回到今天”：恢复今天
                                     viewModel.returnToToday()
@@ -314,7 +315,16 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         BulletNoteRow(
                             modifier = Modifier
                                 // 正在拖动的条目不参与 LazyColumn 的位置动画，避免双重动画造成反向跳动。
-                                .then(if (draggingNoteId != null && !suppressDragAnimation && draggingNoteId != note.id) Modifier.animateItem() else Modifier)
+                                // 位置动画配置必须保持稳定：不要在按下/松开时切换所有条目的 placementSpec。
+                                // 仅被拖动的条目禁用动画，避免与 graphicsLayer 的手指位移叠加。
+                                .then(
+                                    if (draggingNoteId == note.id) Modifier
+                                    else Modifier.animateItem(
+                                        fadeInSpec = null,
+                                        fadeOutSpec = null,
+                                        placementSpec = androidx.compose.animation.core.spring()
+                                    )
+                                )
                                 .zIndex(if (draggingNoteId == note.id) 1f else 0f)
                                 .graphicsLayer {
                                     if (draggingNoteId == note.id) {
@@ -347,8 +357,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 }
                             },
                             onDragStart = {
-                                // 记录拖动开始时是否正在编辑，避免键盘收起、编辑行缩短与相邻项动画同时发生。
-                                suppressDragAnimation = editingNoteId != null
+                                // 长按其他笔记开始拖动时，先结束之前笔记的编辑状态。
                                 closeEditor()
                                 val info = listState.layoutInfo.visibleItemsInfo
                                     .firstOrNull { it.key == note.id }
@@ -406,7 +415,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 draggingOffset = 0f
                                 dragAnchorTop = 0f
                                 dragStartIndex = -1
-                                suppressDragAnimation = false
                             },
                             onContentChange = { newText ->
                                 viewModel.updateNoteContent(note.id, newText)
@@ -447,34 +455,45 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         )
     }
 
-    // 点击“今天”弹出的恢复确认对话框
-    // 需求：“点击今日标签时弹出对话框，询问用户是否恢复今天初始数据备份，如果选是，则自动读取 Download 文件夹中的备份文件恢复数据。”
-    if (showRestoreConfirmDialog) {
+    // 点击“今天”显示授权文件夹中的备份列表，选择后确认覆盖恢复。
+    if (showBackupPicker) {
         AlertDialog(
-            onDismissRequest = { showRestoreConfirmDialog = false },
-            title = {
-                Text(text = "恢复数据备份", fontWeight = FontWeight.Bold)
-            },
+            onDismissRequest = { showBackupPicker = false },
+            title = { Text("选择要恢复的备份") },
             text = {
-                Text(text = "是否恢复今天初始数据备份？\n\n选择“是”将从系统的 Download 文件夹中读取《飞记每日自动备份.json》恢复数据。")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showRestoreConfirmDialog = false
-                        viewModel.restoreTodayBackup { _, _ -> }
+                Column {
+                    if (backupFiles.isEmpty()) {
+                        Text("没有找到飞记备份文件，或正在读取。")
+                    } else {
+                        backupFiles.forEach { file ->
+                            TextButton(onClick = {
+                                backupToRestore = file
+                                showBackupPicker = false
+                            }) { Text(file.name) }
+                        }
                     }
-                ) {
-                    Text(text = "是", fontWeight = FontWeight.Bold, color = AccentPrimary)
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { showRestoreConfirmDialog = false }) {
-                    Text(text = "取消")
-                }
-            }
+            confirmButton = { TextButton(onClick = {
+                viewModel.loadBackupFiles()
+            }) { Text("刷新") } },
+            dismissButton = { TextButton(onClick = { showBackupPicker = false }) { Text("取消") } }
         )
     }
+    backupToRestore?.let { file ->
+        AlertDialog(
+            onDismissRequest = { backupToRestore = null },
+            title = { Text("确认恢复备份") },
+            text = { Text("将使用「${file.name}」覆盖软件中现有的全部笔记数据。此操作无法撤销，是否继续？") },
+            confirmButton = { TextButton(onClick = {
+                backupToRestore = null
+                closeEditor()
+                viewModel.restoreSelectedBackup(file.uri)
+            }) { Text("确认覆盖恢复", color = AccentDanger) } },
+            dismissButton = { TextButton(onClick = { backupToRestore = null }) { Text("取消") } }
+        )
+    }
+
 }
 
 /**
