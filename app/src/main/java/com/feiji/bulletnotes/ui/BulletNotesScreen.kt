@@ -539,7 +539,7 @@ fun BulletNoteRow(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .padding(top = 2.dp)
+                .padding(top = 3.dp)
                 .then(
                     if (!isEditing) Modifier.pointerInput(note.id) {
                         detectDragGesturesAfterLongPress(
