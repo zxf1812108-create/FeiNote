@@ -661,7 +661,7 @@ fun BulletNoteRow(
                         modifier = Modifier.size(18.dp)
                     )
                 }
-
+                
             }
         }
     }
