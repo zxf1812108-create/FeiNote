@@ -70,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -106,6 +107,8 @@ import java.time.LocalDate
 fun BulletNotesScreen(viewModel: NoteViewModel) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
+    // 新建笔记期间的常驻焦点接力点，防止旧输入框失焦时键盘关闭。
+    val enterFocusBridge = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -276,6 +279,17 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                 .padding(innerPadding)
                 .clickable(enabled = editingNoteId != null) { closeEditor() }
         ) {
+            // 始终留在组合树中的极小输入框：只在回车新增笔记时暂时接管焦点。
+            // 新笔记的 BasicTextField 挂载后会自行 requestFocus()。
+            BasicTextField(
+                value = "",
+                onValueChange = {},
+                modifier = Modifier
+                    .size(1.dp)
+                    .alpha(0f)
+                    .focusRequester(enterFocusBridge),
+                keyboardOptions = KeyboardOptions.Default
+            )
             if (displayNotes.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -423,6 +437,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             },
                             onEnterPressed = {
                                 // 按回车新增下一条笔记，自动附加当前日期
+                                // 先将焦点转给常驻输入框，保证数据库插入期间输入法不失焦。
+                                enterFocusBridge.requestFocus()
                                 viewModel.insertNoteAfter(note, "")
                             },
                             onDelete = {
