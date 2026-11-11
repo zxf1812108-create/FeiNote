@@ -204,7 +204,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun cycleBulletType(note: NoteEntity) {
         viewModelScope.launch(Dispatchers.IO) {
-            val nextType = note.bulletType.next()
+            val nextType = if (note.bulletType == BulletType.BULLET_DOT) BulletType.SQUARE else BulletType.BULLET_DOT
             noteDao.updateNote(note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis()))
         }
     }
