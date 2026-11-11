@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
@@ -29,6 +32,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.BasicTextField
@@ -62,6 +67,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,6 +79,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -90,6 +97,8 @@ import com.feiji.bulletnotes.ui.theme.InkBlack
 import com.feiji.bulletnotes.ui.theme.LineBorder
 import com.feiji.bulletnotes.ui.theme.SlateMuted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -110,6 +119,14 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var showTrashDialog by remember { mutableStateOf(false) }
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
+
+    // 点击当前编辑项之外的区域时，统一退出编辑并触发已有的空笔记清理逻辑。
+    fun closeEditor() {
+        if (editingNoteId != null) {
+            viewModel.setEditingNoteId(null)
+            focusManager.clearFocus()
+        }
+    }
 
     val listState = rememberLazyListState()
     // 拖动期间只更新内存中的显示顺序；松手后再保存到数据库。
@@ -149,6 +166,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
+                    // 顶栏的空白区域也可结束编辑；日期、今天、回收站等子控件仍可正常点击。
+                    .clickable(enabled = editingNoteId != null) { closeEditor() }
                     .statusBarsPadding()
                     .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
             ) {
@@ -161,6 +180,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
+                                closeEditor()
                                 DatePickerHelper.show(
                                     context = context,
                                     initialDate = selectedDate,
@@ -193,6 +213,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable {
+                                closeEditor()
                                 if (isToday) {
                                     // 点击“今天”：弹出对话框询问用户是否恢复今天初始数据备份
                                     showRestoreConfirmDialog = true
@@ -226,7 +247,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     // 右上角：回收站标识
                     // 不显示删除的笔记数量，点击显示回收站列表
                     IconButton(
-                        onClick = { showTrashDialog = true },
+                        onClick = {
+                            closeEditor()
+                            showTrashDialog = true
+                        },
                         modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
@@ -247,10 +271,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .clickable(enabled = editingNoteId != null) {
-                    viewModel.setEditingNoteId(null)
-                    focusManager.clearFocus()
-                }
+                .clickable(enabled = editingNoteId != null) { closeEditor() }
         ) {
             if (displayNotes.isEmpty()) {
                 Box(
@@ -280,7 +301,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     state = listState,
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        // 键盘出现时缩小列表可见区域，使列表能够滚动到键盘上方。
+                        .imePadding(),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     itemsIndexed(displayNotes, key = { _, note -> note.id }) { index, note ->
@@ -304,20 +327,26 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 },
                             note = note,
                             isEditing = isEditing,
-                            onBulletClick = { viewModel.cycleBulletType(note) },
+                            onBulletClick = {
+                                if (editingNoteId != note.id) closeEditor()
+                                viewModel.cycleBulletType(note)
+                            },
                             onBulletLongClick = {
+                                closeEditor()
                                 // 长按标识符弹出日期选择对话框
                                 noteToChangeDate = note
                             },
                             onContentClick = {
                                 if (editingNoteId == note.id) {
-                                    viewModel.setEditingNoteId(null)
-                                    focusManager.clearFocus()
+                                    closeEditor()
                                 } else {
+                                    focusManager.clearFocus()
                                     viewModel.setEditingNoteId(note.id)
                                 }
                             },
                             onDragStart = {
+                                // 长按其他笔记开始拖动时，先结束之前笔记的编辑状态。
+                                closeEditor()
                                 val info = listState.layoutInfo.visibleItemsInfo
                                     .firstOrNull { it.key == note.id }
                                 if (info != null) {
@@ -467,6 +496,8 @@ fun BulletNoteRow(
     onDragFinish: () -> Unit
 ) {
     val focusRequester = remember { FocusRequester() }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val density = LocalDensity.current
     // 只在进入编辑状态时初始化光标；输入过程中保持 TextFieldValue 的选区。
     var editValue by remember(note.id, isEditing) {
         mutableStateOf(TextFieldValue(note.content, selection = TextRange(note.content.length)))
@@ -475,11 +506,18 @@ fun BulletNoteRow(
     LaunchedEffect(isEditing) {
         if (isEditing) {
             focusRequester.requestFocus()
+            // 等待输入法实际出现、LazyColumn 重新测量可见高度后，再滚动当前笔记。
+            // 不使用固定屏幕坐标，兼容不同键盘高度与屏幕尺寸。
+            snapshotFlow { WindowInsets.ime.getBottom(density) }
+                .first { it > 0 }
+            delay(100)
+            bringIntoViewRequester.bringIntoView()
         }
     }
 
     Row(
         modifier = modifier
+            .bringIntoViewRequester(bringIntoViewRequester)
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
             .background(if (isEditing) MaterialTheme.colorScheme.surface else Color.Transparent)
