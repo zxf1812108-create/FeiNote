@@ -19,6 +19,13 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -45,12 +52,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -86,7 +91,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -121,6 +125,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     val userMessage by viewModel.userMessage.collectAsState()
 
     var showTrashDialog by remember { mutableStateOf(false) }
+    var trashBounds by remember { mutableStateOf<Rect?>(null) }
+    var hoveringTrash by remember { mutableStateOf(false) }
     var showBackupPicker by remember { mutableStateOf(false) }
     var backupToRestore by remember { mutableStateOf<com.feiji.bulletnotes.data.BackupManager.BackupFile?>(null) }
     val backupFiles by viewModel.backupFiles.collectAsState()
@@ -202,11 +208,11 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface)
+                    .background(MaterialTheme.colorScheme.background)
                     // 顶栏的空白区域也可结束编辑；日期、今天、回收站等子控件仍可正常点击。
                     .clickable(enabled = editingNoteId != null) { closeEditor() }
                     .statusBarsPadding()
-                    .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
+                    .padding(top = 4.dp, start = 16.dp, end = 16.dp, bottom = 4.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -230,7 +236,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(vertical = 4.dp, horizontal = 4.dp)
+                            modifier = Modifier.padding(vertical = 2.dp, horizontal = 4.dp)
                         ) {
                             Text(
                                 text = selectedDate.format(viewModel.displayDateFormatter) + " " + "一二三四五六日"[selectedDate.dayOfWeek.value - 1],
@@ -245,62 +251,42 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 
                     // 日期显示区域右边：日期标识区域
                     // 初始/今天时显示“今天”，非今天时显示“回到今天”
-                    // 点击“回到今天”恢复今天；点击“今天”弹出恢复今日初始数据备份询问对话框
                     Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                closeEditor()
-                                if (isToday) {
-                                    // 点击“今天”：弹出对话框询问用户是否恢复今天初始数据备份
-                                    showBackupPicker = true
-                                    viewModel.loadBackupFiles()
-                                } else {
-                                    // 点击“回到今天”：恢复今天
-                                    viewModel.returnToToday()
-                                }
-                            },
-                        color = if (isToday) {
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                        } else {
-                            AccentPrimary.copy(alpha = 0.15f)
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable {
+                            closeEditor()
+                            if (!isToday) viewModel.returnToToday()
                         },
-                        shape = RoundedCornerShape(6.dp)
+                        color = Color.Transparent
                     ) {
                         Text(
                             text = if (isToday) "今天" else "回到今天",
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (isToday) {
-                                MaterialTheme.colorScheme.onPrimaryContainer
-                            } else {
-                                AccentPrimary
-                            }
+                            color = if (isToday) MaterialTheme.colorScheme.onSurface else AccentPrimary
                         )
                     }
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    // 右上角：回收站标识
-                    // 不显示删除的笔记数量，点击显示回收站列表
-                    IconButton(
-                        onClick = {
-                            closeEditor()
-                            showTrashDialog = true
-                        },
+                    Box(
                         modifier = Modifier.size(40.dp)
+                            .onGloballyPositioned { trashBounds = it.boundsInRoot() }
+                            .clip(CircleShape)
+                            .background(if (hoveringTrash) AccentDanger.copy(alpha = 0.2f) else Color.Transparent)
+                            .combinedClickable(
+                                onClick = { closeEditor(); showTrashDialog = true },
+                                onLongClick = {
+                                    closeEditor()
+                                    showBackupPicker = true
+                                    viewModel.loadBackupFiles()
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Delete,
-                            contentDescription = "回收站",
-                            tint = SlateMuted
-                        )
+                        Icon(Icons.Outlined.Delete, contentDescription = "回收站", tint = if (hoveringTrash) AccentDanger else SlateMuted)
                     }
                 }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                HorizontalDivider(color = LineBorder.copy(alpha = 0.6f))
             }
         }
     ) { innerPadding ->
@@ -405,6 +391,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 }
                             },
                             onDragStart = {
+                                hoveringTrash = false
                                 // 长按其他笔记开始拖动时，先结束之前笔记的编辑状态。
                                 closeEditor()
                                 val info = listState.layoutInfo.visibleItemsInfo
@@ -416,10 +403,12 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                     draggingNoteId = note.id
                                 }
                             },
-                            onDragDelta = { delta ->
+                            onDragDelta = dragDelta@{ delta, pointerRoot ->
+                                hoveringTrash = trashBounds?.contains(pointerRoot) == true
                                 if (draggingNoteId == note.id) {
                                     // 不在交换位置时重置或减去拖动距离。
                                     draggingOffset += delta
+                                    if (hoveringTrash) return@dragDelta
                                     val current = displayNotes.indexOfFirst { it.id == note.id }
                                     val visible = listState.layoutInfo.visibleItemsInfo
                                     val dragged = visible.firstOrNull { it.key == note.id }
@@ -452,13 +441,17 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                     }
                                 }
                             },
-                            onDragFinish = {
-                                if (draggingNoteId == note.id) {
+                            onDragFinish = { pointerRoot ->
+                                val deleteOnDrop = pointerRoot != null && trashBounds?.contains(pointerRoot) == true
+                                if (draggingNoteId == note.id && deleteOnDrop) {
+                                    viewModel.moveToTrash(note.id)
+                                } else if (draggingNoteId == note.id) {
                                     val endIndex = displayNotes.indexOfFirst { it.id == note.id }
                                     if (dragStartIndex >= 0 && endIndex >= 0 && dragStartIndex != endIndex) {
                                         viewModel.reorderNotes(dragStartIndex, endIndex)
                                     }
                                 }
+                                hoveringTrash = false
                                 draggingNoteId = null
                                 draggingOffset = 0f
                                 dragAnchorTop = 0f
@@ -473,9 +466,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 pendingNewNoteScrollFromId = note.id
                                 enterFocusBridge.requestFocus()
                                 viewModel.insertNoteAfter(note, "")
-                            },
-                            onDelete = {
-                                viewModel.moveToTrash(note.id)
                             }
                         )
                     }
@@ -564,13 +554,16 @@ fun BulletNoteRow(
     onContentClick: () -> Unit,
     onContentChange: (String) -> Unit,
     onEnterPressed: () -> Unit,
-    onDelete: () -> Unit,
     onDragStart: () -> Unit,
-    onDragDelta: (Float) -> Unit,
-    onDragFinish: () -> Unit
+    onDragDelta: (Float, Offset) -> Unit,
+    onDragFinish: (Offset?) -> Unit
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val caretRequester = remember { BringIntoViewRequester() }
+    var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var dragCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var lastDragRoot by remember { mutableStateOf<Offset?>(null) }
     val density = LocalDensity.current
     val imeInsets = WindowInsets.ime
     // 只在进入编辑状态时初始化光标；输入过程中保持 TextFieldValue 的选区。
@@ -587,6 +580,17 @@ fun BulletNoteRow(
                 .first { it > 0 }
             delay(100)
             bringIntoViewRequester.bringIntoView()
+        }
+    }
+
+    LaunchedEffect(isEditing, editValue.text, editValue.selection, textLayout) {
+        if (isEditing && imeInsets.getBottom(density) > 0) {
+            withFrameNanos { }
+            textLayout?.let { layout ->
+                val cursor = layout.getCursorRect(editValue.selection.end.coerceIn(0, editValue.text.length))
+                val extra = with(density) { 8.dp.toPx() }
+                caretRequester.bringIntoView(Rect(cursor.left, cursor.top, cursor.right + extra, cursor.bottom + extra))
+            }
         }
     }
 
@@ -620,20 +624,7 @@ fun BulletNoteRow(
                     )
                 }
                 BulletType.CHECKED -> {
-                    // 对勾
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .background(AccentPrimary, RoundedCornerShape(3.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = "已完成",
-                            tint = Color.White,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
+                    Box(modifier = Modifier.size(16.dp).border(1.5.dp, CharcoalGray, RoundedCornerShape(3.dp)))
                 }
                 BulletType.BULLET_DOT -> {
                     // 实心圆点
@@ -654,17 +645,25 @@ fun BulletNoteRow(
                 .weight(1f)
                 .padding(top = 4.dp)
                 .then(
-                    if (!isEditing) Modifier.pointerInput(note.id) {
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = { onDragStart() },
-                            onDrag = { change, amount ->
-                                change.consume()
-                                onDragDelta(amount.y)
-                            },
-                            onDragEnd = onDragFinish,
-                            onDragCancel = onDragFinish
-                        )
-                    } else Modifier
+                    if (!isEditing) Modifier
+                        .onGloballyPositioned { dragCoordinates = it }
+                        .pointerInput(note.id) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { point ->
+                                    lastDragRoot = dragCoordinates?.localToRoot(point)
+                                    onDragStart()
+                                },
+                                onDrag = { change, amount ->
+                                    change.consume()
+                                    dragCoordinates?.localToRoot(change.position)?.let { root ->
+                                        lastDragRoot = root
+                                        onDragDelta(amount.y, root)
+                                    }
+                                },
+                                onDragEnd = { onDragFinish(lastDragRoot); lastDragRoot = null },
+                                onDragCancel = { onDragFinish(null); lastDragRoot = null }
+                            )
+                        } else Modifier
                 )
                 .clickable(enabled = !isEditing) { onContentClick() }
         ) {
@@ -673,8 +672,7 @@ fun BulletNoteRow(
                 Text(
                     text = note.content,
                     style = MaterialTheme.typography.bodyLarge.copy(
-                        textDecoration = if (note.bulletType == BulletType.CHECKED) TextDecoration.LineThrough else TextDecoration.None,
-                        color = if (note.bulletType == BulletType.CHECKED) SlateMuted else MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface
                     ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -689,6 +687,7 @@ fun BulletNoteRow(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewRequester(caretRequester)
                         .focusRequester(focusRequester)
                         .onKeyEvent { keyEvent ->
                             if (keyEvent.key == Key.Enter) {
@@ -702,6 +701,7 @@ fun BulletNoteRow(
                         color = MaterialTheme.colorScheme.onSurface
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    onTextLayout = { textLayout = it },
                     keyboardOptions = KeyboardOptions.Default.copy(
                         imeAction = ImeAction.Next
                     ),
@@ -721,22 +721,5 @@ fun BulletNoteRow(
             }
         }
 
-        // 编辑状态下的右侧辅助操作（完成、移入回收站）
-        if (isEditing) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = onDelete,
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteOutline,
-                        contentDescription = "删除",
-                        tint = AccentDanger,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-            }
-        }
     }
 }
