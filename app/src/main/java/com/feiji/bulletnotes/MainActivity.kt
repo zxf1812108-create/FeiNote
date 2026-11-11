@@ -29,6 +29,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun BackupSetupPrompt(viewModel: NoteViewModel) {
     val needsSetup by viewModel.needsBackupSetup.collectAsState()
+    val todayBackupPrompt by viewModel.todayBackupPrompt.collectAsState()
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
@@ -51,6 +52,19 @@ private fun BackupSetupPrompt(viewModel: NoteViewModel) {
                 }) { Text("选择文件夹") }
             },
             dismissButton = { TextButton(onClick = { viewModel.dismissBackupSetup() }) { Text("稍后设置") } }
+        )
+    }
+    if (todayBackupPrompt != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.skipTodayBackupRestore() },
+            title = { Text("发现今天的备份") },
+            text = { Text("备份文件夹中存在今天的备份文件：${todayBackupPrompt?.name}。是否使用这份备份覆盖恢复飞记中的笔记数据？") },
+            confirmButton = {
+                TextButton(onClick = { viewModel.restoreTodayBackupFromPrompt() }) { Text("恢复备份") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.skipTodayBackupRestore() }) { Text("暂不恢复") }
+            }
         )
     }
 }
