@@ -32,6 +32,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.input.pointer.pointerInput
@@ -133,6 +134,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         }
     }
 
+    val densityForNewNoteScroll = LocalDensity.current
     val listState = rememberLazyListState()
     // 拖动期间只更新内存中的显示顺序；松手后再保存到数据库。
     val displayNotes = remember { mutableStateListOf<NoteEntity>() }
@@ -140,6 +142,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var draggingOffset by remember { mutableStateOf(0f) }
     var dragAnchorTop by remember { mutableStateOf(0f) }
     var dragStartIndex by remember { mutableStateOf(-1) }
+    // 仅回车新增笔记时触发精准滚动，不影响点击其他笔记。
+    var pendingNewNoteScrollFromId by remember { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(notes, draggingNoteId) {
         if (draggingNoteId == null) {
@@ -154,6 +158,34 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         }
     }
 
+
+    // 新笔记进入列表后，确保整行位于键盘上方。
+    // 不等待键盘重新弹出（键盘已由常驻输入框保持开启）。
+    LaunchedEffect(editingNoteId, displayNotes.size, pendingNewNoteScrollFromId) {
+        val previousId = pendingNewNoteScrollFromId ?: return@LaunchedEffect
+        val targetId = editingNoteId ?: return@LaunchedEffect
+        if (targetId == previousId) return@LaunchedEffect
+        val targetIndex = displayNotes.indexOfFirst { it.id == targetId }
+        if (targetIndex < 0) return@LaunchedEffect
+
+        // 等待新条目布局完成，再按实际遮挡量移动，避免跳到列表顶部。
+        repeat(5) {
+            androidx.compose.runtime.withFrameNanos { }
+            val layout = listState.layoutInfo
+            val target = layout.visibleItemsInfo.firstOrNull { it.key == targetId }
+            val clearance = with(densityForNewNoteScroll) { 12.dp.toPx() }
+            if (target != null) {
+                val overlap = target.offset + target.size + clearance - layout.viewportEndOffset
+                if (overlap > 0f) listState.animateScrollBy(overlap)
+                pendingNewNoteScrollFromId = null
+                return@LaunchedEffect
+            }
+            // 新行恰好落在屏幕外时，先只向下滚动约一行，再重新测量。
+            val estimatedRow = layout.visibleItemsInfo.lastOrNull()?.size?.toFloat() ?: 56f
+            listState.animateScrollBy(estimatedRow + clearance)
+        }
+        pendingNewNoteScrollFromId = null
+    }
 
     // 显示提示 Toast
     LaunchedEffect(userMessage) {
@@ -438,6 +470,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             onEnterPressed = {
                                 // 按回车新增下一条笔记，自动附加当前日期
                                 // 先将焦点转给常驻输入框，保证数据库插入期间输入法不失焦。
+                                pendingNewNoteScrollFromId = note.id
                                 enterFocusBridge.requestFocus()
                                 viewModel.insertNoteAfter(note, "")
                             },
