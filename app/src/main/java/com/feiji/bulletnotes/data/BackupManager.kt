@@ -80,6 +80,13 @@ object BackupManager {
             .sortedByDescending { backupDate(it.name) }
     }
 
+    /** 查找当前日期的备份；仅匹配严格的“飞记备份 yyMMdd(.json)”命名。 */
+    suspend fun findTodayBackup(context: Context): BackupFile? = withContext(Dispatchers.IO) {
+        if (!hasBackupFolder(context)) return@withContext null
+        val expected = "飞记备份 ${LocalDate.now().format(nameDate)}"
+        children(context).firstOrNull { it.name == "$expected.json" || it.name == expected }
+    }
+
     /** 仅首次打开时清理：保留今天及过去三天的日期，其他文件绝不触碰。 */
     suspend fun cleanOldBackupsOncePerDay(context: Context): Int = withContext(Dispatchers.IO) {
         if (!hasBackupFolder(context)) return@withContext 0
