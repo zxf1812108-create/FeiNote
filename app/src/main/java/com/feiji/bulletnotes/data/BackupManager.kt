@@ -54,10 +54,8 @@ object BackupManager {
                     atomic.failWrite(stream)
                     throw e
                 }
-                // 外部文件只是副本，写入失败不破坏已成功保存的私有快照。
-                try { mirrorToDownloads(context, bytes) } catch (e: Exception) {
-                    android.util.Log.w("FeiJiBackup", "Download mirror failed", e)
-                }
+                // 私有快照已安全写入；若公共副本失败，不记录“今天已备份”，下次启动重试。
+                mirrorToDownloads(context, bytes)
                 true
             } catch (e: Exception) {
                 android.util.Log.e("FeiJiBackup", "Daily backup failed", e)
@@ -65,29 +63,61 @@ object BackupManager {
             }
         }
 
+    /**
+     * 在公共 Download 目录保留一个固定名称的备份文件。
+     * Android 10+ 优先复用此前保存的 URI；若 URI 丢失，则查找本应用可访问的同名文件。
+     * 不主动删除无法确认归属的其他文件。
+     */
     private fun mirrorToDownloads(context: Context, bytes: ByteArray) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val resolver = context.contentResolver
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
             val saved = prefs.getString(KEY_PUBLIC_BACKUP_URI, null)?.let(Uri::parse)
-            var uri: Uri? = saved
-            if (uri != null) {
-                try {
-                    resolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
-                        ?: error("Cannot open existing backup")
-                    return
-                } catch (_: Exception) {
-                    // Previously saved URI may have been deleted or become inaccessible.
-                    uri = null
+
+            fun overwrite(uri: Uri): Boolean {
+                return try {
+                    val stream = resolver.openOutputStream(uri, "rwt") ?: return false
+                    stream.use {
+                        it.write(bytes)
+                        it.flush()
+                    }
+                    prefs.edit().putString(KEY_PUBLIC_BACKUP_URI, uri.toString()).commit()
+                    true
+                } catch (e: Exception) {
+                    android.util.Log.w("FeiJiBackup", "Cannot overwrite existing Download backup", e)
+                    false
                 }
             }
+
+            if (saved != null && overwrite(saved)) return
+
+            // URI 可能因应用数据清除而丢失：尝试找回可写的同名文件。
+            val candidates = mutableListOf<Uri>()
+            val projection = arrayOf(MediaStore.MediaColumns._ID)
+            val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+            resolver.query(
+                collection, projection, selection,
+                arrayOf(BACKUP_FILE_NAME, Environment.DIRECTORY_DOWNLOADS + "/"),
+                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+            )?.use { cursor ->
+                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                while (cursor.moveToNext()) {
+                    candidates.add(android.content.ContentUris.withAppendedId(collection, cursor.getLong(idColumn)))
+                }
+            }
+            for (candidate in candidates) {
+                if (overwrite(candidate)) return
+            }
+
+            // 仅当找不到可写的现有文件时才创建，避免每天 insert 产生 (1)、(2)。
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, BACKUP_FILE_NAME)
                 put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val created = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            val created = resolver.insert(collection, values)
                 ?: error("Could not create Download backup")
             try {
                 resolver.openOutputStream(created, "w")?.use { it.write(bytes) }
@@ -95,7 +125,7 @@ object BackupManager {
                 resolver.update(created, ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
                 }, null, null)
-                prefs.edit().putString(KEY_PUBLIC_BACKUP_URI, created.toString()).apply()
+                prefs.edit().putString(KEY_PUBLIC_BACKUP_URI, created.toString()).commit()
             } catch (e: Exception) {
                 resolver.delete(created, null, null)
                 throw e
