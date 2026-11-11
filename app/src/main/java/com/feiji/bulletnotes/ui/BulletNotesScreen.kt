@@ -720,6 +720,6 @@ fun BulletNoteRow(
                 )
             }
         }
-        
+
     }
 }
