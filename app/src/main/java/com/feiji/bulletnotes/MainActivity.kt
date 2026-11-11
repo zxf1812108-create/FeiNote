@@ -1,5 +1,6 @@
 package com.feiji.bulletnotes
 
+import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -19,67 +20,37 @@ import com.feiji.bulletnotes.ui.theme.FeiJiTheme
 
 class MainActivity : ComponentActivity() {
     private val viewModel: NoteViewModel by viewModels()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            FeiJiTheme {
-                BackupSetupPrompt(viewModel)
-            }
-        }
+        setContent { FeiJiTheme { BackupSetupPrompt(viewModel) } }
     }
 }
 
 @Composable
 private fun BackupSetupPrompt(viewModel: NoteViewModel) {
     val needsSetup by viewModel.needsBackupSetup.collectAsState()
-    val openExisting = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
-                viewModel.onBackupDocumentSelected(uri, result.data?.flags ?: 0)
+                viewModel.onBackupFolderSelected(uri, result.data?.flags ?: 0)
             }
         }
     }
-    val createNew = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            result.data?.data?.let { uri ->
-                viewModel.onBackupDocumentSelected(uri, result.data?.flags ?: 0)
-            }
-        }
-    }
-
     BulletNotesScreen(viewModel = viewModel)
-
     if (needsSetup) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissBackupSetup() },
-            title = { Text("设置每日自动备份") },
-            text = { Text("为避免 Download 文件夹出现（1）、（2）等重复备份，请先选择已有的‘飞记每日自动备份.json’，授予飞记覆盖权限。若没有该文件，可新建一个。之后每天首次打开时自动覆盖，不再新建文件。") },
+            title = { Text("设置自动备份文件夹") },
+            text = { Text("请选择一个文件夹并授权飞记读写。笔记变化后每分钟检查并备份；同一天覆盖同名文件，每天首次打开时清理三天以前的飞记备份。") },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.dismissBackupSetup()
-                    openExisting.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/*"
+                    folderPicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
                     })
-                }) { Text("选择已有文件") }
+                }) { Text("选择文件夹") }
             },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewModel.dismissBackupSetup()
-                    createNew.launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "application/json"
-                        putExtra(Intent.EXTRA_TITLE, "飞记每日自动备份.json")
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-                    })
-                }) { Text("新建文件") }
-            }
+            dismissButton = { TextButton(onClick = { viewModel.dismissBackupSetup() }) { Text("稍后设置") } }
         )
     }
 }
