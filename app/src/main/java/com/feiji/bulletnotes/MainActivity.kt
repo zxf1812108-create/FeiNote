@@ -29,7 +29,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun BackupSetupPrompt(viewModel: NoteViewModel) {
     val needsSetup by viewModel.needsBackupSetup.collectAsState()
-    val todayBackupPrompt by viewModel.todayBackupPrompt.collectAsState()
+    val todayBackupPrompt: com.feiji.bulletnotes.data.BackupManager.BackupFile? by viewModel.todayBackupPrompt.collectAsState()
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
