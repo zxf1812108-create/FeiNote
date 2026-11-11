@@ -312,7 +312,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         BulletNoteRow(
                             modifier = Modifier
                                 // 正在拖动的条目不参与 LazyColumn 的位置动画，避免双重动画造成反向跳动。
-                                .then(if (draggingNoteId == note.id || editingNoteId != null) Modifier else Modifier.animateItem())
+                                .then(if (draggingNoteId != null && draggingNoteId != note.id) Modifier.animateItem() else Modifier)
                                 .zIndex(if (draggingNoteId == note.id) 1f else 0f)
                                 .graphicsLayer {
                                     if (draggingNoteId == note.id) {
