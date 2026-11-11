@@ -78,6 +78,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     val needsBackupSetup: StateFlow<Boolean> = _needsBackupSetup.asStateFlow()
     private val _backupFiles = MutableStateFlow<List<BackupManager.BackupFile>>(emptyList())
     val backupFiles: StateFlow<List<BackupManager.BackupFile>> = _backupFiles.asStateFlow()
+    private val _todayBackupPrompt = MutableStateFlow<BackupManager.BackupFile?>(null)
+    val todayBackupPrompt: StateFlow<BackupManager.BackupFile?> = _todayBackupPrompt.asStateFlow()
     private val backupMutex = Mutex()
     private var lastSnapshot: String? = null
     private var backupLoop: Job? = null
@@ -92,15 +94,51 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 BackupManager.setBackupFolder(app, uri, flags)
                 backupMutex.withLock {
                     BackupManager.cleanOldBackupsOncePerDay(app)
+                    // 必须先检查当天备份，再决定是否写入；否则初始化备份会覆盖待恢复文件。
+                    val todayBackup = BackupManager.findTodayBackup(app)
+                    if (todayBackup != null) {
+                        _todayBackupPrompt.value = todayBackup
+                        _userMessage.value = "发现当天备份，请选择是否恢复"
+                        return@withLock
+                    }
                     val success = BackupManager.exportBackup(app, noteDao)
                     if (success) lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
                     _userMessage.value = if (success) "备份文件夹已设置，今日备份已保存" else "文件夹已设置，但备份写入失败"
                 }
-                startBackupLoop()
+                if (_todayBackupPrompt.value == null) startBackupLoop()
             } catch (e: Exception) {
                 _userMessage.value = "备份文件夹授权失败：${e.localizedMessage ?: "未知错误"}"
                 _needsBackupSetup.value = true
             }
+        }
+    }
+
+    /** 用户确认恢复首次选择文件夹时发现的当天备份。 */
+    fun restoreTodayBackupFromPrompt() {
+        val backup = _todayBackupPrompt.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            backupMutex.withLock {
+                val app = getApplication<Application>()
+                val (ok, message) = BackupManager.restoreBackup(app, noteDao, backup.uri)
+                _userMessage.value = message
+                if (ok) {
+                    lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                    _todayBackupPrompt.value = null
+                }
+            }
+            if (_todayBackupPrompt.value == null) startBackupLoop()
+        }
+    }
+
+    /** 用户选择暂不恢复：保留当前数据库，并以当前内容作为自动备份比较基线。 */
+    fun skipTodayBackupRestore() {
+        if (_todayBackupPrompt.value == null) return
+        _todayBackupPrompt.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            backupMutex.withLock {
+                lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+            }
+            startBackupLoop()
         }
     }
 
