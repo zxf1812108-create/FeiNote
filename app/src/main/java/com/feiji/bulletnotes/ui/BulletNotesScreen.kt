@@ -489,7 +489,6 @@ fun BulletNoteRow(
         // 标识符区域：方框 (SQUARE) / 对勾 (CHECKED) / 实心圆点 (BULLET_DOT)
         Box(
             modifier = Modifier
-                .padding(top = 4.dp)
                 .size(28.dp)
                 .clip(RoundedCornerShape(4.dp))
                 .combinedClickable(
@@ -540,6 +539,7 @@ fun BulletNoteRow(
         Box(
             modifier = Modifier
                 .weight(1f)
+                .padding(top = 2.dp)
                 .then(
                     if (!isEditing) Modifier.pointerInput(note.id) {
                         detectDragGesturesAfterLongPress(
@@ -558,7 +558,7 @@ fun BulletNoteRow(
             if (!isEditing) {
                 // 非编辑状态：当内容超过一行时，只显示一行内容 (maxLines = 1, TextOverflow.Ellipsis)
                 Text(
-                    text = if (note.content.isBlank()) "空笔记" else note.content,
+                    text = note.content,
                     style = MaterialTheme.typography.bodyLarge.copy(
                         textDecoration = if (note.bulletType == BulletType.CHECKED) TextDecoration.LineThrough else TextDecoration.None,
                         color = if (note.bulletType == BulletType.CHECKED) SlateMuted else MaterialTheme.colorScheme.onSurface
