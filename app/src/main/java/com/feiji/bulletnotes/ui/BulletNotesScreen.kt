@@ -498,6 +498,7 @@ fun BulletNoteRow(
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val density = LocalDensity.current
+    val imeInsets = WindowInsets.ime
     // 只在进入编辑状态时初始化光标；输入过程中保持 TextFieldValue 的选区。
     var editValue by remember(note.id, isEditing) {
         mutableStateOf(TextFieldValue(note.content, selection = TextRange(note.content.length)))
@@ -508,7 +509,7 @@ fun BulletNoteRow(
             focusRequester.requestFocus()
             // 等待输入法实际出现、LazyColumn 重新测量可见高度后，再滚动当前笔记。
             // 不使用固定屏幕坐标，兼容不同键盘高度与屏幕尺寸。
-            snapshotFlow { WindowInsets.ime.getBottom(density) }
+            snapshotFlow { imeInsets.getBottom(density) }
                 .first { it > 0 }
             delay(100)
             bringIntoViewRequester.bringIntoView()
