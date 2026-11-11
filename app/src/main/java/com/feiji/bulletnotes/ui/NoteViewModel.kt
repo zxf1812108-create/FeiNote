@@ -1,6 +1,7 @@
 package com.feiji.bulletnotes.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.feiji.bulletnotes.data.AppDatabase
@@ -67,6 +68,27 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     // 提示信息 / Toast 弹窗
     private val _userMessage = MutableStateFlow<String?>(null)
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
+
+    // 首次备份授权提示：每次应用进程最多提示一次，避免取消后反复弹窗。
+    private val _needsBackupSetup = MutableStateFlow(false)
+    val needsBackupSetup: StateFlow<Boolean> = _needsBackupSetup.asStateFlow()
+    private var backupPromptShown = false
+
+    fun dismissBackupSetup() { _needsBackupSetup.value = false }
+
+    fun onBackupDocumentSelected(uri: Uri, flags: Int) {
+        _needsBackupSetup.value = false
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            try {
+                BackupManager.setBackupDocument(app, uri, flags)
+                val success = BackupManager.checkAndPerformDailyBackup(app, noteDao)
+                _userMessage.value = if (success) "今日备份已保存" else "备份未成功，请重新选择可写入的文件"
+            } catch (e: Exception) {
+                _userMessage.value = "备份文件授权失败：${e.localizedMessage ?: "未知错误"}"
+            }
+        }
+    }
 
     init {
         // App 启动时自动检查并执行每日首次自动备份
@@ -257,7 +279,18 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private fun checkDailyBackup() {
         viewModelScope.launch(Dispatchers.IO) {
             val app = getApplication<Application>()
-            BackupManager.checkAndPerformDailyBackup(app, noteDao)
+            if (!BackupManager.hasBackupDocument(app)) {
+                if (!backupPromptShown) {
+                    backupPromptShown = true
+                    _needsBackupSetup.value = true
+                }
+            } else {
+                val result = BackupManager.checkAndPerformDailyBackup(app, noteDao)
+                if (!result && !BackupManager.hasBackupDocument(app) && !backupPromptShown) {
+                    backupPromptShown = true
+                    _needsBackupSetup.value = true
+                }
+            }
         }
     }
 
