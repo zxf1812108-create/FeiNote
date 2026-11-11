@@ -135,6 +135,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var draggingOffset by remember { mutableStateOf(0f) }
     var dragAnchorTop by remember { mutableStateOf(0f) }
     var dragStartIndex by remember { mutableStateOf(-1) }
+    // 从编辑模式直接长按开始拖动时，禁用本次拖动的相邻项动画，避免键盘收起与列表动画叠加。
+    var suppressDragAnimation by remember { mutableStateOf(false) }
 
     LaunchedEffect(notes, draggingNoteId) {
         if (draggingNoteId == null) {
@@ -312,7 +314,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         BulletNoteRow(
                             modifier = Modifier
                                 // 正在拖动的条目不参与 LazyColumn 的位置动画，避免双重动画造成反向跳动。
-                                .then(if (draggingNoteId != null && draggingNoteId != note.id) Modifier.animateItem() else Modifier)
+                                .then(if (draggingNoteId != null && !suppressDragAnimation && draggingNoteId != note.id) Modifier.animateItem() else Modifier)
                                 .zIndex(if (draggingNoteId == note.id) 1f else 0f)
                                 .graphicsLayer {
                                     if (draggingNoteId == note.id) {
@@ -345,7 +347,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 }
                             },
                             onDragStart = {
-                                // 长按其他笔记开始拖动时，先结束之前笔记的编辑状态。
+                                // 记录拖动开始时是否正在编辑，避免键盘收起、编辑行缩短与相邻项动画同时发生。
+                                suppressDragAnimation = editingNoteId != null
                                 closeEditor()
                                 val info = listState.layoutInfo.visibleItemsInfo
                                     .firstOrNull { it.key == note.id }
@@ -403,6 +406,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 draggingOffset = 0f
                                 dragAnchorTop = 0f
                                 dragStartIndex = -1
+                                suppressDragAnimation = false
                             },
                             onContentChange = { newText ->
                                 viewModel.updateNoteContent(note.id, newText)
@@ -661,7 +665,7 @@ fun BulletNoteRow(
                         modifier = Modifier.size(18.dp)
                     )
                 }
-                
+
             }
         }
     }
