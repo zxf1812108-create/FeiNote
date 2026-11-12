@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -63,6 +64,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             noteDao.getNotesByDate(dateStr)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 日历中需要标记的日期：只统计未删除笔记，并随数据库变化自动更新。
+    val noteDates: StateFlow<Set<LocalDate>> = noteDao.getDatesWithActiveNotes()
+        .map { dates -> dates.mapNotNull { value -> runCatching { LocalDate.parse(value) }.getOrNull() }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
 
     // 回收站笔记列表
     val trashNotes: StateFlow<List<NoteEntity>> = noteDao.getDeletedNotes()
