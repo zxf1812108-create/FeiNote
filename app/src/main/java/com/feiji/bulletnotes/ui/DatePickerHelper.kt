@@ -1,6 +1,7 @@
 package com.feiji.bulletnotes.ui
  
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +48,7 @@ fun DatePickerHelper(
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
+            modifier = Modifier.width(320.dp),
             shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 6.dp
@@ -92,7 +95,7 @@ fun DatePickerHelper(
                 val cells: List<LocalDate?> = buildList {
                     repeat(leadingBlanks) { add(null) }
                     for (day in 1..displayedMonth.lengthOfMonth()) add(displayedMonth.atDay(day))
-                    while (size % 7 != 0) add(null)
+                    while (size < 42) add(null) // 固定为6行，避免不同月份改变弹窗高度
                 }
 
                 cells.chunked(7).forEach { week ->
@@ -106,25 +109,40 @@ fun DatePickerHelper(
                             ) {
                                 if (date != null) {
                                     val isSelected = date == initialDate
+                                    val isToday = date == LocalDate.now()
                                     Column(
                                         modifier = Modifier
                                             .size(width = 38.dp, height = 44.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .clickable { onDatePicked(date) }
-                                            .then(
-                                                if (isSelected) Modifier.background(MaterialTheme.colorScheme.primaryContainer)
-                                                else Modifier
-                                            ),
+                                            .clickable { onDatePicked(date) },
                                         horizontalAlignment = Alignment.CenterHorizontally,
                                         verticalArrangement = Arrangement.Center
                                     ) {
-                                        Text(
-                                            text = date.dayOfMonth.toString(),
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                            else MaterialTheme.colorScheme.onSurface
-                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .size(30.dp)
+                                                .then(
+                                                    if (isSelected) Modifier
+                                                        .clip(CircleShape)
+                                                        .background(MaterialTheme.colorScheme.primaryContainer)
+                                                    else Modifier
+                                                )
+                                                .then(
+                                                    if (isToday) Modifier.border(
+                                                        width = 1.dp,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        shape = CircleShape
+                                                    ) else Modifier
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = date.dayOfMonth.toString(),
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
                                         Spacer(Modifier.height(2.dp))
                                         if (date in noteDates) {
                                             Box(
