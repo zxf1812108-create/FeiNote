@@ -150,11 +150,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var draggingOffset by remember { mutableStateOf(0f) }
     var dragAnchorTop by remember { mutableStateOf(0f) }
     var dragStartIndex by remember { mutableStateOf(-1) }
+    // 松手后等待数据库排序结果同步，避免旧 notes 顺序短暂覆盖拖动后的显示顺序。
+    var pendingReorderIds by remember { mutableStateOf<List<Long>?>(null) }
     // 仅回车新增笔记时触发精准滚动，不影响点击其他笔记。
     var pendingNewNoteScrollFromId by remember { mutableStateOf<Long?>(null) }
 
-    LaunchedEffect(notes, draggingNoteId) {
+    LaunchedEffect(notes, draggingNoteId, pendingReorderIds) {
         if (draggingNoteId == null) {
+            val expectedOrder = pendingReorderIds
+            // reorderNotes 是异步写入数据库的；在 Flow 返回新顺序前，
+            // 不要用旧 notes 覆盖已经完成的本地拖动顺序。
+            if (expectedOrder != null && notes.map { it.id } != expectedOrder) {
+                return@LaunchedEffect
+            }
+
             if (displayNotes.map { it.id } != notes.map { it.id }) {
                 displayNotes.clear()
                 displayNotes.addAll(notes)
@@ -163,6 +172,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     if (displayNotes[index] != item) displayNotes[index] = item
                 }
             }
+            if (expectedOrder != null) pendingReorderIds = null
         }
     }
 
@@ -446,6 +456,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 } else if (draggingNoteId == note.id) {
                                     val endIndex = displayNotes.indexOfFirst { it.id == note.id }
                                     if (dragStartIndex >= 0 && endIndex >= 0 && dragStartIndex != endIndex) {
+                                        // 记录最终顺序；等数据库 Flow 确认后再解除保护，防止旧顺序闪回。
+                                        pendingReorderIds = displayNotes.map { it.id }
                                         viewModel.reorderNotes(dragStartIndex, endIndex)
                                     }
                                 }
