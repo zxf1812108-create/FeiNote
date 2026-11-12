@@ -6,6 +6,11 @@ import java.time.LocalDate
 
 object DatePickerHelper {
 
+    /**
+     * 显示日期选择框。
+     * onDismiss 会在用户选择日期后、点击弹窗外部或按返回键关闭时调用，
+     * 由调用方清除待处理的日期修改状态，避免弹窗在界面重组后再次出现。
+     */
     fun show(
         context: Context,
         initialDate: LocalDate = LocalDate.now(),
@@ -26,8 +31,10 @@ object DatePickerHelper {
             month,
             day
         )
-        // 用户点击日期选择框外部或按返回键关闭时，通知调用方清除弹窗状态。
-        dialog.setOnDismissListener { onDismiss() }
+
+        dialog.setOnDismissListener {
+            onDismiss()
+        }
         dialog.show()
     }
 }
