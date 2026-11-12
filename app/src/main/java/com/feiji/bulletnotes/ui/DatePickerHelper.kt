@@ -50,8 +50,8 @@ fun DatePickerHelper(
         Surface(
             modifier = Modifier.width(320.dp),
             shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp
+            color = MaterialTheme.colorScheme.background,
+            tonalElevation = 0.dp
         ) {
             Column(
                 modifier = Modifier
