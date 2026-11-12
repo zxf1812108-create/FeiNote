@@ -9,31 +9,25 @@ object DatePickerHelper {
     fun show(
         context: Context,
         initialDate: LocalDate = LocalDate.now(),
-        onDatePicked: (LocalDate) -> Unit
+        onDatePicked: (LocalDate) -> Unit,
+        onDismiss: () -> Unit = {}
     ) {
+        val year = initialDate.year
+        val month = initialDate.monthValue - 1
+        val day = initialDate.dayOfMonth
+
         val dialog = DatePickerDialog(
             context,
-            { _, year, month, day ->
-                onDatePicked(LocalDate.of(year, month + 1, day))
+            { _, pickedYear, pickedMonth, pickedDay ->
+                val selected = LocalDate.of(pickedYear, pickedMonth + 1, pickedDay)
+                onDatePicked(selected)
             },
-            initialDate.year,
-            initialDate.monthValue - 1,
-            initialDate.dayOfMonth
+            year,
+            month,
+            day
         )
-
-        // 仅保留日历。日期发生选择时立即提交，不再要求点击“确定”。
-        // init() 设置的回调不会在初始化时触发。
-        dialog.datePicker.init(
-            initialDate.year,
-            initialDate.monthValue - 1,
-            initialDate.dayOfMonth
-        ) { _, year, month, day ->
-            onDatePicked(LocalDate.of(year, month + 1, day))
-            dialog.dismiss()
-        }
+        // 用户点击日期选择框外部或按返回键关闭时，通知调用方清除弹窗状态。
+        dialog.setOnDismissListener { onDismiss() }
         dialog.show()
-        // show() 后清除按钮，避免系统在显示时重新创建按钮。
-        dialog.getButton(DatePickerDialog.BUTTON_POSITIVE)?.visibility = android.view.View.GONE
-        dialog.getButton(DatePickerDialog.BUTTON_NEGATIVE)?.visibility = android.view.View.GONE
     }
 }
