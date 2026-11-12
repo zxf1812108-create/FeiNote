@@ -492,7 +492,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             onDatePicked = { pickedDate ->
                 viewModel.changeNoteDate(note, pickedDate)
                 noteToChangeDate = null
-            }
+            },
+            // 点击弹窗外部关闭时，同样清除待修改笔记，避免后续重组再次弹出。
+            onDismiss = { noteToChangeDate = null }
         )
     }
 
