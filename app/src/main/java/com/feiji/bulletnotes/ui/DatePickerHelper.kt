@@ -1,57 +1,159 @@
 package com.feiji.bulletnotes.ui
 
-import android.app.DatePickerDialog
-import android.content.Context
-import android.view.View
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import java.time.LocalDate
+import java.time.YearMonth
 
-object DatePickerHelper {
+/**
+ * 带笔记日期圆点标记的日历。
+ * 点选日期后立即回调并关闭；点按外部或返回键则只关闭弹窗。
+ */
+@Composable
+fun DatePickerHelper(
+    initialDate: LocalDate,
+    noteDates: Set<LocalDate>,
+    onDatePicked: (LocalDate) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var displayedMonth by remember(initialDate) { mutableStateOf(YearMonth.from(initialDate)) }
 
-    /**
-     * 显示日期选择框。
-     * 用户点选日期后立即回调并关闭弹窗，不需要再点击“确定”。
-     * 点击弹窗外部或按返回键关闭时，调用 onDismiss 清除待处理状态。
-     */
-    fun show(
-        context: Context,
-        initialDate: LocalDate = LocalDate.now(),
-        onDatePicked: (LocalDate) -> Unit,
-        onDismiss: () -> Unit = {}
-    ) {
-        val year = initialDate.year
-        val month = initialDate.monthValue - 1
-        val day = initialDate.dayOfMonth
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(onClick = { displayedMonth = displayedMonth.minusMonths(1) }) {
+                        Text("‹", style = MaterialTheme.typography.headlineSmall)
+                    }
+                    Text(
+                        text = "${displayedMonth.year}年${displayedMonth.monthValue}月",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = { displayedMonth = displayedMonth.plusMonths(1) }) {
+                        Text("›", style = MaterialTheme.typography.headlineSmall)
+                    }
+                }
 
-        // 不使用默认的日期确认回调；日期变化时通过 DatePicker 监听器立即处理。
-        val dialog = DatePickerDialog(
-            context,
-            null,
-            year,
-            month,
-            day
-        )
+                Spacer(Modifier.height(4.dp))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    listOf("一", "二", "三", "四", "五", "六", "日").forEach { day ->
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = day,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
 
-        dialog.setOnDismissListener {
-            onDismiss()
-        }
+                val firstDay = displayedMonth.atDay(1)
+                val leadingBlanks = firstDay.dayOfWeek.value - 1 // 周一作为每周第一天
+                val cells: List<LocalDate?> = buildList {
+                    repeat(leadingBlanks) { add(null) }
+                    for (day in 1..displayedMonth.lengthOfMonth()) add(displayedMonth.atDay(day))
+                    while (size % 7 != 0) add(null)
+                }
 
-        dialog.setOnShowListener {
-            // 隐藏系统默认的“确定”和“取消”按钮。
-            dialog.getButton(DatePickerDialog.BUTTON_POSITIVE)?.visibility = View.GONE
-            dialog.getButton(DatePickerDialog.BUTTON_NEGATIVE)?.visibility = View.GONE
+                cells.chunked(7).forEach { week ->
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        week.forEach { date ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (date != null) {
+                                    val isSelected = date == initialDate
+                                    Column(
+                                        modifier = Modifier
+                                            .size(width = 38.dp, height = 44.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable { onDatePicked(date) }
+                                            .then(
+                                                if (isSelected) Modifier.background(MaterialTheme.colorScheme.primaryContainer)
+                                                else Modifier
+                                            ),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
+                                        Text(
+                                            text = date.dayOfMonth.toString(),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                            else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Spacer(Modifier.height(2.dp))
+                                        if (date in noteDates) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(4.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                        else MaterialTheme.colorScheme.primary
+                                                    )
+                                            )
+                                        } else {
+                                            Spacer(Modifier.size(4.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
-            // 用户每次选中日期时立即更新笔记日期，并关闭日期选择框。
-            dialog.datePicker.init(year, month, day) { _, pickedYear, pickedMonth, pickedDay ->
-                val selected = LocalDate.of(
-                    pickedYear,
-                    pickedMonth + 1,
-                    pickedDay
-                )
-                onDatePicked(selected)
-                dialog.dismiss()
+                Spacer(Modifier.height(4.dp))
+                TextButton(
+                    onClick = { displayedMonth = YearMonth.from(LocalDate.now()) },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("回到本月")
+                }
             }
         }
-
-        dialog.show()
     }
 }
