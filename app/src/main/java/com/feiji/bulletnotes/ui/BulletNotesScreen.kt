@@ -1,5 +1,5 @@
 package com.feiji.bulletnotes.ui
- 
+
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -120,6 +120,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     val selectedDate by viewModel.selectedDate.collectAsState()
     val isToday by viewModel.isToday.collectAsState()
     val notes by viewModel.notes.collectAsState()
+    val noteDates by viewModel.noteDates.collectAsState()
     val trashNotes by viewModel.trashNotes.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
     val userMessage by viewModel.userMessage.collectAsState()
@@ -131,6 +132,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
     var backupToRestore by remember { mutableStateOf<com.feiji.bulletnotes.data.BackupManager.BackupFile?>(null) }
     val backupFiles by viewModel.backupFiles.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
+    var showDatePicker by remember { mutableStateOf(false) }
 
     // 点击当前编辑项之外的区域时，统一退出编辑并触发已有的空笔记清理逻辑。
     fun closeEditor() {
@@ -224,13 +226,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
                                 closeEditor()
-                                DatePickerHelper.show(
-                                    context = context,
-                                    initialDate = selectedDate,
-                                    onDatePicked = { pickedDate ->
-                                        viewModel.selectDate(pickedDate)
-                                    }
-                                )
+                                noteToChangeDate = null
+                                showDatePicker = true
                             },
                         color = Color.Transparent
                     ) {
@@ -379,6 +376,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 closeEditor()
                                 // 长按标识符弹出日期选择对话框
                                 noteToChangeDate = note
+                                showDatePicker = true
                             },
                             onContentClick = {
                                 if (editingNoteId == note.id) {
@@ -484,17 +482,25 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         )
     }
 
-    // 标识符长按修改日期的选择弹窗
-    noteToChangeDate?.let { note ->
-        DatePickerHelper.show(
-            context = context,
+    // 日期选择弹窗：有笔记的日期下方显示圆点；选择日期后立即生效。
+    if (showDatePicker) {
+        DatePickerHelper(
             initialDate = selectedDate,
+            noteDates = noteDates,
             onDatePicked = { pickedDate ->
-                viewModel.changeNoteDate(note, pickedDate)
+                val note = noteToChangeDate
+                if (note != null) {
+                    viewModel.changeNoteDate(note, pickedDate)
+                } else {
+                    viewModel.selectDate(pickedDate)
+                }
                 noteToChangeDate = null
+                showDatePicker = false
             },
-            // 点击弹窗外部关闭时，同样清除待修改笔记，避免后续重组再次弹出。
-            onDismiss = { noteToChangeDate = null }
+            onDismiss = {
+                noteToChangeDate = null
+                showDatePicker = false
+            }
         )
     }
 
