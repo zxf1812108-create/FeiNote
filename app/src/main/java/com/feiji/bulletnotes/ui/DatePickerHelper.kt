@@ -175,7 +175,10 @@ fun DatePickerHelper(
                     onClick = { displayedMonth = YearMonth.from(LocalDate.now()) },
                     modifier = Modifier.align(Alignment.End)
                 ) {
-                    Text("回到本月")
+                    Text(
+                        "回到本月",
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
         }
