@@ -104,9 +104,8 @@ import com.feiji.bulletnotes.ui.theme.InkBlack
 import com.feiji.bulletnotes.ui.theme.LineBorder
 import com.feiji.bulletnotes.ui.theme.SlateMuted
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -114,7 +113,6 @@ import java.time.LocalDate
 fun BulletNotesScreen(viewModel: NoteViewModel) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
-
     // 新建笔记期间的常驻焦点接力点，防止旧输入框失焦时键盘关闭。
     val enterFocusBridge = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
@@ -247,7 +245,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.background)
-                    // 顶栏的空白区域也可结束编辑；日期、今天、回收站等子控件仍可正常点击。
                     .clickable(enabled = editingNoteId != null) {
                         closeEditor()
                     }
@@ -258,7 +255,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 左上角：日期显示区域（点击弹出日期选择对话框）
                     Surface(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -289,8 +285,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // 日期显示区域右边：日期标识区域
-                    // 今天显示“今天”，非今天时显示“返回”。
                     Surface(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
@@ -362,10 +356,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-
-                // 左右滑动切换日期。
-                // 向右滑动：前一天；向左滑动：后一天。
-                // 编辑笔记时关闭手势，避免干扰文本输入和选择。
                 .pointerInput(selectedDate, editingNoteId) {
                     if (editingNoteId == null) {
                         var totalHorizontalDrag = 0f
@@ -400,7 +390,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         ) {
 
             // 始终留在组合树中的极小输入框：只在回车新增笔记时暂时接管焦点。
-            // 新笔记的 BasicTextField 挂载后会自行 requestFocus()。
             BasicTextField(
                 value = "",
                 onValueChange = {},
@@ -442,7 +431,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = 12.dp, vertical = 8.dp)
-                        // 键盘出现时缩小列表可见区域，使列表能够滚动到键盘上方。
                         .imePadding(),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -455,11 +443,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 
                         BulletNoteRow(
                             modifier = Modifier
-                                // 正在拖动的条目不参与 LazyColumn 的位置动画，
-                                // 避免双重动画造成反向跳动。
-                                // 位置动画配置必须保持稳定：
-                                // 不要在按下/松开时切换所有条目的 placementSpec。
-                                // 仅被拖动的条目禁用动画，避免与 graphicsLayer 的手指位移叠加。
                                 .then(
                                     if (draggingNoteId == note.id) {
                                         Modifier
@@ -476,8 +459,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 )
                                 .graphicsLayer {
                                     if (draggingNoteId == note.id) {
-                                        // 使用手指起点的绝对屏幕位置减去当前布局位置。
-                                        // 列表交换位置时布局坐标会改变，但视觉坐标保持连续。
                                         val currentTop = listState.layoutInfo.visibleItemsInfo
                                             .firstOrNull { it.key == note.id }
                                             ?.offset?.toFloat()
@@ -499,7 +480,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             },
                             onBulletLongClick = {
                                 closeEditor()
-                                // 长按标识符弹出日期选择对话框
                                 noteToChangeDate = note
                                 showDatePicker = true
                             },
@@ -507,16 +487,11 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 if (editingNoteId == note.id) {
                                     closeEditor()
                                 } else {
-                                    // 在两条笔记之间切换时不要主动清除焦点，
-                                    // 否则输入法会先收起再弹出，造成列表大幅上下跳动。
-                                    // 新笔记的 LaunchedEffect(isEditing) 会主动请求焦点。
                                     viewModel.setEditingNoteId(note.id)
                                 }
                             },
                             onDragStart = {
                                 hoveringTrash = false
-
-                                // 长按其他笔记开始拖动时，先结束之前笔记的编辑状态。
                                 closeEditor()
 
                                 val info = listState.layoutInfo.visibleItemsInfo
@@ -535,7 +510,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                     trashBounds?.contains(pointerRoot) == true
 
                                 if (draggingNoteId == note.id) {
-                                    // 不在交换位置时重置或减去拖动距离。
                                     draggingOffset += delta
 
                                     if (hoveringTrash) {
@@ -553,8 +527,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                         val visualCenter =
                                             dragAnchorTop + draggingOffset + dragged.size / 2f
 
-                                        // 只有手指带着条目越过相邻条目的中心点才交换。
-                                        // 这样不会在阈值附近反复触发反向移动。
                                         val direction = when {
                                             delta > 0f -> 1
                                             delta < 0f -> -1
@@ -604,8 +576,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                         endIndex >= 0 &&
                                         dragStartIndex != endIndex
                                     ) {
-                                        // 记录最终顺序；等数据库 Flow 确认后再解除保护，
-                                        // 防止旧顺序闪回。
                                         pendingReorderIds =
                                             displayNotes.map { it.id }
 
@@ -626,8 +596,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 viewModel.updateNoteContent(note.id, newText)
                             },
                             onEnterPressed = {
-                                // 按回车新增下一条笔记，自动附加当前日期。
-                                // 先将焦点转给常驻输入框，保证数据库插入期间输入法不失焦。
                                 pendingNewNoteScrollFromId = note.id
                                 enterFocusBridge.requestFocus()
                                 viewModel.insertNoteAfter(note, "")
@@ -655,7 +623,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         )
     }
 
-    // 日期选择弹窗：有笔记的日期下方显示圆点；选择日期后立即生效。
+    // 日期选择弹窗
     if (showDatePicker) {
         DatePickerHelper(
             initialDate = selectedDate,
@@ -679,7 +647,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
         )
     }
 
-    // 点击“今天”显示授权文件夹中的备份列表，选择后确认覆盖恢复。
+    // 备份列表
     if (showBackupPicker) {
         AlertDialog(
             onDismissRequest = {
@@ -766,10 +734,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 }
 
 /**
- * 单条子弹笔记组件：
- * - 前方标识符：方框、对勾、实心圆点，点击轮流切换，长按修改日期
- * - 笔记内容：未编辑时单行截断（maxLines = 1），点击进入编辑模式时显示完整内容并可多行输入
- * - 按回车触发 onEnterPressed 新增下一条
+ * 单条子弹笔记组件
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -805,7 +770,6 @@ fun BulletNoteRow(
     val density = LocalDensity.current
     val imeInsets = WindowInsets.ime
 
-    // 只在进入编辑状态时初始化光标；输入过程中保持 TextFieldValue 的选区。
     var editValue by remember(note.id, isEditing) {
         mutableStateOf(
             TextFieldValue(
@@ -815,63 +779,57 @@ fun BulletNoteRow(
         )
     }
 
-    // 进入编辑状态时请求焦点，并将当前笔记行滚动到可见区域。
-    // 不再等待 IME Insets，避免部分墨水屏设备上 Insets 更新不及时导致一直等待。
+    // 恢复原始版本的焦点及整行滚动逻辑。
     LaunchedEffect(isEditing) {
         if (isEditing) {
             focusRequester.requestFocus()
 
-            // 等待输入框获得焦点并完成布局
-            withFrameNanos { }
-            withFrameNanos { }
+            snapshotFlow {
+                imeInsets.getBottom(density)
+            }.first {
+                it > 0
+            }
 
-            // 请求将当前笔记行滚动到可见区域
+            delay(100)
             bringIntoViewRequester.bringIntoView()
         }
     }
 
-    // 持续监听光标位置。
-    // 不因每次输入而重新启动 LaunchedEffect，
-    // 避免连续输入时前一次滚动请求被取消。
-    LaunchedEffect(isEditing) {
+    // 恢复原始版本的光标自动滚动逻辑。
+    LaunchedEffect(
+        isEditing,
+        editValue.text,
+        editValue.selection,
+        textLayout
+    ) {
         if (!isEditing) return@LaunchedEffect
 
         snapshotFlow {
-            val layout = textLayout
-
-            if (layout == null) {
-                null
-            } else {
-                val cursor = layout.getCursorRect(
-                    editValue.selection.end.coerceIn(
-                        0,
-                        editValue.text.length
-                    )
-                )
-
-                // 在光标周围预留16dp空间
-                val extra = with(density) {
-                    16.dp.toPx()
-                }
-
-                Rect(
-                    left = cursor.left,
-                    top = cursor.top - extra,
-                    right = cursor.right + extra,
-                    bottom = cursor.bottom + extra
-                )
-            }
+            imeInsets.getBottom(density)
+        }.first {
+            it > 0
         }
-            .filterNotNull()
-            .distinctUntilChanged()
-            .collect { cursorRect ->
 
-                // 等待本次输入对应的布局完成
-                withFrameNanos { }
+        delay(80)
+        withFrameNanos { }
+        withFrameNanos { }
 
-                // 将光标所在区域滚动到可见区域
-                caretRequester.bringIntoView(cursorRect)
-            }
+        val layout = textLayout ?: return@LaunchedEffect
+
+        val cursor = layout.getCursorRect(
+            editValue.selection.end.coerceIn(0, editValue.text.length)
+        )
+
+        val extra = with(density) { 16.dp.toPx() }
+
+        caretRequester.bringIntoView(
+            Rect(
+                left = cursor.left,
+                top = cursor.top - extra,
+                right = cursor.right + extra,
+                bottom = cursor.bottom + extra
+            )
+        )
     }
 
     Row(
@@ -889,7 +847,6 @@ fun BulletNoteRow(
             .padding(horizontal = 6.dp, vertical = 6.dp),
         verticalAlignment = Alignment.Top
     ) {
-        // 标识符区域：方框 (SQUARE) / 对勾 (CHECKED) / 实心圆点 (BULLET_DOT)
         Box(
             modifier = Modifier
                 .size(28.dp)
@@ -902,7 +859,6 @@ fun BulletNoteRow(
         ) {
             when (note.bulletType) {
                 BulletType.SQUARE -> {
-                    // 方框
                     Box(
                         modifier = Modifier
                             .size(16.dp)
@@ -927,7 +883,6 @@ fun BulletNoteRow(
                 }
 
                 BulletType.BULLET_DOT -> {
-                    // 实心圆点
                     Box(
                         modifier = Modifier
                             .size(8.dp)
@@ -939,7 +894,6 @@ fun BulletNoteRow(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // 笔记内容区域
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -986,7 +940,6 @@ fun BulletNoteRow(
                 }
         ) {
             if (!isEditing) {
-                // 非编辑状态：当内容超过一行时，只显示一行内容。
                 Text(
                     text = note.content,
                     style = MaterialTheme.typography.bodyLarge.copy(
@@ -996,7 +949,6 @@ fun BulletNoteRow(
                     overflow = TextOverflow.Ellipsis
                 )
             } else {
-                // 编辑状态：显示完整笔记内容，支持多行，回车在末尾创建下一条笔记。
                 BasicTextField(
                     value = editValue,
                     onValueChange = { newValue ->
