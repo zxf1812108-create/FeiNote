@@ -1,4 +1,3 @@
-
 package com.feiji.bulletnotes.ui
 
 import android.widget.Toast
@@ -105,8 +104,9 @@ import com.feiji.bulletnotes.ui.theme.InkBlack
 import com.feiji.bulletnotes.ui.theme.LineBorder
 import com.feiji.bulletnotes.ui.theme.SlateMuted
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import java.time.LocalDate
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -114,6 +114,7 @@ import java.time.LocalDate
 fun BulletNotesScreen(viewModel: NoteViewModel) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
+
     // 新建笔记期间的常驻焦点接力点，防止旧输入框失焦时键盘关闭。
     val enterFocusBridge = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
@@ -814,63 +815,63 @@ fun BulletNoteRow(
         )
     }
 
+    // 进入编辑状态时请求焦点，并将当前笔记行滚动到可见区域。
+    // 不再等待 IME Insets，避免部分墨水屏设备上 Insets 更新不及时导致一直等待。
     LaunchedEffect(isEditing) {
         if (isEditing) {
             focusRequester.requestFocus()
 
-            // 等待输入法实际出现、LazyColumn 重新测量可见高度后，再滚动当前笔记。
-            // 不使用固定屏幕坐标，兼容不同键盘高度与屏幕尺寸。
-            snapshotFlow {
-                imeInsets.getBottom(density)
-            }.first {
-                it > 0
-            }
+            // 等待输入框获得焦点并完成布局
+            withFrameNanos { }
+            withFrameNanos { }
 
-            delay(100)
+            // 请求将当前笔记行滚动到可见区域
             bringIntoViewRequester.bringIntoView()
         }
     }
 
-    // 修改后的光标自动滚动逻辑：
-    // 每次文本或光标位置变化后，等待输入框完成布局，
-    // 再将光标所在区域滚动到键盘上方。
-    LaunchedEffect(
-        isEditing,
-        editValue.text,
-        editValue.selection,
-        textLayout
-    ) {
+    // 持续监听光标位置。
+    // 不因每次输入而重新启动 LaunchedEffect，
+    // 避免连续输入时前一次滚动请求被取消。
+    LaunchedEffect(isEditing) {
         if (!isEditing) return@LaunchedEffect
 
-        // 等待键盘弹出
         snapshotFlow {
-            imeInsets.getBottom(density)
-        }.first {
-            it > 0
+            val layout = textLayout
+
+            if (layout == null) {
+                null
+            } else {
+                val cursor = layout.getCursorRect(
+                    editValue.selection.end.coerceIn(
+                        0,
+                        editValue.text.length
+                    )
+                )
+
+                // 在光标周围预留16dp空间
+                val extra = with(density) {
+                    16.dp.toPx()
+                }
+
+                Rect(
+                    left = cursor.left,
+                    top = cursor.top - extra,
+                    right = cursor.right + extra,
+                    bottom = cursor.bottom + extra
+                )
+            }
         }
+            .filterNotNull()
+            .distinctUntilChanged()
+            .collect { cursorRect ->
 
-        // 等待文本和列表完成重新布局
-        delay(80)
-        withFrameNanos { }
-        withFrameNanos { }
+                // 等待本次输入对应的布局完成
+                withFrameNanos { }
 
-        val layout = textLayout ?: return@LaunchedEffect
-
-        val cursor = layout.getCursorRect(
-            editValue.selection.end.coerceIn(0, editValue.text.length)
-        )
-
-        // 在光标周围留出空间，避免光标紧贴键盘边缘
-        val extra = with(density) { 16.dp.toPx() }
-
-        caretRequester.bringIntoView(
-            Rect(
-                left = cursor.left,
-                top = cursor.top - extra,
-                right = cursor.right + extra,
-                bottom = cursor.bottom + extra
-            )
-        )
+                // 将光标所在区域滚动到可见区域
+                caretRequester.bringIntoView(cursorRect)
+            }
     }
 
     Row(
