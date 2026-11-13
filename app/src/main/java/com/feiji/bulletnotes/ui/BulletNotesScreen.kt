@@ -100,8 +100,6 @@ import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.ui.theme.AccentDanger
 import com.feiji.bulletnotes.ui.theme.AccentPrimary
-import com.feiji.bulletnotes.ui.theme.CharcoalGray
-import com.feiji.bulletnotes.ui.theme.InkBlack
 import com.feiji.bulletnotes.ui.theme.LineBorder
 import com.feiji.bulletnotes.ui.theme.SlateMuted
 import kotlinx.coroutines.launch
@@ -892,7 +890,7 @@ fun BulletNoteRow(
                             .size(16.dp)
                             .border(
                                 1.5.dp,
-                                CharcoalGray,
+                                MaterialTheme.colorScheme.onSurface,
                                 RoundedCornerShape(3.dp)
                             )
                     )
@@ -904,7 +902,7 @@ fun BulletNoteRow(
                             .size(16.dp)
                             .border(
                                 1.5.dp,
-                                CharcoalGray,
+                                MaterialTheme.colorScheme.onSurface,
                                 RoundedCornerShape(3.dp)
                             )
                     )
@@ -914,7 +912,7 @@ fun BulletNoteRow(
                     Box(
                         modifier = Modifier
                             .size(8.dp)
-                            .background(InkBlack, CircleShape)
+                            .background(MaterialTheme.colorScheme.onSurface, CircleShape)
                     )
                 }
             }
