@@ -1,3 +1,4 @@
+
 package com.feiji.bulletnotes.ui
 
 import android.widget.Toast
@@ -528,7 +529,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                     draggingNoteId = note.id
                                 }
                             },
-                            onDragDelta = { delta, pointerRoot ->
+                            onDragDelta = dragDelta@{ delta, pointerRoot ->
                                 hoveringTrash =
                                     trashBounds?.contains(pointerRoot) == true
 
@@ -537,7 +538,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                     draggingOffset += delta
 
                                     if (hoveringTrash) {
-                                        return@BulletNoteRow_onDragDelta
+                                        return@dragDelta
                                     }
 
                                     val current =
@@ -768,14 +769,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
  * - 前方标识符：方框、对勾、实心圆点，点击轮流切换，长按修改日期
  * - 笔记内容：未编辑时单行截断（maxLines = 1），点击进入编辑模式时显示完整内容并可多行输入
  * - 按回车触发 onEnterPressed 新增下一条
- *
- * 光标跟随说明：
- * - 编辑过程中，每次文本布局完成（onTextLayout）都会检查光标所在行的上下边界，
- *   并用 bringIntoView 请求把整行（含底部余量）滚动到可视区域内。
- * - 键盘弹出/收起时，通过监听 IME inset 的变化补触发一次滚动，确保首次进入编辑
- *   时光标不会被键盘遮住。
- * - 使用 getLineTop/getLineBottom 而不是 getCursorRect，避免只把光标那个极窄矩形
- *   滚进可视区、但整行底部仍被键盘挡住的问题。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -795,7 +788,6 @@ fun BulletNoteRow(
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val caretRequester = remember { BringIntoViewRequester() }
-    val coroutineScope = rememberCoroutineScope()
 
     var textLayout by remember {
         mutableStateOf<TextLayoutResult?>(null)
@@ -822,28 +814,6 @@ fun BulletNoteRow(
         )
     }
 
-    // 把“光标所在行”滚进可视区域的公共函数。
-    // 使用整行的上下边界 + 底部余量，确保整行不会被键盘遮挡。
-    fun bringCursorIntoView(layout: TextLayoutResult) {
-        val cursorOffset = editValue.selection.end
-            .coerceIn(0, editValue.text.length)
-
-        val lineIndex = layout.getLineForOffset(cursorOffset)
-        val lineTop = layout.getLineTop(lineIndex)
-        val lineBottom = layout.getLineBottom(lineIndex)
-        // 底部多留一点空间，避免光标紧贴键盘上沿。
-        val extraBottom = with(density) { 16.dp.toPx() }
-
-        caretRequester.bringIntoView(
-            Rect(
-                left = 0f,
-                top = lineTop,
-                right = layout.size.width.toFloat(),
-                bottom = lineBottom + extraBottom
-            )
-        )
-    }
-
     LaunchedEffect(isEditing) {
         if (isEditing) {
             focusRequester.requestFocus()
@@ -861,18 +831,46 @@ fun BulletNoteRow(
         }
     }
 
-    // 键盘弹出后补触发一次光标跟随。
-    // 首次进入编辑时，onTextLayout 可能在键盘完全展开前就已经执行过，
-    // 这里在 IME 高度真正变化后再滚动一次，保证光标露出来。
-    LaunchedEffect(isEditing, imeInsets.getBottom(density)) {
-        if (isEditing && imeInsets.getBottom(density) > 0) {
-            // 等一帧让 LazyColumn 的可见区域和文本布局稳定下来。
-            withFrameNanos { }
+    // 修改后的光标自动滚动逻辑：
+    // 每次文本或光标位置变化后，等待输入框完成布局，
+    // 再将光标所在区域滚动到键盘上方。
+    LaunchedEffect(
+        isEditing,
+        editValue.text,
+        editValue.selection,
+        textLayout
+    ) {
+        if (!isEditing) return@LaunchedEffect
 
-            textLayout?.let { layout ->
-                bringCursorIntoView(layout)
-            }
+        // 等待键盘弹出
+        snapshotFlow {
+            imeInsets.getBottom(density)
+        }.first {
+            it > 0
         }
+
+        // 等待文本和列表完成重新布局
+        delay(80)
+        withFrameNanos { }
+        withFrameNanos { }
+
+        val layout = textLayout ?: return@LaunchedEffect
+
+        val cursor = layout.getCursorRect(
+            editValue.selection.end.coerceIn(0, editValue.text.length)
+        )
+
+        // 在光标周围留出空间，避免光标紧贴键盘边缘
+        val extra = with(density) { 16.dp.toPx() }
+
+        caretRequester.bringIntoView(
+            Rect(
+                left = cursor.left,
+                top = cursor.top - extra,
+                right = cursor.right + extra,
+                bottom = cursor.bottom + extra
+            )
+        )
     }
 
     Row(
@@ -1023,17 +1021,8 @@ fun BulletNoteRow(
                         color = MaterialTheme.colorScheme.onSurface
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    onTextLayout = { layout ->
-                        textLayout = layout
-
-                        // 每次文本布局完成时立即检查光标行是否可见。
-                        // 用整行范围请求滚动，而不是只请求光标那个极窄矩形。
-                        if (isEditing && imeInsets.getBottom(density) > 0) {
-                            coroutineScope.launch {
-                                withFrameNanos { }
-                                bringCursorIntoView(layout)
-                            }
-                        }
+                    onTextLayout = {
+                        textLayout = it
                     },
                     keyboardOptions = KeyboardOptions.Default.copy(
                         imeAction = ImeAction.Next
