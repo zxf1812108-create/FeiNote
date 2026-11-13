@@ -779,7 +779,7 @@ fun BulletNoteRow(
         )
     }
 
-    // 恢复原始版本的焦点及整行滚动逻辑。
+    // 编辑时请求焦点，并在键盘弹出后将整行移动到可视区域。
     LaunchedEffect(isEditing) {
         if (isEditing) {
             focusRequester.requestFocus()
@@ -790,12 +790,13 @@ fun BulletNoteRow(
                 it > 0
             }
 
-            delay(100)
+            delay(150)
             bringIntoViewRequester.bringIntoView()
         }
     }
 
-    // 恢复原始版本的光标自动滚动逻辑。
+    // 文本或光标位置变化后，重新计算光标位置并滚动到可视区域。
+    // 增加等待时间，给墨水屏设备留出布局更新的时间。
     LaunchedEffect(
         isEditing,
         editValue.text,
@@ -810,7 +811,8 @@ fun BulletNoteRow(
             it > 0
         }
 
-        delay(80)
+        // 等待文本布局稳定
+        delay(150)
         withFrameNanos { }
         withFrameNanos { }
 
@@ -820,11 +822,12 @@ fun BulletNoteRow(
             editValue.selection.end.coerceIn(0, editValue.text.length)
         )
 
-        val extra = with(density) { 16.dp.toPx() }
+        // 增加光标周围的可视安全距离
+        val extra = with(density) { 24.dp.toPx() }
 
         caretRequester.bringIntoView(
             Rect(
-                left = cursor.left,
+                left = cursor.left - extra,
                 top = cursor.top - extra,
                 right = cursor.right + extra,
                 bottom = cursor.bottom + extra
