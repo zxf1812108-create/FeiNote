@@ -99,7 +99,6 @@ import androidx.compose.ui.unit.sp
 import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.ui.theme.AccentDanger
-import com.feiji.bulletnotes.ui.theme.AccentPrimary
 import com.feiji.bulletnotes.ui.theme.LineBorder
 import com.feiji.bulletnotes.ui.theme.SlateMuted
 import kotlinx.coroutines.launch
@@ -304,11 +303,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             ),
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (isToday) {
-                                MaterialTheme.colorScheme.onSurface
-                            } else {
-                                AccentPrimary
-                            }
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
 
