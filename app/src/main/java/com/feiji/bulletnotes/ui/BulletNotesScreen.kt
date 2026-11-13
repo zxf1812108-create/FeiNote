@@ -29,6 +29,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.mutableStateListOf
@@ -147,6 +148,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 
     val densityForNewNoteScroll = LocalDensity.current
     val listState = rememberLazyListState()
+    var listViewportBounds by remember { mutableStateOf<Rect?>(null) }
 
     // 拖动期间只更新内存中的显示顺序；松手后再保存到数据库。
     val displayNotes = remember { mutableStateListOf<NoteEntity>() }
@@ -431,7 +433,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .imePadding(),
+                        .imePadding()
+                        .onGloballyPositioned { coordinates ->
+                            listViewportBounds = coordinates.boundsInRoot()
+                        },
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     itemsIndexed(
@@ -472,6 +477,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 },
                             note = note,
                             isEditing = isEditing,
+                            listState = listState,
+                            listViewportBounds = listViewportBounds,
                             onBulletClick = {
                                 if (editingNoteId != note.id) {
                                     closeEditor()
@@ -741,6 +748,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
 fun BulletNoteRow(
     note: NoteEntity,
     isEditing: Boolean,
+    listState: LazyListState,
+    listViewportBounds: Rect?,
     modifier: Modifier = Modifier,
     onBulletClick: () -> Unit,
     onBulletLongClick: () -> Unit,
@@ -753,10 +762,12 @@ fun BulletNoteRow(
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
-    val caretRequester = remember { BringIntoViewRequester() }
 
     var textLayout by remember {
         mutableStateOf<TextLayoutResult?>(null)
+    }
+    var textFieldCoordinates by remember {
+        mutableStateOf<LayoutCoordinates?>(null)
     }
 
     var dragCoordinates by remember {
@@ -790,18 +801,20 @@ fun BulletNoteRow(
                 it > 0
             }
 
-            delay(150)
+            // 恢复原来的等待时间，避免液晶屏上出现明显迟滞。
+            delay(100)
             bringIntoViewRequester.bringIntoView()
         }
     }
 
-    // 文本或光标位置变化后，重新计算光标位置并滚动到可视区域。
-    // 增加等待时间，给墨水屏设备留出布局更新的时间。
+    // 直接根据光标和 LazyColumn 可视区域在屏幕根坐标中的位置计算滚动量。
+    // 不再依赖 BasicTextField 内部的 BringIntoViewRequester 自动滚动。
     LaunchedEffect(
         isEditing,
         editValue.text,
         editValue.selection,
-        textLayout
+        textLayout,
+        listViewportBounds
     ) {
         if (!isEditing) return@LaunchedEffect
 
@@ -811,28 +824,40 @@ fun BulletNoteRow(
             it > 0
         }
 
-        // 等待文本布局稳定
-        delay(150)
+        // 恢复原来的光标滚动等待时间。
+        delay(80)
         withFrameNanos { }
         withFrameNanos { }
 
         val layout = textLayout ?: return@LaunchedEffect
+        val fieldCoordinates = textFieldCoordinates
+            ?.takeIf { it.isAttached }
+            ?: return@LaunchedEffect
+        val viewport = listViewportBounds ?: return@LaunchedEffect
 
         val cursor = layout.getCursorRect(
             editValue.selection.end.coerceIn(0, editValue.text.length)
         )
 
-        // 增加光标周围的可视安全距离
-        val extra = with(density) { 24.dp.toPx() }
-
-        caretRequester.bringIntoView(
-            Rect(
-                left = cursor.left - extra,
-                top = cursor.top - extra,
-                right = cursor.right + extra,
-                bottom = cursor.bottom + extra
-            )
+        // 将光标底部从输入框局部坐标转换为屏幕根坐标。
+        val cursorRoot = fieldCoordinates.localToRoot(
+            Offset(cursor.left, cursor.bottom)
         )
+
+        val clearance = with(density) { 20.dp.toPx() }
+        val visibleTop = viewport.top + clearance
+        val visibleBottom = viewport.bottom - clearance
+
+        // 正值表示列表需要向上滚动；负值表示需要向下滚动。
+        val scrollAmount = when {
+            cursorRoot.y > visibleBottom -> cursorRoot.y - visibleBottom
+            cursorRoot.y < visibleTop -> cursorRoot.y - visibleTop
+            else -> 0f
+        }
+
+        if (kotlin.math.abs(scrollAmount) > 1f) {
+            listState.animateScrollBy(scrollAmount)
+        }
     }
 
     Row(
@@ -963,8 +988,10 @@ fun BulletNoteRow(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .bringIntoViewRequester(caretRequester)
                         .focusRequester(focusRequester)
+                        .onGloballyPositioned { coordinates ->
+                            textFieldCoordinates = coordinates
+                        }
                         .onKeyEvent { keyEvent ->
                             if (keyEvent.key == Key.Enter) {
                                 onEnterPressed()
