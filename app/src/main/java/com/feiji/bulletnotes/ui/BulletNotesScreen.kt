@@ -856,11 +856,7 @@ fun BulletNoteRow(
         }
 
         if (kotlin.math.abs(scrollAmount) > 1f) {
-            // 输入过程中光标位置会频繁变化；立即滚动，避免上一轮动画
-            // 被下一次输入触发的 LaunchedEffect 取消，导致列表始终不动。
-            listState.scroll {
-                scrollBy(scrollAmount)
-            }
+            listState.animateScrollBy(scrollAmount)
         }
     }
 
