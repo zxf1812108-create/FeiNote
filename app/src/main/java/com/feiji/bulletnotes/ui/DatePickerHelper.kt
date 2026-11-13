@@ -1,6 +1,7 @@
 package com.feiji.bulletnotes.ui
  
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -150,8 +151,13 @@ fun DatePickerHelper(
                                                     .size(4.dp)
                                                     .clip(CircleShape)
                                                     .background(
-                                                        if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                                        else MaterialTheme.colorScheme.primary
+                                                        if (isSystemInDarkTheme()) {
+                                                            if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                            else MaterialTheme.colorScheme.onSurface
+                                                        } else {
+                                                            if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                            else MaterialTheme.colorScheme.primary
+                                                        }
                                                     )
                                             )
                                         } else {
