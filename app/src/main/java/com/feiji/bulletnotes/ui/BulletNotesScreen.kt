@@ -286,10 +286,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             .clip(RoundedCornerShape(6.dp))
                             .clickable {
                                 closeEditor()
-                                if (!isToday) {
+                                if (isToday) {
+                                    // 只有标签显示“今天”时才切换主题。
+                                    onToggleTheme()
+                                } else {
+                                    // 标签显示“返回”时只回到今天，不改变主题。
                                     viewModel.returnToToday()
                                 }
-                                onToggleTheme()
                             },
                         color = Color.Transparent
                     ) {
@@ -1023,4 +1026,3 @@ fun BulletNoteRow(
         }
     }
 }
-
