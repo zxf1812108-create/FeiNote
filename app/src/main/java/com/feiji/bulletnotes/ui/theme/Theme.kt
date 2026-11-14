@@ -7,21 +7,47 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
 private val DarkColorScheme = darkColorScheme(
-    primary = AccentPrimary,
-    background = DarkPaperBackground,
-    surface = DarkCardBackground,
-    onPrimary = CardBackground,
-    onBackground = DarkTextPrimary,
-    onSurface = DarkTextPrimary
+    primary = DarkContent,
+    onPrimary = DarkBackground,
+    primaryContainer = DarkBackground,
+    onPrimaryContainer = DarkContent,
+    secondary = DarkContent,
+    onSecondary = DarkBackground,
+    tertiary = DarkContent,
+    onTertiary = DarkBackground,
+    background = DarkBackground,
+    onBackground = DarkContent,
+    surface = DarkBackground,
+    onSurface = DarkContent,
+    surfaceVariant = DarkBackground,
+    onSurfaceVariant = DarkContent,
+    outline = DarkContent,
+    outlineVariant = DarkContent,
+    inverseSurface = DarkBackground,
+    inverseOnSurface = DarkContent,
+    inversePrimary = DarkContent
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = InkBlack,
-    background = PaperBackground,
-    surface = CardBackground,
-    onPrimary = CardBackground,
-    onBackground = InkBlack,
-    onSurface = InkBlack
+    primary = LightContent,
+    onPrimary = LightBackground,
+    primaryContainer = LightBackground,
+    onPrimaryContainer = LightContent,
+    secondary = LightContent,
+    onSecondary = LightBackground,
+    tertiary = LightContent,
+    onTertiary = LightBackground,
+    background = LightBackground,
+    onBackground = LightContent,
+    surface = LightBackground,
+    onSurface = LightContent,
+    surfaceVariant = LightBackground,
+    onSurfaceVariant = LightContent,
+    outline = LightContent,
+    outlineVariant = LightContent,
+    inverseSurface = LightBackground,
+    inverseOnSurface = LightContent,
+    inversePrimary = LightContent
 )
 
 @Composable
@@ -30,10 +56,5 @@ fun FeiJiTheme(
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
+    MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }
