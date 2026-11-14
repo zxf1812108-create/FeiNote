@@ -2,19 +2,24 @@ package com.feiji.bulletnotes.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val InkBlack = Color(0xFF1E293B)
-val CharcoalGray = Color(0xFF334155)
-val SlateMuted = Color(0xFF64748B)
-val LineBorder = Color(0xFFE2E8F0)
-val PaperBackground = Color(0xFFFAFAF9)
-val CardBackground = Color(0xFFFFFFFF)
+// 浅色/深色模式严格使用需求指定的前景色与背景色。
+val LightContent = Color(0xFF333333)
+val LightBackground = Color(0xFFF5F5F5)
+val DarkContent = Color(0xFFD0D0D0)
+val DarkBackground = Color(0xFF1A1A1A)
 
-val AccentPrimary = Color(0xFF2563EB)
-val AccentSuccess = Color(0xFF10B981)
-val AccentDanger = Color(0xFFEF4444)
-val AccentWarning = Color(0xFFF59E0B)
-
-val DarkPaperBackground = Color(0xFF0F172A)
-val DarkCardBackground = Color(0xFF1E293B)
-val DarkTextPrimary = Color(0xFFF8FAFC)
-val DarkTextSecondary = Color(0xFF94A3B8)
+// 兼容界面中原有颜色名称，确保辅助文字、边框和图标也遵循当前主题。
+val InkBlack = LightContent
+val CharcoalGray = LightContent
+val SlateMuted = LightContent
+val LineBorder = LightContent
+val PaperBackground = LightBackground
+val CardBackground = LightBackground
+val AccentPrimary = LightContent
+val AccentSuccess = LightContent
+val AccentDanger = LightContent
+val AccentWarning = LightContent
+val DarkPaperBackground = DarkBackground
+val DarkCardBackground = DarkBackground
+val DarkTextPrimary = DarkContent
+val DarkTextSecondary = DarkContent
