@@ -12,6 +12,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.feiji.bulletnotes.ui.BulletNotesScreen
@@ -22,12 +26,17 @@ class MainActivity : ComponentActivity() {
     private val viewModel: NoteViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { FeiJiTheme { BackupSetupPrompt(viewModel) } }
+        setContent {
+            var darkTheme by rememberSaveable { mutableStateOf(isSystemInDarkTheme()) }
+            FeiJiTheme(darkTheme = darkTheme) {
+                BackupSetupPrompt(viewModel = viewModel, onToggleTheme = { darkTheme = !darkTheme })
+            }
+        }
     }
 }
 
 @Composable
-private fun BackupSetupPrompt(viewModel: NoteViewModel) {
+private fun BackupSetupPrompt(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val needsSetup by viewModel.needsBackupSetup.collectAsState()
     val todayBackupPrompt: com.feiji.bulletnotes.data.BackupManager.BackupFile? by viewModel.todayBackupPrompt.collectAsState()
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -37,7 +46,7 @@ private fun BackupSetupPrompt(viewModel: NoteViewModel) {
             }
         }
     }
-    BulletNotesScreen(viewModel = viewModel)
+    BulletNotesScreen(viewModel = viewModel, onToggleTheme = onToggleTheme)
     if (needsSetup) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissBackupSetup() },
