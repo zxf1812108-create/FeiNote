@@ -98,9 +98,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.NoteEntity
-import com.feiji.bulletnotes.ui.theme.AccentDanger
-import com.feiji.bulletnotes.ui.theme.LineBorder
-import com.feiji.bulletnotes.ui.theme.SlateMuted
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -108,7 +105,7 @@ import java.time.LocalDate
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun BulletNotesScreen(viewModel: NoteViewModel) {
+fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     // 新建笔记期间的常驻焦点接力点，防止旧输入框失焦时键盘关闭。
@@ -292,6 +289,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                                 if (!isToday) {
                                     viewModel.returnToToday()
                                 }
+                                onToggleTheme()
                             },
                         color = Color.Transparent
                     ) {
@@ -318,7 +316,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                             .clip(CircleShape)
                             .background(
                                 if (hoveringTrash) {
-                                    AccentDanger.copy(alpha = 0.2f)
+                                    MaterialTheme.colorScheme.background
                                 } else {
                                     Color.Transparent
                                 }
@@ -339,7 +337,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         Icon(
                             Icons.Outlined.Delete,
                             contentDescription = "回收站",
-                            tint = if (hoveringTrash) AccentDanger else SlateMuted
+                            tint = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
@@ -408,7 +406,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         Text(
                             text = "今天暂无笔记",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = SlateMuted
+                            color = MaterialTheme.colorScheme.onSurface
                         )
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -416,7 +414,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         Text(
                             text = "点击此处开始记录",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = SlateMuted.copy(alpha = 0.7f)
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
@@ -717,7 +715,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel) {
                         viewModel.restoreSelectedBackup(file.uri)
                     }
                 ) {
-                    Text("确认覆盖恢复", color = AccentDanger)
+                    Text("确认覆盖恢复", color = MaterialTheme.colorScheme.onSurface)
                 }
             },
             dismissButton = {
@@ -1013,7 +1011,7 @@ fun BulletNoteRow(
                             Text(
                                 text = "输入笔记内容...",
                                 style = MaterialTheme.typography.bodyLarge.copy(
-                                    color = SlateMuted
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             )
                         }
