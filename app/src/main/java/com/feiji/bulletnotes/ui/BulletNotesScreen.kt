@@ -1,5 +1,5 @@
 package com.feiji.bulletnotes.ui
- 
+
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -867,7 +867,9 @@ fun BulletNoteRow(
                 }
             )
             .padding(horizontal = 6.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.Top
+        // 笔记文字会跟随系统字体缩放；让项目符号与文字区域垂直居中，
+        // 避免字体放大后文字基线下沉、方框和圆点仍停留在顶部。
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
@@ -919,7 +921,6 @@ fun BulletNoteRow(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .padding(top = 4.dp)
                 .then(
                     if (!isEditing) {
                         Modifier
