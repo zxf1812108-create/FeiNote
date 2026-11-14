@@ -46,8 +46,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.feiji.bulletnotes.data.NoteEntity
-import com.feiji.bulletnotes.ui.theme.AccentDanger
-import com.feiji.bulletnotes.ui.theme.SlateMuted
 
 @Composable
 fun TrashBinDialog(
@@ -99,7 +97,7 @@ fun TrashBinDialog(
                     if (trashNotes.isNotEmpty()) {
                         TextButton(
                             onClick = { showConfirmClearAllDialog = true },
-                            colors = ButtonDefaults.textButtonColors(contentColor = AccentDanger)
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DeleteForever,
@@ -125,7 +123,7 @@ fun TrashBinDialog(
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "关闭",
-                            tint = SlateMuted
+                            tint = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
@@ -144,7 +142,7 @@ fun TrashBinDialog(
                         Text(
                             text = "回收站是空的",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = SlateMuted
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 } else {
@@ -180,7 +178,7 @@ fun TrashBinDialog(
                                         Text(
                                             text = "原日期: ${note.dateString}",
                                             fontSize = 11.sp,
-                                            color = SlateMuted
+                                            color = MaterialTheme.colorScheme.onSurface
                                         )
                                     }
 
@@ -218,7 +216,7 @@ fun TrashBinDialog(
                         showConfirmClearAllDialog = false
                         onDeleteBeforeToday()
                     },
-                    colors = ButtonDefaults.textButtonColors(contentColor = AccentDanger)
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
                 ) {
                     Text(text = "确认删除", fontWeight = FontWeight.Bold)
                 }
