@@ -27,7 +27,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            var darkTheme by rememberSaveable { mutableStateOf(isSystemInDarkTheme()) }
+            // Compose 专用函数必须在 Composable 上下文中先求值，再用于 rememberSaveable 初始化。
+            val systemDarkTheme = isSystemInDarkTheme()
+            var darkTheme by rememberSaveable { mutableStateOf(systemDarkTheme) }
             FeiJiTheme(darkTheme = darkTheme) {
                 BackupSetupPrompt(viewModel = viewModel, onToggleTheme = { darkTheme = !darkTheme })
             }
