@@ -1023,3 +1023,4 @@ fun BulletNoteRow(
         }
     }
 }
+
