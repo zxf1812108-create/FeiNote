@@ -86,7 +86,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
@@ -1035,14 +1034,15 @@ fun BulletNoteRow(
                             if (keyEvent.key != Key.Enter) {
                                 false
                             } else {
-                                when (keyEvent.type) {
-                                    KeyEventType.KeyDown -> {
+                                // 直接读取 Android 原生按键 action，兼容当前项目使用的 Compose KeyEvent API。
+                                when (keyEvent.nativeKeyEvent.action) {
+                                    android.view.KeyEvent.ACTION_DOWN -> {
                                         if (keyEvent.nativeKeyEvent.repeatCount == 0) {
                                             enterDownTime = keyEvent.nativeKeyEvent.downTime
                                         }
                                         true
                                     }
-                                    KeyEventType.KeyUp -> {
+                                    android.view.KeyEvent.ACTION_UP -> {
                                         val downTime = enterDownTime
                                         val duration = if (downTime != null) {
                                             (keyEvent.nativeKeyEvent.eventTime - downTime).coerceAtLeast(0L)
