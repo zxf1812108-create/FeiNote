@@ -1,6 +1,7 @@
 package com.feiji.bulletnotes.ui
 
 import android.widget.Toast
+import android.os.SystemClock
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -85,6 +86,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
@@ -93,7 +95,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.feiji.bulletnotes.data.BulletType
@@ -783,6 +784,36 @@ fun BulletNoteRow(
             )
         )
     }
+    // 记录回车按下时间：短按结束编辑，长按在光标处插入换行。
+    var enterDownTime by remember(note.id, isEditing) { mutableStateOf<Long?>(null) }
+    var lastEnterHandledAt by remember(note.id, isEditing) { mutableStateOf(0L) }
+
+    fun handleEnterPress(pressDurationMs: Long) {
+        // 某些输入法会同时派发按键事件和 IME Action；短暂去重，避免一次回车执行两次。
+        val now = SystemClock.uptimeMillis()
+        if (now - lastEnterHandledAt < 250L) return
+        lastEnterHandledAt = now
+
+        if (pressDurationMs >= 500L) {
+            val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
+                .coerceIn(0, editValue.text.length)
+            val selectionEnd = maxOf(editValue.selection.start, editValue.selection.end)
+                .coerceIn(0, editValue.text.length)
+            val updatedText = buildString {
+                append(editValue.text.substring(0, selectionStart))
+                append('\n')
+                append(editValue.text.substring(selectionEnd))
+            }
+            val cursorPosition = selectionStart + 1
+            editValue = editValue.copy(
+                text = updatedText,
+                selection = TextRange(cursorPosition)
+            )
+            onContentChange(updatedText)
+        } else {
+            onEnterPressed()
+        }
+    }
 
     // 编辑时请求焦点，并在键盘弹出后将整行移动到可视区域。
     LaunchedEffect(isEditing) {
@@ -963,14 +994,27 @@ fun BulletNoteRow(
                 }
         ) {
             if (!isEditing) {
-                Text(
-                    text = note.content,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                // 每个手动换行作为一个段落：段内保持主题默认行高，段落之间增加 1.5 倍普通行高的间距。
+                val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
                 )
+                val paragraphGap = with(LocalDensity.current) {
+                    MaterialTheme.typography.bodyLarge.lineHeight.toDp() * 1.5f
+                }
+                val paragraphs = note.content.split('\n')
+
+                Column {
+                    paragraphs.forEachIndexed { index, paragraph ->
+                        Text(
+                            text = paragraph.ifEmpty { " " },
+                            style = paragraphStyle
+                        )
+                        if (index < paragraphs.lastIndex) {
+                            Spacer(modifier = Modifier.height(paragraphGap))
+                        }
+                    }
+                }
             } else {
                 BasicTextField(
                     value = editValue,
@@ -988,15 +1032,33 @@ fun BulletNoteRow(
                             textFieldCoordinates = coordinates
                         }
                         .onKeyEvent { keyEvent ->
-                            if (keyEvent.key == Key.Enter) {
-                                onEnterPressed()
-                                true
-                            } else {
+                            if (keyEvent.key != Key.Enter) {
                                 false
+                            } else {
+                                when (keyEvent.type) {
+                                    KeyEventType.KeyDown -> {
+                                        if (keyEvent.nativeKeyEvent.repeatCount == 0) {
+                                            enterDownTime = keyEvent.nativeKeyEvent.downTime
+                                        }
+                                        true
+                                    }
+                                    KeyEventType.KeyUp -> {
+                                        val downTime = enterDownTime
+                                        val duration = if (downTime != null) {
+                                            (keyEvent.nativeKeyEvent.eventTime - downTime).coerceAtLeast(0L)
+                                        } else 0L
+                                        handleEnterPress(duration)
+                                        enterDownTime = null
+                                        true
+                                    }
+                                    else -> true
+                                }
                             }
                         },
+                    // 编辑时段内行高保持系统主题默认值，不整体放大行高。
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     onTextLayout = {
@@ -1007,7 +1069,11 @@ fun BulletNoteRow(
                     ),
                     keyboardActions = KeyboardActions(
                         onNext = {
-                            onEnterPressed()
+                            val downTime = enterDownTime
+                            val duration = if (downTime != null) {
+                                (SystemClock.uptimeMillis() - downTime).coerceAtLeast(0L)
+                            } else 0L
+                            handleEnterPress(duration)
                         }
                     ),
                     decorationBox = { innerTextField ->
@@ -1015,7 +1081,8 @@ fun BulletNoteRow(
                             Text(
                                 text = "输入笔记内容...",
                                 style = MaterialTheme.typography.bodyLarge.copy(
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
                                 )
                             )
                         }
