@@ -803,6 +803,7 @@ fun BulletNoteRow(
     val undoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val redoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+    val bulletColor = MaterialTheme.colorScheme.onSurface
 
     var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
 
@@ -982,6 +983,26 @@ fun BulletNoteRow(
                             .size(8.dp)
                             .background(MaterialTheme.colorScheme.onSurface, CircleShape)
                     )
+                }
+
+                BulletType.STAR -> {
+                    Canvas(modifier = Modifier.size(18.dp)) {
+                        val scale = size.width / 18f
+                        val starPath = Path().apply {
+                            moveTo(9f * scale, 0f)
+                            lineTo(11.1f * scale, 6.2f * scale)
+                            lineTo(17.7f * scale, 6.5f * scale)
+                            lineTo(12.6f * scale, 10.6f * scale)
+                            lineTo(14.4f * scale, 17.2f * scale)
+                            lineTo(9f * scale, 13.4f * scale)
+                            lineTo(3.6f * scale, 17.2f * scale)
+                            lineTo(5.4f * scale, 10.6f * scale)
+                            lineTo(0.3f * scale, 6.5f * scale)
+                            lineTo(6.9f * scale, 6.2f * scale)
+                            close()
+                        }
+                        drawPath(path = starPath, color = bulletColor)
+                    }
                 }
             }
         }
