@@ -1033,8 +1033,15 @@ fun BulletNoteRow(
                     color = MaterialTheme.colorScheme.onSurface,
                     lineHeight = bodyLineHeight
                 )
+                val firstLine = note.content.substringBefore('\n')
+                val hasMoreParagraphs = note.content.contains('\n')
+                val previewText = when {
+                    hasMoreParagraphs && firstLine.isEmpty() -> "…"
+                    hasMoreParagraphs -> "$firstLine…"
+                    else -> firstLine.ifEmpty { " " }
+                }
                 Text(
-                    text = note.content.substringBefore('\n').ifEmpty { " " },
+                    text = previewText,
                     style = paragraphStyle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1130,6 +1137,7 @@ fun BulletNoteRow(
                                 ) {
                                     Text(
                                         text = "⌃",
+                                        modifier = Modifier.offset(y = 2.dp),
                                         fontSize = 20.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
