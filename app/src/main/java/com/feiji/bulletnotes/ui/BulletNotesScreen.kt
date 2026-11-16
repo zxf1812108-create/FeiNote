@@ -38,7 +38,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.foundation.text.input.OutputTransformation
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -49,7 +50,6 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -96,9 +96,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.ParagraphStyle
-import androidx.compose.ui.text.input.OffsetMapping
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -743,58 +740,32 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 }
 
 /**
- * 编辑模式段间距转换：只改变显示，不改变实际保存的文本。
- * 每个原始换行后插入一个零宽字符和额外换行，并用 OffsetMapping
- * 保证光标与选区仍对应原始文本。
+ * 编辑模式段间距转换：仅改变显示，不改变 TextFieldState 中的原始文本。
+ * 每个真实换行符后插入零宽字符和一个视觉换行，并将视觉空白段行高设为正文行高的 0.5 倍。
+ * OutputTransformation 会自动维护原文与显示文本之间的光标/选区映射。
  */
-private class ParagraphGapVisualTransformation(
-    private val gapLineHeight: androidx.compose.ui.unit.TextUnit
-) : VisualTransformation {
-    override fun filter(text: AnnotatedString): TransformedText {
-        val source = text.text
-        val builder = AnnotatedString.Builder()
-        val originalOffsetsToTransformed = IntArray(source.length + 1)
-        val transformedOffsetsToOriginal = mutableListOf(0)
-        val gapRanges = mutableListOf<IntRange>()
-        var transformedOffset = 0
+@OptIn(ExperimentalFoundationApi::class)
+private fun paragraphGapOutputTransformation(
+    gapLineHeight: androidx.compose.ui.unit.TextUnit
+): OutputTransformation = OutputTransformation {
+    // 先记录原文中换行符的位置，再从后向前插入，避免原文索引发生偏移。
+    val originalLength = length
+    val newlinePositions = (0 until originalLength).filter { this[it] == '\n' }
 
-        source.forEachIndexed { index, char ->
-            originalOffsetsToTransformed[index] = transformedOffset
-            builder.append(char)
-            transformedOffset++
-            transformedOffsetsToOriginal.add(index + 1)
+    for (index in newlinePositions.asReversed()) {
+        insert(index + 1, "\u200B\n")
+    }
 
-            if (char == '\n') {
-                val gapStart = transformedOffset
-                builder.append('\u200B')
-                transformedOffset++
-                transformedOffsetsToOriginal.add(index + 1)
-                builder.append('\n')
-                transformedOffset++
-                transformedOffsetsToOriginal.add(index + 1)
-                gapRanges.add(gapStart until transformedOffset)
-            }
-        }
-        originalOffsetsToTransformed[source.length] = transformedOffset
-
-        gapRanges.forEach { range ->
-            builder.addStyle(
-                style = ParagraphStyle(lineHeight = gapLineHeight),
-                start = range.first,
-                end = range.last + 1
-            )
-        }
-
-        val mapping = object : OffsetMapping {
-            override fun originalToTransformed(offset: Int): Int =
-                originalOffsetsToTransformed[offset.coerceIn(0, source.length)]
-
-            override fun transformedToOriginal(offset: Int): Int =
-                transformedOffsetsToOriginal[
-                    offset.coerceIn(0, transformedOffsetsToOriginal.lastIndex)
-                ]
-        }
-        return TransformedText(builder.toAnnotatedString(), mapping)
+    // 所有字符插入完成后再添加 ParagraphStyle，避免后续插入使样式范围错位。
+    var insertedCharactersBefore = 0
+    for (originalIndex in newlinePositions) {
+        val gapStart = originalIndex + 1 + insertedCharactersBefore
+        addStyle(
+            style = ParagraphStyle(lineHeight = gapLineHeight),
+            start = gapStart,
+            end = gapStart + 2
+        )
+        insertedCharactersBefore += 2
     }
 }
 
@@ -847,37 +818,65 @@ fun BulletNoteRow(
         0.dp
     }
 
-    var editValue by remember(note.id, isEditing) {
-        mutableStateOf(
-            TextFieldValue(
-                note.content,
-                selection = TextRange(note.content.length)
-            )
+    // 使用状态式文本输入，让输入法直接操作原始文本/光标/组合区间，
+    // 不再通过 TextFieldValue + 自定义 OffsetMapping 来回转换。
+    val editState = remember(note.id, isEditing) {
+        TextFieldState(
+            initialText = note.content,
+            initialSelection = TextRange(note.content.length)
         )
     }
     // 编辑历史仅保存在当前编辑会话中，避免撤销操作影响其他笔记。
     val undoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val redoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
+    var lastObservedText by remember(note.id, isEditing) {
+        mutableStateOf(note.content)
+    }
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
     val paragraphGapTransformation = remember(bodyLineHeight) {
-        ParagraphGapVisualTransformation(bodyLineHeight * 0.8f)
+        paragraphGapOutputTransformation(bodyLineHeight * 0.5f)
+    }
+
+    // 监听 TextFieldState 的真实文本变化：输入法组合文本和光标由 Compose 自己维护。
+    // 仅文本变化时写数据库，并把上一个完整文本状态加入撤销历史。
+    LaunchedEffect(editState) {
+        snapshotFlow { editState.text.toString() }
+            .collect { newText ->
+                if (newText != lastObservedText) {
+                    undoHistory.add(lastObservedText)
+                    if (undoHistory.size > 100) undoHistory.removeAt(0)
+                    redoHistory.clear()
+                    lastObservedText = newText
+                    onContentChange(newText)
+                }
+            }
     }
 
     var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
 
     fun undoEdit() {
         if (undoHistory.isEmpty()) return
-        redoHistory.add(editValue.text)
+        val current = editState.text.toString()
+        redoHistory.add(current)
         val previous = undoHistory.removeAt(undoHistory.lastIndex)
-        editValue = TextFieldValue(previous, selection = TextRange(previous.length))
+        editState.edit {
+            replace(0, length, previous)
+            selection = TextRange(previous.length)
+        }
+        lastObservedText = previous
         onContentChange(previous)
     }
 
     fun redoEdit() {
         if (redoHistory.isEmpty()) return
-        undoHistory.add(editValue.text)
+        val current = editState.text.toString()
+        undoHistory.add(current)
         val next = redoHistory.removeAt(redoHistory.lastIndex)
-        editValue = TextFieldValue(next, selection = TextRange(next.length))
+        editState.edit {
+            replace(0, length, next)
+            selection = TextRange(next.length)
+        }
+        lastObservedText = next
         onContentChange(next)
     }
 
@@ -889,27 +888,25 @@ fun BulletNoteRow(
         onEnterPressed()
     }
 
-    // 专用“换段”按钮：在当前选区/光标位置插入换行，并将光标移到新段落开头。
-    // 不再尝试检测软键盘回车键长按，因为多数输入法不会向应用提供完整的按下/抬起事件。
+    // 专用“换段”按钮：只在原文当前选区/光标处插入一个真实换行符。
+    // 视觉间距由 OutputTransformation 单独生成，不会进入数据库正文。
     fun insertParagraphAtCursor() {
-        val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
-            .coerceIn(0, editValue.text.length)
-        val selectionEnd = maxOf(editValue.selection.start, editValue.selection.end)
-            .coerceIn(0, editValue.text.length)
-        val updatedText = buildString {
-            append(editValue.text.substring(0, selectionStart))
-            append('\n')
-            append(editValue.text.substring(selectionEnd))
-        }
-        undoHistory.add(editValue.text)
+        val currentText = editState.text.toString()
+        val selectionStart = minOf(editState.selection.start, editState.selection.end)
+            .coerceIn(0, currentText.length)
+        val selectionEnd = maxOf(editState.selection.start, editState.selection.end)
+            .coerceIn(0, currentText.length)
+
+        undoHistory.add(currentText)
         if (undoHistory.size > 100) undoHistory.removeAt(0)
         redoHistory.clear()
-        val cursorPosition = selectionStart + 1
-        editValue = editValue.copy(
-            text = updatedText,
-            selection = TextRange(cursorPosition),
-            composition = null
-        )
+
+        editState.edit {
+            replace(selectionStart, selectionEnd, "\n")
+            selection = TextRange(selectionStart + 1)
+        }
+        val updatedText = editState.text.toString()
+        lastObservedText = updatedText
         onContentChange(updatedText)
     }
 
@@ -934,8 +931,8 @@ fun BulletNoteRow(
     // 不再依赖 BasicTextField 内部的 BringIntoViewRequester 自动滚动。
     LaunchedEffect(
         isEditing,
-        editValue.text,
-        editValue.selection,
+        editState.text,
+        editState.selection,
         textLayout,
         listViewportBounds
     ) {
@@ -959,9 +956,12 @@ fun BulletNoteRow(
         val viewport = listViewportBounds ?: return@LaunchedEffect
 
         // TextLayoutResult 对应转换后的文本，因此光标索引也需要转换。
-        val originalCursor = editValue.selection.end.coerceIn(0, editValue.text.length)
+        val rawText = editState.text.toString()
+        val originalCursor = editState.selection.end.coerceIn(0, rawText.length)
+        // OutputTransformation 在每个真实换行后插入两个视觉字符；TextLayoutResult
+        // 对应转换后的布局，因此这里只用于滚动定位，不参与输入法的光标映射。
         val transformedCursor = originalCursor +
-            editValue.text.take(originalCursor).count { it == '\n' } * 2
+            rawText.take(originalCursor).count { it == '\n' } * 2
         val cursor = layout.getCursorRect(transformedCursor)
 
         // 将光标底部从输入框局部坐标转换为屏幕根坐标。
@@ -1113,21 +1113,7 @@ fun BulletNoteRow(
                 )
             } else {
                 BasicTextField(
-                    value = editValue,
-                    onValueChange = { newValue ->
-                        val textChanged = newValue.text != editValue.text
-                        if (textChanged) {
-                            undoHistory.add(editValue.text)
-                            if (undoHistory.size > 100) undoHistory.removeAt(0)
-                            redoHistory.clear()
-                        }
-                        editValue = newValue
-
-                        // 仅正文真正变化时写数据库，保留 selection 和 IME composition。
-                        if (textChanged) {
-                            onContentChange(newValue.text)
-                        }
-                    },
+                    state = editState,
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(focusRequester)
@@ -1155,26 +1141,28 @@ fun BulletNoteRow(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
                     ),
-                    visualTransformation = paragraphGapTransformation,
+                    outputTransformation = paragraphGapTransformation,
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    onTextLayout = { layout ->
-                        textLayout = layout
-                        if (layout.lineCount > 0) {
-                            firstLineHeightPx =
-                                layout.getLineBottom(0) - layout.getLineTop(0)
+                    onTextLayout = { getResult ->
+                        getResult()?.let { layout ->
+                            textLayout = layout
+                            if (layout.lineCount > 0) {
+                                firstLineHeightPx =
+                                    layout.getLineBottom(0) - layout.getLineTop(0)
+                            }
                         }
                     },
                     keyboardOptions = KeyboardOptions.Default.copy(
                         imeAction = ImeAction.Next
                     ),
-                    keyboardActions = KeyboardActions(
+                    onKeyboardAction = { _ ->
                         // 手机软键盘自带的回车/Next 动作仍保持原来的行为：结束编辑。
-                        onNext = { finishEditingFromEnter() }
-                    ),
-                    decorationBox = { innerTextField ->
+                        finishEditingFromEnter()
+                    },
+                    decorator = { innerTextField ->
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Box(modifier = Modifier.fillMaxWidth()) {
-                                if (editValue.text.isEmpty()) {
+                                if (editState.text.isEmpty()) {
                                     Text(
                                         text = "输入笔记内容...",
                                         style = MaterialTheme.typography.bodyLarge.copy(
