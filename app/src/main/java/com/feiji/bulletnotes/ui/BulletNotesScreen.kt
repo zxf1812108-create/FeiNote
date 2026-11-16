@@ -1137,13 +1137,7 @@ fun BulletNoteRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Collapse,
-                                    contentDescription = "收起编辑",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    onClick = onContentClick
-                                )
-                                Spacer(modifier = Modifier.weight(1f))
+                                // 撤销、恢复、换段放在左侧；收起按钮放在最右侧。
                                 EditorActionButton(
                                     symbol = EditorActionSymbol.Undo,
                                     contentDescription = "撤销",
@@ -1163,6 +1157,13 @@ fun BulletNoteRow(
                                     contentDescription = "换段",
                                     tint = MaterialTheme.colorScheme.primary,
                                     onClick = { insertParagraphAtCursor() }
+                                )
+                                Spacer(modifier = Modifier.weight(1f))
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Collapse,
+                                    contentDescription = "收起编辑",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    onClick = onContentClick
                                 )
                             }
                         }
