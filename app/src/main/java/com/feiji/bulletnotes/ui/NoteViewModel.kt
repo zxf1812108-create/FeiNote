@@ -88,6 +88,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val backupMutex = Mutex()
     private var lastSnapshot: String? = null
     private var backupLoop: Job? = null
+    // 保留最近一次正文写入任务，并串成队列，确保退出编辑时能等待全部输入落库。
+    @Volatile private var latestContentWriteJob: Job? = null
 
     fun dismissBackupSetup() { _needsBackupSetup.value = false }
 
@@ -170,6 +172,31 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * 在正文写入锁和备份锁都已持有时调用。
+     * 只有完整数据快照发生变化才写备份；写入失败时不更新比较基线，留待下次重试。
+     */
+    private suspend fun backupIfChangedLocked(app: Application) {
+        if (!BackupManager.hasBackupFolder(app)) return
+        val current = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+        if (current != lastSnapshot) {
+            if (BackupManager.exportBackup(app, noteDao)) {
+                lastSnapshot = current
+            } else {
+                _userMessage.value = "自动备份失败，请检查备份文件夹权限"
+            }
+        }
+    }
+
+    /** 立即检查并备份；同时等待正在进行的正文写入，避免导出旧内容。 */
+    private suspend fun backupIfChanged(app: Application) {
+        contentWriteMutex.withLock {
+            backupMutex.withLock {
+                backupIfChangedLocked(app)
+            }
+        }
+    }
+
     private fun startBackupLoop() {
         if (backupLoop?.isActive == true) return
         backupLoop = viewModelScope.launch(Dispatchers.IO) {
@@ -178,17 +205,15 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             try { BackupManager.cleanOldBackupsOncePerDay(app) } catch (e: Exception) {
                 _userMessage.value = "清理旧备份失败：${e.localizedMessage ?: "未知错误"}"
             }
-            // 启动时记录当前数据；以后每分钟检查一次，有变化才覆盖当日文件。
-            lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
-            while (isActive) {
-                delay(60_000L)
+            // 启动时记录当前数据作为比较基线；退出编辑时立即备份，另每 5 分钟兜底检查。
+            contentWriteMutex.withLock {
                 backupMutex.withLock {
-                    val current = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
-                    if (current != lastSnapshot) {
-                        if (BackupManager.exportBackup(app, noteDao)) lastSnapshot = current
-                        else _userMessage.value = "自动备份失败，请检查备份文件夹权限"
-                    }
+                    lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
                 }
+            }
+            while (isActive) {
+                delay(5 * 60_000L)
+                backupIfChanged(app)
             }
         }
     }
@@ -230,8 +255,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         if (previousId == id) return
         _editingNoteId.value = id
         if (previousId != null) {
-            // 与逐字保存共用互斥锁：先完成已经排队的文字写入，再检查空笔记并按内容调整符号。
+            // 退出编辑时先等待最后一次正文写入，再清理空笔记、自动调整符号，最后立即备份。
+            val pendingContentWrite = latestContentWriteJob
             viewModelScope.launch(Dispatchers.IO) {
+                pendingContentWrite?.join()
+                val app = getApplication<Application>()
                 contentWriteMutex.withLock {
                     val previous = noteDao.getNoteById(previousId)
                     if (previous != null && !previous.isDeleted) {
@@ -261,6 +289,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                             }
                         }
+                    }
+                    // 保持正文写入锁直到备份导出完成，避免备份到编辑过程中的半成品。
+                    backupMutex.withLock {
+                        backupIfChangedLocked(app)
                     }
                 }
             }
@@ -299,7 +331,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun updateNoteContent(id: Long, newContent: String) {
         // 串行写入，避免快速输入时旧内容覆盖新内容；只更新正文，不覆盖排序等字段。
-        viewModelScope.launch(Dispatchers.IO) {
+        // 将每次输入写入串成任务队列；退出编辑时等待队列末尾即可确认正文已全部落库。
+        val previousWrite = latestContentWriteJob
+        latestContentWriteJob = viewModelScope.launch(Dispatchers.IO) {
+            previousWrite?.join()
             contentWriteMutex.withLock {
                 noteDao.updateNoteContent(id, newContent, System.currentTimeMillis())
             }
