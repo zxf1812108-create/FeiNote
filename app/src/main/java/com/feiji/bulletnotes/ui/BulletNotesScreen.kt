@@ -860,7 +860,7 @@ fun BulletNoteRow(
     val redoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
     val paragraphGapTransformation = remember(bodyLineHeight) {
-        ParagraphGapVisualTransformation(bodyLineHeight * 1.5f)
+        ParagraphGapVisualTransformation(bodyLineHeight * 1.2f)
     }
 
     var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
