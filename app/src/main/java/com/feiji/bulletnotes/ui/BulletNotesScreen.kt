@@ -1119,12 +1119,22 @@ fun BulletNoteRow(
                                 innerTextField()
                             }
 
-                            // 撤销、恢复与换段控制均固定在编辑区域末尾。
+                            // 收起按钮固定在最左侧；撤销、恢复与换段控制排列在右侧。
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                TextButton(
+                                    onClick = { onContentClick() },
+                                    modifier = Modifier.focusProperties { canFocus = false }
+                                ) {
+                                    Text(
+                                        text = "⌃",
+                                        fontSize = 20.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Spacer(modifier = Modifier.weight(1f))
                                 TextButton(
                                     onClick = { undoEdit() },
                                     enabled = undoHistory.isNotEmpty(),
@@ -1132,6 +1142,7 @@ fun BulletNoteRow(
                                 ) {
                                     Text(
                                         text = "↶",
+                                        fontSize = 20.sp,
                                         color = if (undoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
                                     )
@@ -1143,6 +1154,7 @@ fun BulletNoteRow(
                                 ) {
                                     Text(
                                         text = "↷",
+                                        fontSize = 20.sp,
                                         color = if (redoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
                                     )
