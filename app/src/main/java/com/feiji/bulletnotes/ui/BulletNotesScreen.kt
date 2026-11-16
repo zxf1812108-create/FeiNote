@@ -83,6 +83,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -783,35 +784,35 @@ fun BulletNoteRow(
             )
         )
     }
-    // 记录回车按下时间：短按结束编辑，长按在光标处插入换行。
-    var enterDownTime by remember(note.id, isEditing) { mutableStateOf<Long?>(null) }
-    var lastEnterHandledAt by remember(note.id, isEditing) { mutableStateOf(0L) }
+    var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
 
-    fun handleEnterPress(pressDurationMs: Long) {
-        // 某些输入法会同时派发按键事件和 IME Action；短暂去重，避免一次回车执行两次。
+    fun finishEditingFromEnter() {
+        // 少数输入法/设备可能同时派发 KeyEvent 与 IME Action，避免一次按键重复新建笔记。
         val now = SystemClock.uptimeMillis()
-        if (now - lastEnterHandledAt < 250L) return
-        lastEnterHandledAt = now
+        if (now - lastFinishEnterAt < 300L) return
+        lastFinishEnterAt = now
+        onEnterPressed()
+    }
 
-        if (pressDurationMs >= 500L) {
-            val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
-                .coerceIn(0, editValue.text.length)
-            val selectionEnd = maxOf(editValue.selection.start, editValue.selection.end)
-                .coerceIn(0, editValue.text.length)
-            val updatedText = buildString {
-                append(editValue.text.substring(0, selectionStart))
-                append('\n')
-                append(editValue.text.substring(selectionEnd))
-            }
-            val cursorPosition = selectionStart + 1
-            editValue = editValue.copy(
-                text = updatedText,
-                selection = TextRange(cursorPosition)
-            )
-            onContentChange(updatedText)
-        } else {
-            onEnterPressed()
+    // 专用“换段”按钮：在当前选区/光标位置插入换行，并将光标移到新段落开头。
+    // 不再尝试检测软键盘回车键长按，因为多数输入法不会向应用提供完整的按下/抬起事件。
+    fun insertParagraphAtCursor() {
+        val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
+            .coerceIn(0, editValue.text.length)
+        val selectionEnd = maxOf(editValue.selection.start, editValue.selection.end)
+            .coerceIn(0, editValue.text.length)
+        val updatedText = buildString {
+            append(editValue.text.substring(0, selectionStart))
+            append('\n')
+            append(editValue.text.substring(selectionEnd))
         }
+        val cursorPosition = selectionStart + 1
+        editValue = editValue.copy(
+            text = updatedText,
+            selection = TextRange(cursorPosition),
+            composition = null
+        )
+        onContentChange(updatedText)
     }
 
     // 编辑时请求焦点，并在键盘弹出后将整行移动到可视区域。
@@ -993,13 +994,13 @@ fun BulletNoteRow(
                 }
         ) {
             if (!isEditing) {
-                // 每个手动换行作为一个段落：段内保持主题默认行高，段落之间增加 1.5 倍普通行高的间距。
+                // 每个手动换行作为一个段落：段内保持主题默认行高，段落之间增加 0.5 倍普通行高的间距。
                 val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = MaterialTheme.colorScheme.onSurface,
                     lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
                 )
                 val paragraphGap = with(LocalDensity.current) {
-                    MaterialTheme.typography.bodyLarge.lineHeight.toDp() * 1.5f
+                    MaterialTheme.typography.bodyLarge.lineHeight.toDp() * 0.5f
                 }
                 val paragraphs = note.content.split('\n')
 
@@ -1031,28 +1032,19 @@ fun BulletNoteRow(
                             textFieldCoordinates = coordinates
                         }
                         .onKeyEvent { keyEvent ->
-                            if (keyEvent.key != Key.Enter) {
-                                false
-                            } else {
-                                // 直接读取 Android 原生按键 action，兼容当前项目使用的 Compose KeyEvent API。
-                                when (keyEvent.nativeKeyEvent.action) {
-                                    android.view.KeyEvent.ACTION_DOWN -> {
-                                        if (keyEvent.nativeKeyEvent.repeatCount == 0) {
-                                            enterDownTime = keyEvent.nativeKeyEvent.downTime
-                                        }
-                                        true
-                                    }
-                                    android.view.KeyEvent.ACTION_UP -> {
-                                        val downTime = enterDownTime
-                                        val duration = if (downTime != null) {
-                                            (keyEvent.nativeKeyEvent.eventTime - downTime).coerceAtLeast(0L)
-                                        } else 0L
-                                        handleEnterPress(duration)
-                                        enterDownTime = null
-                                        true
-                                    }
-                                    else -> true
+                            if (keyEvent.key == Key.Enter) {
+                                // 外接实体键盘的 Enter 仍然结束当前笔记编辑；
+                                // 软键盘的 Enter 则由下面的 IME onNext 处理。
+                                if (
+                                    keyEvent.nativeKeyEvent.action ==
+                                    android.view.KeyEvent.ACTION_DOWN &&
+                                    keyEvent.nativeKeyEvent.repeatCount == 0
+                                ) {
+                                    finishEditingFromEnter()
                                 }
+                                true
+                            } else {
+                                false
                             }
                         },
                     // 编辑时段内行高保持系统主题默认值，不整体放大行高。
@@ -1068,26 +1060,42 @@ fun BulletNoteRow(
                         imeAction = ImeAction.Next
                     ),
                     keyboardActions = KeyboardActions(
-                        onNext = {
-                            val downTime = enterDownTime
-                            val duration = if (downTime != null) {
-                                (SystemClock.uptimeMillis() - downTime).coerceAtLeast(0L)
-                            } else 0L
-                            handleEnterPress(duration)
-                        }
+                        // 手机软键盘自带的回车/Next 动作仍保持原来的行为：结束编辑。
+                        onNext = { finishEditingFromEnter() }
                     ),
                     decorationBox = { innerTextField ->
-                        if (editValue.text.isEmpty()) {
-                            Text(
-                                text = "输入笔记内容...",
-                                style = MaterialTheme.typography.bodyLarge.copy(
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
-                                )
-                            )
-                        }
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                if (editValue.text.isEmpty()) {
+                                    Text(
+                                        text = "输入笔记内容...",
+                                        style = MaterialTheme.typography.bodyLarge.copy(
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                                        )
+                                    )
+                                }
+                                innerTextField()
+                            }
 
-                        innerTextField()
+                            // 专用换段按钮固定在编辑区域内容末尾，不依赖输入法的长按事件。
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(
+                                    onClick = { insertParagraphAtCursor() },
+                                    modifier = Modifier.focusProperties {
+                                        canFocus = false
+                                    }
+                                ) {
+                                    Text(
+                                        text = "↵ 换段",
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
                     }
                 )
             }
