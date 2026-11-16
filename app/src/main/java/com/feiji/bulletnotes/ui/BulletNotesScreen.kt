@@ -3,6 +3,7 @@ package com.feiji.bulletnotes.ui
 import android.widget.Toast
 import android.os.SystemClock
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,7 +20,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
@@ -86,6 +86,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
@@ -1126,57 +1130,39 @@ fun BulletNoteRow(
                                 innerTextField()
                             }
 
-                            // 收起按钮固定在最左侧；撤销、恢复与换段控制排列在右侧。
+                            // 四个操作统一使用同一套矢量绘制与 IconButton 布局，
+                            // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                TextButton(
-                                    onClick = { onContentClick() },
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "⌃",
-                                        modifier = Modifier.offset(y = 2.dp),
-                                        fontSize = 20.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Collapse,
+                                    contentDescription = "收起编辑",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    onClick = onContentClick
+                                )
                                 Spacer(modifier = Modifier.weight(1f))
-                                TextButton(
-                                    onClick = { undoEdit() },
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Undo,
+                                    contentDescription = "撤销",
                                     enabled = undoHistory.isNotEmpty(),
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "↶",
-                                        fontSize = 20.sp,
-                                        color = if (undoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                                    )
-                                }
-                                TextButton(
-                                    onClick = { redoEdit() },
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    onClick = { undoEdit() }
+                                )
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Redo,
+                                    contentDescription = "恢复",
                                     enabled = redoHistory.isNotEmpty(),
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "↷",
-                                        fontSize = 20.sp,
-                                        color = if (redoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                                    )
-                                }
-                                TextButton(
-                                    onClick = { insertParagraphAtCursor() },
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "↵",
-                                        fontSize = 20.sp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    onClick = { redoEdit() }
+                                )
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Paragraph,
+                                    contentDescription = "换段",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    onClick = { insertParagraphAtCursor() }
+                                )
                             }
                         }
                     }
@@ -1186,3 +1172,90 @@ fun BulletNoteRow(
 
     }
 }
+
+/** 图标按钮使用统一的 24x24 坐标系绘制，彻底避开字体字形基线差异。 */
+private enum class EditorActionSymbol {
+    Collapse,
+    Undo,
+    Redo,
+    Paragraph
+}
+
+@Composable
+private fun EditorActionButton(
+    symbol: EditorActionSymbol,
+    contentDescription: String,
+    tint: Color,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val iconColor = if (enabled) {
+        tint
+    } else {
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+    }
+
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.focusProperties { canFocus = false }
+    ) {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val scale = size.width / 24f
+            val strokeWidth = 2.dp.toPx()
+            val stroke = Stroke(
+                width = strokeWidth,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+            fun point(x: Float, y: Float) = Offset(x * scale, y * scale)
+
+            val path = Path()
+            when (symbol) {
+                EditorActionSymbol.Collapse -> {
+                    path.moveTo(point(5f, 14f).x, point(5f, 14f).y)
+                    path.lineTo(point(12f, 7f).x, point(12f, 7f).y)
+                    path.lineTo(point(19f, 14f).x, point(19f, 14f).y)
+                }
+
+                EditorActionSymbol.Undo -> {
+                    path.moveTo(point(19f, 12f).x, point(19f, 12f).y)
+                    path.cubicTo(
+                        point(19f, 8f).x, point(19f, 8f).y,
+                        point(16f, 5f).x, point(16f, 5f).y,
+                        point(12f, 5f).x, point(12f, 5f).y
+                    )
+                    path.lineTo(point(6f, 5f).x, point(6f, 5f).y)
+                    path.moveTo(point(10f, 1f).x, point(10f, 1f).y)
+                    path.lineTo(point(6f, 5f).x, point(6f, 5f).y)
+                    path.lineTo(point(10f, 9f).x, point(10f, 9f).y)
+                }
+
+                EditorActionSymbol.Redo -> {
+                    path.moveTo(point(5f, 12f).x, point(5f, 12f).y)
+                    path.cubicTo(
+                        point(5f, 8f).x, point(5f, 8f).y,
+                        point(8f, 5f).x, point(8f, 5f).y,
+                        point(12f, 5f).x, point(12f, 5f).y
+                    )
+                    path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
+                    path.moveTo(point(14f, 1f).x, point(14f, 1f).y)
+                    path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
+                    path.lineTo(point(14f, 9f).x, point(14f, 9f).y)
+                }
+
+                EditorActionSymbol.Paragraph -> {
+                    path.moveTo(point(17f, 5f).x, point(17f, 5f).y)
+                    path.lineTo(point(17f, 13f).x, point(17f, 13f).y)
+                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
+                    path.moveTo(point(10f, 9f).x, point(10f, 9f).y)
+                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
+                    path.lineTo(point(10f, 17f).x, point(10f, 17f).y)
+                }
+            }
+
+            drawPath(path = path, color = iconColor, style = stroke)
+        }
+    }
+}
+
