@@ -271,7 +271,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun updateNoteContent(id: Long, newContent: String) {
         // 串行写入，避免快速输入时旧内容覆盖新内容；只更新正文，不覆盖排序等字段。
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             contentWriteMutex.withLock {
                 noteDao.updateNoteContent(id, newContent, System.currentTimeMillis())
             }
