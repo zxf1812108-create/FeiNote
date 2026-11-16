@@ -55,6 +55,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
@@ -93,6 +95,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.ParagraphStyle
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -736,6 +744,62 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 }
 
 /**
+ * 编辑模式段间距转换：只改变显示，不改变实际保存的文本。
+ * 每个原始换行后插入一个零宽字符和额外换行，并用 OffsetMapping
+ * 保证光标与选区仍对应原始文本。
+ */
+private class ParagraphGapVisualTransformation(
+    private val gapLineHeight: androidx.compose.ui.unit.TextUnit
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val source = text.text
+        val builder = AnnotatedString.Builder()
+        val originalOffsetsToTransformed = IntArray(source.length + 1)
+        val transformedOffsetsToOriginal = mutableListOf(0)
+        val gapRanges = mutableListOf<IntRange>()
+        var transformedOffset = 0
+
+        source.forEachIndexed { index, char ->
+            originalOffsetsToTransformed[index] = transformedOffset
+            builder.append(char)
+            transformedOffset++
+            transformedOffsetsToOriginal.add(index + 1)
+
+            if (char == '\n') {
+                val gapStart = transformedOffset
+                builder.append('\u200B')
+                transformedOffset++
+                transformedOffsetsToOriginal.add(index + 1)
+                builder.append('\n')
+                transformedOffset++
+                transformedOffsetsToOriginal.add(index + 1)
+                gapRanges.add(gapStart until transformedOffset)
+            }
+        }
+        originalOffsetsToTransformed[source.length] = transformedOffset
+
+        gapRanges.forEach { range ->
+            builder.addStyle(
+                style = ParagraphStyle(lineHeight = gapLineHeight),
+                start = range.first,
+                end = range.last + 1
+            )
+        }
+
+        val mapping = object : OffsetMapping {
+            override fun originalToTransformed(offset: Int): Int =
+                originalOffsetsToTransformed[offset.coerceIn(0, source.length)]
+
+            override fun transformedToOriginal(offset: Int): Int =
+                transformedOffsetsToOriginal[
+                    offset.coerceIn(0, transformedOffsetsToOriginal.lastIndex)
+                ]
+        }
+        return TransformedText(builder.toAnnotatedString(), mapping)
+    }
+}
+
+/**
  * 单条子弹笔记组件
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -784,6 +848,12 @@ fun BulletNoteRow(
             )
         )
     }
+    var isExpanded by remember(note.id) { mutableStateOf(false) }
+    val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+    val paragraphGapTransformation = remember(bodyLineHeight) {
+        ParagraphGapVisualTransformation(bodyLineHeight * 0.5f)
+    }
+
     var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
 
     fun finishEditingFromEnter() {
@@ -860,9 +930,11 @@ fun BulletNoteRow(
             ?: return@LaunchedEffect
         val viewport = listViewportBounds ?: return@LaunchedEffect
 
-        val cursor = layout.getCursorRect(
-            editValue.selection.end.coerceIn(0, editValue.text.length)
-        )
+        // TextLayoutResult 对应转换后的文本，因此光标索引也需要转换。
+        val originalCursor = editValue.selection.end.coerceIn(0, editValue.text.length)
+        val transformedCursor = originalCursor +
+            editValue.text.take(originalCursor).count { it == '\n' } * 2
+        val cursor = layout.getCursorRect(transformedCursor)
 
         // 将光标底部从输入框局部坐标转换为屏幕根坐标。
         val cursorRoot = fieldCoordinates.localToRoot(
@@ -898,13 +970,13 @@ fun BulletNoteRow(
                 }
             )
             .padding(horizontal = 6.dp, vertical = 6.dp),
-        // 笔记文字会跟随系统字体缩放；让项目符号与文字区域垂直居中，
-        // 避免字体放大后文字基线下沉、方框和圆点仍停留在顶部。
-        verticalAlignment = Alignment.CenterVertically
+        // 多行笔记时，项目符号固定对齐第一行，不随整条笔记高度垂直居中。
+        verticalAlignment = Alignment.Top
     ) {
         Box(
             modifier = Modifier
                 .size(28.dp)
+                .padding(top = 5.dp)
                 .clip(RoundedCornerShape(4.dp))
                 .combinedClickable(
                     onClick = onBulletClick,
@@ -994,24 +1066,33 @@ fun BulletNoteRow(
                 }
         ) {
             if (!isEditing) {
-                // 每个手动换行作为一个段落：段内保持主题默认行高，段落之间增加 0.5 倍普通行高的间距。
+                // 默认只显示第一行；展开后按段落显示，段间距为普通行高的 0.5 倍。
                 val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = MaterialTheme.colorScheme.onSurface,
-                    lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                    lineHeight = bodyLineHeight
                 )
                 val paragraphGap = with(LocalDensity.current) {
-                    MaterialTheme.typography.bodyLarge.lineHeight.toDp() * 0.5f
+                    bodyLineHeight.toDp() * 0.5f
                 }
                 val paragraphs = note.content.split('\n')
 
-                Column {
-                    paragraphs.forEachIndexed { index, paragraph ->
-                        Text(
-                            text = paragraph.ifEmpty { " " },
-                            style = paragraphStyle
-                        )
-                        if (index < paragraphs.lastIndex) {
-                            Spacer(modifier = Modifier.height(paragraphGap))
+                if (!isExpanded) {
+                    Text(
+                        text = paragraphs.firstOrNull().orEmpty().ifEmpty { " " },
+                        style = paragraphStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else {
+                    Column {
+                        paragraphs.forEachIndexed { index, paragraph ->
+                            Text(
+                                text = paragraph.ifEmpty { " " },
+                                style = paragraphStyle
+                            )
+                            if (index < paragraphs.lastIndex) {
+                                Spacer(modifier = Modifier.height(paragraphGap))
+                            }
                         }
                     }
                 }
@@ -1019,9 +1100,11 @@ fun BulletNoteRow(
                 BasicTextField(
                     value = editValue,
                     onValueChange = { newValue ->
+                        val textChanged = newValue.text != editValue.text
                         editValue = newValue
 
-                        if (newValue.text != note.content) {
+                        // 仅正文真正变化时写数据库，保留 selection 和 IME composition。
+                        if (textChanged) {
                             onContentChange(newValue.text)
                         }
                     },
@@ -1050,8 +1133,9 @@ fun BulletNoteRow(
                     // 编辑时段内行高保持系统主题默认值，不整体放大行高。
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface,
-                        lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+                        lineHeight = bodyLineHeight
                     ),
+                    visualTransformation = paragraphGapTransformation,
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     onTextLayout = {
                         textLayout = it
@@ -1090,13 +1174,27 @@ fun BulletNoteRow(
                                     }
                                 ) {
                                     Text(
-                                        text = "↵ 换段",
+                                        text = "↵",
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
                         }
                     }
+                )
+            }
+        }
+
+        if (!isEditing) {
+            IconButton(
+                onClick = { isExpanded = !isExpanded },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (isExpanded) "收起笔记" else "展开笔记",
+                    modifier = Modifier.size(MaterialTheme.typography.bodyLarge.fontSize.value.dp),
+                    tint = MaterialTheme.colorScheme.onSurface
                 )
             }
         }
