@@ -743,39 +743,29 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 }
 
 /**
- * 编辑模式段落行高处理。
- * 不插入、不删除、不替换任何字符，OffsetMapping 始终保持 identity。
- * 从第二个自然段开始，将该段的行高设为正文基础行高的 1.5 倍。
- * ParagraphStyle 的范围严格覆盖完整段落文本，不再只套在换行符上，
- * 避免 ParagraphStyle 的范围边界在段落内部额外制造视觉换行。
+ * 编辑模式段间距转换。
+ * 不插入、不删除字符，只给两个连续换行符之间的空白段落设置 1.5 倍行高；
+ * OffsetMapping 使用 identity，避免自定义字符映射干扰输入法组合输入和光标位置。
+ * 段落按钮通过在正文中插入两个换行符创建空白段落。
  */
 private class ParagraphGapVisualTransformation(
-    private val paragraphLineHeight: androidx.compose.ui.unit.TextUnit
+    private val gapLineHeight: androidx.compose.ui.unit.TextUnit
 ) : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
         val source = text.text
         val builder = AnnotatedString.Builder(text)
-        var paragraphStart = 0
-        var paragraphIndex = 0
 
-        fun applyParagraphStyle(paragraphEnd: Int) {
-            if (paragraphIndex > 0 && paragraphStart < paragraphEnd) {
+        // 连续两个换行符之间构成一个真实空白段落。
+        // 只对空白段落对应的第二个换行符应用 1.5 倍行高，正文段落不受影响。
+        for (index in 1 until source.length) {
+            if (source[index - 1] == '\n' && source[index] == '\n') {
                 builder.addStyle(
-                    style = ParagraphStyle(lineHeight = paragraphLineHeight),
-                    start = paragraphStart,
-                    end = paragraphEnd
+                    style = ParagraphStyle(lineHeight = gapLineHeight),
+                    start = index,
+                    end = index + 1
                 )
             }
         }
-
-        for (index in source.indices) {
-            if (source[index] == '\n') {
-                applyParagraphStyle(index)
-                paragraphStart = index + 1
-                paragraphIndex++
-            }
-        }
-        applyParagraphStyle(source.length)
 
         return TransformedText(builder.toAnnotatedString(), OffsetMapping.Identity)
     }
@@ -872,8 +862,7 @@ fun BulletNoteRow(
         onEnterPressed()
     }
 
-    // 专用“换段”按钮：只插入一个真实换行符，光标紧跟换行符，
-    // 不额外制造空白行，避免输入时光标再向下跳一行。
+    // 专用“换段”按钮：插入两个换行符形成空白段落，光标放在第二个换行符之后。
     // 不再尝试检测软键盘回车键长按，因为多数输入法不会向应用提供完整的按下/抬起事件。
     fun insertParagraphAtCursor() {
         val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
@@ -882,13 +871,13 @@ fun BulletNoteRow(
             .coerceIn(0, editValue.text.length)
         val updatedText = buildString {
             append(editValue.text.substring(0, selectionStart))
-            append("\n")
+            append("\n\n")
             append(editValue.text.substring(selectionEnd))
         }
         undoHistory.add(editValue.text)
         if (undoHistory.size > 100) undoHistory.removeAt(0)
         redoHistory.clear()
-        val cursorPosition = selectionStart + 1
+        val cursorPosition = selectionStart + 2
         editValue = editValue.copy(
             text = updatedText,
             selection = TextRange(cursorPosition),
@@ -1132,7 +1121,7 @@ fun BulletNoteRow(
                                 false
                             }
                         },
-                    // 第一段保持主题默认行高；后续自然段由 visualTransformation 设置为 1.5 倍行高。
+                    // 编辑时段内行高保持系统主题默认值，不整体放大行高。
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
