@@ -482,10 +482,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             listState = listState,
                             listViewportBounds = listViewportBounds,
                             onBulletClick = {
-                                if (editingNoteId != note.id) {
-                                    closeEditor()
+                                // 五角星是自动识别后的固定标识，点击时不切换，也不触发其他操作。
+                                if (note.bulletType != BulletType.STAR) {
+                                    if (editingNoteId != note.id) {
+                                        closeEditor()
+                                    }
+                                    viewModel.cycleBulletType(note)
                                 }
-                                viewModel.cycleBulletType(note)
                             },
                             onBulletLongClick = {
                                 closeEditor()
