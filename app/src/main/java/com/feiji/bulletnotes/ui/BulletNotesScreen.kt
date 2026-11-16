@@ -94,11 +94,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.ParagraphStyle
-import androidx.compose.ui.text.input.OffsetMapping
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -743,35 +738,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 }
 
 /**
- * 编辑模式段间距转换。
- * 不插入、不删除字符，只给两个连续换行符之间的空白段落设置 1.5 倍行高；
- * OffsetMapping 使用 identity，避免自定义字符映射干扰输入法组合输入和光标位置。
- * 段落按钮通过在正文中插入两个换行符创建空白段落。
- */
-private class ParagraphGapVisualTransformation(
-    private val gapLineHeight: androidx.compose.ui.unit.TextUnit
-) : VisualTransformation {
-    override fun filter(text: AnnotatedString): TransformedText {
-        val source = text.text
-        val builder = AnnotatedString.Builder(text)
-
-        // 连续两个换行符之间构成一个真实空白段落。
-        // 只对空白段落对应的第二个换行符应用 1.5 倍行高，正文段落不受影响。
-        for (index in 1 until source.length) {
-            if (source[index - 1] == '\n' && source[index] == '\n') {
-                builder.addStyle(
-                    style = ParagraphStyle(lineHeight = gapLineHeight),
-                    start = index,
-                    end = index + 1
-                )
-            }
-        }
-
-        return TransformedText(builder.toAnnotatedString(), OffsetMapping.Identity)
-    }
-}
-
-/**
  * 单条子弹笔记组件
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -832,9 +798,6 @@ fun BulletNoteRow(
     val undoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val redoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
-    val paragraphGapTransformation = remember(bodyLineHeight) {
-        ParagraphGapVisualTransformation(bodyLineHeight * 1.5f)
-    }
 
     var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
 
@@ -862,7 +825,7 @@ fun BulletNoteRow(
         onEnterPressed()
     }
 
-    // 专用“换段”按钮：插入两个换行符形成空白段落，光标放在第二个换行符之后。
+    // 专用“换段”按钮：在当前选区/光标位置插入换行，并将光标移到新段落开头。
     // 不再尝试检测软键盘回车键长按，因为多数输入法不会向应用提供完整的按下/抬起事件。
     fun insertParagraphAtCursor() {
         val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
@@ -871,13 +834,13 @@ fun BulletNoteRow(
             .coerceIn(0, editValue.text.length)
         val updatedText = buildString {
             append(editValue.text.substring(0, selectionStart))
-            append("\n\n")
+            append('\n')
             append(editValue.text.substring(selectionEnd))
         }
         undoHistory.add(editValue.text)
         if (undoHistory.size > 100) undoHistory.removeAt(0)
         redoHistory.clear()
-        val cursorPosition = selectionStart + 2
+        val cursorPosition = selectionStart + 1
         editValue = editValue.copy(
             text = updatedText,
             selection = TextRange(cursorPosition),
@@ -931,7 +894,7 @@ fun BulletNoteRow(
             ?: return@LaunchedEffect
         val viewport = listViewportBounds ?: return@LaunchedEffect
 
-        // 转换不再插入字符，显示文本与原文索引一一对应。
+        // 不使用任何视觉文本转换，布局中的光标索引与原始文本索引一致。
         val cursorPosition = editValue.selection.end.coerceIn(0, editValue.text.length)
         val cursor = layout.getCursorRect(cursorPosition)
 
@@ -1126,7 +1089,6 @@ fun BulletNoteRow(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
                     ),
-                    visualTransformation = paragraphGapTransformation,
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     onTextLayout = { layout ->
                         textLayout = layout
