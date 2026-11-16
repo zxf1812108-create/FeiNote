@@ -271,6 +271,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      * 点击标识符：在 方框 (SQUARE) -> 对勾 (CHECKED) -> 实心圆点 (BULLET_DOT) 之间轮流切换
      */
     fun cycleBulletType(note: NoteEntity) {
+        // 五角星由笔记内容自动判定生成，点击时保持不变。
+        if (note.bulletType == BulletType.STAR) return
+
         viewModelScope.launch(Dispatchers.IO) {
             val nextType = if (note.bulletType == BulletType.BULLET_DOT) BulletType.SQUARE else BulletType.BULLET_DOT
             noteDao.updateNote(note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis()))
