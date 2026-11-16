@@ -1209,7 +1209,12 @@ private fun EditorActionButton(
                 cap = StrokeCap.Round,
                 join = StrokeJoin.Round
             )
-            fun point(x: Float, y: Float) = Offset(x * scale, y * scale)
+            // 撤销/恢复图标整体下移 2.5 个坐标单位，修正箭头视觉重心偏高的问题。
+            // 只调整 Canvas 内部绘制坐标，不改变 IconButton 的布局和点击区域。
+            val verticalOffset = if (
+                symbol == EditorActionSymbol.Undo || symbol == EditorActionSymbol.Redo
+            ) 2.5f else 0f
+            fun point(x: Float, y: Float) = Offset(x * scale, (y + verticalOffset) * scale)
 
             val path = Path()
             when (symbol) {
