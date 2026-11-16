@@ -1,5 +1,5 @@
 package com.feiji.bulletnotes.ui
- 
+
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
@@ -230,12 +230,37 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         if (previousId == id) return
         _editingNoteId.value = id
         if (previousId != null) {
-            // 与逐字保存共用互斥锁：先完成已经排队的文字写入，再检查空笔记。
-            viewModelScope.launch {
+            // 与逐字保存共用互斥锁：先完成已经排队的文字写入，再检查空笔记并按内容调整符号。
+            viewModelScope.launch(Dispatchers.IO) {
                 contentWriteMutex.withLock {
                     val previous = noteDao.getNoteById(previousId)
-                    if (previous != null && !previous.isDeleted && previous.content.isBlank()) {
-                        noteDao.deletePermanently(previousId)
+                    if (previous != null && !previous.isDeleted) {
+                        if (previous.content.isBlank()) {
+                            noteDao.deletePermanently(previousId)
+                        } else {
+                            val hasLineBreak = previous.content.contains('\n')
+                            val nextBulletType = when {
+                                hasLineBreak && previous.bulletType in setOf(
+                                    BulletType.SQUARE,
+                                    BulletType.CHECKED,
+                                    BulletType.BULLET_DOT
+                                ) -> BulletType.STAR
+
+                                !hasLineBreak && previous.bulletType == BulletType.STAR ->
+                                    BulletType.BULLET_DOT
+
+                                else -> previous.bulletType
+                            }
+
+                            if (nextBulletType != previous.bulletType) {
+                                noteDao.updateNote(
+                                    previous.copy(
+                                        bulletType = nextBulletType,
+                                        updatedAt = System.currentTimeMillis()
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }
