@@ -40,6 +40,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.TextRange
 import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.insert
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -750,7 +751,8 @@ private fun paragraphGapOutputTransformation(
 ): OutputTransformation = OutputTransformation {
     // 先记录原文中换行符的位置，再从后向前插入，避免原文索引发生偏移。
     val originalLength = length
-    val newlinePositions = (0 until originalLength).filter { this[it] == '\n' }
+    val sourceText = asCharSequence()
+    val newlinePositions = (0 until originalLength).filter { sourceText[it] == '\n' }
 
     for (index in newlinePositions.asReversed()) {
         insert(index + 1, "\u200B\n")
@@ -761,7 +763,7 @@ private fun paragraphGapOutputTransformation(
     for (originalIndex in newlinePositions) {
         val gapStart = originalIndex + 1 + insertedCharactersBefore
         addStyle(
-            style = ParagraphStyle(lineHeight = gapLineHeight),
+            paragraphStyle = ParagraphStyle(lineHeight = gapLineHeight),
             start = gapStart,
             end = gapStart + 2
         )
