@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -56,6 +57,31 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     // 当前处于编辑状态的笔记 ID（null 表示无单项进入多行编辑）
     private val _editingNoteId = MutableStateFlow<Long?>(null)
     val editingNoteId: StateFlow<Long?> = _editingNoteId.asStateFlow()
+
+    // 搜索结果：仅包含未删除且正文匹配关键词的笔记。
+    private val _searchResults = MutableStateFlow<List<NoteEntity>>(emptyList())
+    val searchResults: StateFlow<List<NoteEntity>> = _searchResults.asStateFlow()
+    @Volatile private var activeSearchKeyword: String = ""
+
+    /** 按正文检索全部有效笔记，日期从新到旧，同一天内沿用原有顺序。 */
+    fun searchNotes(keyword: String) {
+        val query = keyword.trim()
+        activeSearchKeyword = query
+        if (query.isEmpty()) {
+            _searchResults.value = emptyList()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val allNotes = noteDao.getAllNotesForBackup()
+            if (activeSearchKeyword == query) {
+                _searchResults.value = allNotes
+                    .asSequence()
+                    .filter { !it.isDeleted && it.content.contains(query, ignoreCase = true) }
+                    .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
+                    .toList()
+            }
+        }
+    }
 
     // 当前日期的有效笔记列表（根据当前日期流式响应）
     val notes: StateFlow<List<NoteEntity>> = _selectedDate
@@ -308,7 +334,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch(Dispatchers.IO) {
             val nextType = if (note.bulletType == BulletType.BULLET_DOT) BulletType.SQUARE else BulletType.BULLET_DOT
-            noteDao.updateNote(note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis()))
+            val updated = note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis())
+            noteDao.updateNote(updated)
+            _searchResults.value = _searchResults.value.map { if (it.id == updated.id) updated else it }
         }
     }
 
@@ -319,7 +347,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun changeNoteDate(note: NoteEntity, newDate: LocalDate) {
         viewModelScope.launch(Dispatchers.IO) {
             val newDateStr = newDate.format(dateFormatter)
-            noteDao.updateNote(note.copy(dateString = newDateStr, updatedAt = System.currentTimeMillis()))
+            val updated = note.copy(dateString = newDateStr, updatedAt = System.currentTimeMillis())
+            noteDao.updateNote(updated)
+            _searchResults.value = _searchResults.value
+                .map { if (it.id == updated.id) updated else it }
+                .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
             if (newDate != _selectedDate.value) {
                 _userMessage.value = "笔记已移动至 $newDateStr"
             }
@@ -337,6 +369,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             previousWrite?.join()
             contentWriteMutex.withLock {
                 noteDao.updateNoteContent(id, newContent, System.currentTimeMillis())
+                _searchResults.value = _searchResults.value.map {
+                    if (it.id == id) it.copy(content = newContent, updatedAt = System.currentTimeMillis()) else it
+                }.filter { it.content.isNotBlank() && it.content.contains(activeSearchKeyword, ignoreCase = true) }
             }
         }
     }
@@ -346,8 +381,13 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun insertNoteAfter(referenceNote: NoteEntity?, initialContent: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
-            val currentDateStr = _selectedDate.value.format(dateFormatter)
-            val currentList = notes.value
+            val currentDateStr = referenceNote?.dateString
+                ?: _selectedDate.value.format(dateFormatter)
+            val currentList = if (referenceNote != null && referenceNote.dateString != _selectedDate.value.format(dateFormatter)) {
+                noteDao.getNotesByDate(currentDateStr).first()
+            } else {
+                notes.value
+            }
 
             val newOrder = if (referenceNote != null) {
                 referenceNote.orderIndex + 1
@@ -404,6 +444,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun moveToTrash(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             noteDao.softDeleteNote(id)
+            _searchResults.value = _searchResults.value.filterNot { it.id == id }
             if (_editingNoteId.value == id) {
                 _editingNoteId.value = null
             }
