@@ -299,8 +299,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             value = searchText,
                             onValueChange = { searchText = it },
                             singleLine = true,
-                            textStyle = MaterialTheme.typography.titleMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurface
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                                lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
                             ),
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
@@ -313,20 +314,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     RoundedCornerShape(8.dp)
                                 )
                                 .padding(horizontal = 10.dp, vertical = 7.dp),
-                            decorationBox = { inner ->
-                                Box {
-                                    if (searchText.isEmpty()) {
-                                        Text(
-                                            "搜索笔记内容",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Clip
-                                        )
-                                    }
-                                    inner()
-                                }
-                            }
                         )
                     } else {
                         Surface(
