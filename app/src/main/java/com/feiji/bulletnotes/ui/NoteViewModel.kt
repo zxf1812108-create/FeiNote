@@ -263,8 +263,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      * 选择日期：更新当前日期，同步更新今天/回到今天状态
      */
     fun selectDate(newDate: LocalDate) {
+        val now = LocalDate.now()
+        _today.value = now
         _selectedDate.value = newDate
-        _isToday.value = (newDate == _today.value)
+        _isToday.value = (newDate == now)
         setEditingNoteId(null)
     }
 
