@@ -3,7 +3,6 @@ package com.feiji.bulletnotes.ui
 import android.widget.Toast
 import android.os.SystemClock
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,8 +18,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
@@ -59,6 +58,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -87,10 +87,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
@@ -124,7 +120,11 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val selectedDate by viewModel.selectedDate.collectAsState()
     val isToday by viewModel.isToday.collectAsState()
     val notes by viewModel.notes.collectAsState()
+    val searchResults by viewModel.searchResults.collectAsState()
     val noteDates by viewModel.noteDates.collectAsState()
+    var isSearchMode by remember { mutableStateOf(false) }
+    var searchText by remember { mutableStateOf("") }
+    val visibleNotes = if (isSearchMode) searchResults else notes
     val trashNotes by viewModel.trashNotes.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
     val userMessage by viewModel.userMessage.collectAsState()
@@ -165,21 +165,21 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     // 仅回车新增笔记时触发精准滚动，不影响点击其他笔记。
     var pendingNewNoteScrollFromId by remember { mutableStateOf<Long?>(null) }
 
-    LaunchedEffect(notes, draggingNoteId, pendingReorderIds) {
+    LaunchedEffect(visibleNotes, draggingNoteId, pendingReorderIds, isSearchMode) {
         if (draggingNoteId == null) {
             val expectedOrder = pendingReorderIds
 
             // reorderNotes 是异步写入数据库的；在 Flow 返回新顺序前，
             // 不要用旧 notes 覆盖已经完成的本地拖动顺序。
-            if (expectedOrder != null && notes.map { it.id } != expectedOrder) {
+            if (expectedOrder != null && visibleNotes.map { it.id } != expectedOrder) {
                 return@LaunchedEffect
             }
 
-            if (displayNotes.map { it.id } != notes.map { it.id }) {
+            if (displayNotes.map { it.id } != visibleNotes.map { it.id }) {
                 displayNotes.clear()
-                displayNotes.addAll(notes)
+                displayNotes.addAll(visibleNotes)
             } else {
-                notes.forEachIndexed { index, item ->
+                visibleNotes.forEachIndexed { index, item ->
                     if (displayNotes[index] != item) {
                         displayNotes[index] = item
                     }
@@ -233,6 +233,14 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         pendingNewNoteScrollFromId = null
     }
 
+    // 搜索词变化后稍作等待再检索，避免每输入一个字符都立即读取全库。
+    LaunchedEffect(isSearchMode, searchText) {
+        if (isSearchMode) {
+            delay(180)
+            viewModel.searchNotes(searchText)
+        }
+    }
+
     // 显示提示 Toast
     LaunchedEffect(userMessage) {
         userMessage?.let {
@@ -259,61 +267,100 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable {
-                                closeEditor()
-                                noteToChangeDate = null
-                                showDatePicker = true
-                            },
-                        color = Color.Transparent
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(
-                                vertical = 2.dp,
-                                horizontal = 4.dp
+                    if (isSearchMode) {
+                        BasicTextField(
+                            value = searchText,
+                            onValueChange = { searchText = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.titleMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 4.dp, end = 8.dp)
+                                .border(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            decorationBox = { inner ->
+                                Box {
+                                    if (searchText.isEmpty()) {
+                                        Text(
+                                            "搜索笔记内容",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    inner()
+                                }
+                            }
+                        )
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    closeEditor()
+                                    focusManager.clearFocus()
+                                    isSearchMode = false
+                                    pendingReorderIds = null
+                                    searchText = ""
+                                    viewModel.searchNotes("")
+                                    viewModel.returnToToday()
+                                },
+                            color = Color.Transparent
+                        ) {
+                            Text(
+                                text = "返回",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
+                        }
+                    } else {
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    closeEditor()
+                                    isSearchMode = true
+                                    pendingReorderIds = null
+                                    searchText = ""
+                                    focusManager.clearFocus()
+                                },
+                            color = Color.Transparent
+                        ) {
+                            Icon(
+                                Icons.Outlined.Search,
+                                contentDescription = "搜索笔记",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    closeEditor()
+                                    noteToChangeDate = null
+                                    showDatePicker = true
+                                },
+                            color = Color.Transparent
                         ) {
                             Text(
                                 text = selectedDate.format(viewModel.displayDateFormatter) +
-                                    " " +
-                                    "一二三四五六日"[selectedDate.dayOfWeek.value - 1],
+                                    " " + "一二三四五六日"[selectedDate.dayOfWeek.value - 1],
+                                modifier = Modifier.padding(vertical = 2.dp, horizontal = 4.dp),
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                closeEditor()
-                                if (isToday) {
-                                    // 只有标签显示“今天”时才切换主题。
-                                    onToggleTheme()
-                                } else {
-                                    // 标签显示“返回”时只回到今天，不改变主题。
-                                    viewModel.returnToToday()
-                                }
-                            },
-                        color = Color.Transparent
-                    ) {
-                        Text(
-                            text = if (isToday) "今天" else "返回",
-                            modifier = Modifier.padding(
-                                horizontal = 8.dp,
-                                vertical = 2.dp
-                            ),
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
                     }
 
                     Spacer(modifier = Modifier.weight(1f))
@@ -360,8 +407,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .pointerInput(selectedDate, editingNoteId) {
-                    if (editingNoteId == null) {
+                .pointerInput(selectedDate, editingNoteId, isSearchMode) {
+                    if (editingNoteId == null && !isSearchMode) {
                         var totalHorizontalDrag = 0f
                         val switchThreshold =
                             with(densityForNewNoteScroll) { 72.dp.toPx() }
@@ -404,18 +451,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 keyboardOptions = KeyboardOptions.Default
             )
 
-            if (displayNotes.isEmpty()) {
+            if (isSearchMode && searchText.isBlank()) {
+                // 搜索界面未输入关键词时保持空白，不显示日期笔记。
+            } else if (displayNotes.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .clickable {
+                        .clickable(enabled = !isSearchMode) {
                             viewModel.insertNoteAfter(null, "")
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "今天暂无笔记",
+                            text = if (isSearchMode) "没有找到匹配的笔记" else "今天暂无笔记",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -445,6 +494,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         displayNotes,
                         key = { _, note -> note.id }
                     ) { index, note ->
+
+                        if (isSearchMode && (index == 0 || displayNotes[index - 1].dateString != note.dateString)) {
+                            val resultDate = runCatching { LocalDate.parse(note.dateString) }.getOrNull()
+                            if (resultDate != null) {
+                                Text(
+                                    text = resultDate.format(viewModel.displayDateFormatter) +
+                                        " " + "一二三四五六日"[resultDate.dayOfWeek.value - 1],
+                                    modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
 
                         val isEditing = (editingNoteId == note.id)
 
@@ -482,13 +545,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             listState = listState,
                             listViewportBounds = listViewportBounds,
                             onBulletClick = {
-                                // 五角星是自动识别后的固定标识，点击时不切换，也不触发其他操作。
-                                if (note.bulletType != BulletType.STAR) {
-                                    if (editingNoteId != note.id) {
-                                        closeEditor()
-                                    }
-                                    viewModel.cycleBulletType(note)
+                                if (editingNoteId != note.id) {
+                                    closeEditor()
                                 }
+                                viewModel.cycleBulletType(note)
                             },
                             onBulletLongClick = {
                                 closeEditor()
@@ -503,18 +563,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 }
                             },
                             onDragStart = {
-                                hoveringTrash = false
-                                closeEditor()
+                                if (!isSearchMode) {
+                                    hoveringTrash = false
+                                    closeEditor()
 
-                                val info = listState.layoutInfo.visibleItemsInfo
-                                    .firstOrNull { it.key == note.id }
+                                    val info = listState.layoutInfo.visibleItemsInfo
+                                        .firstOrNull { it.key == note.id }
 
-                                if (info != null) {
-                                    dragAnchorTop = info.offset.toFloat()
-                                    draggingOffset = 0f
-                                    dragStartIndex =
-                                        notes.indexOfFirst { it.id == note.id }
-                                    draggingNoteId = note.id
+                                    if (info != null) {
+                                        dragAnchorTop = info.offset.toFloat()
+                                        draggingOffset = 0f
+                                        dragStartIndex =
+                                            visibleNotes.indexOfFirst { it.id == note.id }
+                                        draggingNoteId = note.id
+                                    }
                                 }
                             },
                             onDragDelta = dragDelta@{ delta, pointerRoot ->
@@ -579,7 +641,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 
                                 if (draggingNoteId == note.id && deleteOnDrop) {
                                     viewModel.moveToTrash(note.id)
-                                } else if (draggingNoteId == note.id) {
+                                } else if (draggingNoteId == note.id && !isSearchMode) {
                                     val endIndex =
                                         displayNotes.indexOfFirst { it.id == note.id }
 
@@ -638,7 +700,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     // 日期选择弹窗
     if (showDatePicker) {
         DatePickerHelper(
-            initialDate = selectedDate,
+            initialDate = noteToChangeDate?.dateString
+                ?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: selectedDate,
             noteDates = noteDates,
             onDatePicked = { pickedDate ->
                 val note = noteToChangeDate
@@ -806,7 +869,6 @@ fun BulletNoteRow(
     val undoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val redoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
-    val bulletColor = MaterialTheme.colorScheme.onSurface
 
     var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
 
@@ -987,26 +1049,6 @@ fun BulletNoteRow(
                             .background(MaterialTheme.colorScheme.onSurface, CircleShape)
                     )
                 }
-
-                BulletType.STAR -> {
-                    Canvas(modifier = Modifier.size(18.dp)) {
-                        val scale = size.width / 18f
-                        val starPath = Path().apply {
-                            moveTo(9f * scale, 0f)
-                            lineTo(11.1f * scale, 6.2f * scale)
-                            lineTo(17.7f * scale, 6.5f * scale)
-                            lineTo(12.6f * scale, 10.6f * scale)
-                            lineTo(14.4f * scale, 17.2f * scale)
-                            lineTo(9f * scale, 13.4f * scale)
-                            lineTo(3.6f * scale, 17.2f * scale)
-                            lineTo(5.4f * scale, 10.6f * scale)
-                            lineTo(0.3f * scale, 6.5f * scale)
-                            lineTo(6.9f * scale, 6.2f * scale)
-                            close()
-                        }
-                        drawPath(path = starPath, color = bulletColor)
-                    }
-                }
             }
         }
 
@@ -1155,40 +1197,57 @@ fun BulletNoteRow(
                                 innerTextField()
                             }
 
-                            // 四个操作统一使用同一套矢量绘制与 IconButton 布局，
-                            // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
+                            // 收起按钮固定在最左侧；撤销、恢复与换段控制排列在右侧。
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // 撤销、恢复、换段放在左侧；收起按钮放在最右侧。
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Undo,
-                                    contentDescription = "撤销",
-                                    enabled = undoHistory.isNotEmpty(),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    onClick = { undoEdit() }
-                                )
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Redo,
-                                    contentDescription = "恢复",
-                                    enabled = redoHistory.isNotEmpty(),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    onClick = { redoEdit() }
-                                )
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Paragraph,
-                                    contentDescription = "换段",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    onClick = { insertParagraphAtCursor() }
-                                )
+                                TextButton(
+                                    onClick = { onContentClick() },
+                                    modifier = Modifier.focusProperties { canFocus = false }
+                                ) {
+                                    Text(
+                                        text = "⌃",
+                                        modifier = Modifier.offset(y = 2.dp),
+                                        fontSize = 20.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                                 Spacer(modifier = Modifier.weight(1f))
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Collapse,
-                                    contentDescription = "收起编辑",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    onClick = onContentClick
-                                )
+                                TextButton(
+                                    onClick = { undoEdit() },
+                                    enabled = undoHistory.isNotEmpty(),
+                                    modifier = Modifier.focusProperties { canFocus = false }
+                                ) {
+                                    Text(
+                                        text = "↶",
+                                        fontSize = 20.sp,
+                                        color = if (undoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { redoEdit() },
+                                    enabled = redoHistory.isNotEmpty(),
+                                    modifier = Modifier.focusProperties { canFocus = false }
+                                ) {
+                                    Text(
+                                        text = "↷",
+                                        fontSize = 20.sp,
+                                        color = if (redoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { insertParagraphAtCursor() },
+                                    modifier = Modifier.focusProperties { canFocus = false }
+                                ) {
+                                    Text(
+                                        text = "↵",
+                                        fontSize = 20.sp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             }
                         }
                     }
@@ -1198,95 +1257,3 @@ fun BulletNoteRow(
 
     }
 }
-
-/** 图标按钮使用统一的 24x24 坐标系绘制，彻底避开字体字形基线差异。 */
-private enum class EditorActionSymbol {
-    Collapse,
-    Undo,
-    Redo,
-    Paragraph
-}
-
-@Composable
-private fun EditorActionButton(
-    symbol: EditorActionSymbol,
-    contentDescription: String,
-    tint: Color,
-    enabled: Boolean = true,
-    onClick: () -> Unit
-) {
-    val iconColor = if (enabled) {
-        tint
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-    }
-
-    IconButton(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.focusProperties { canFocus = false }
-    ) {
-        Canvas(modifier = Modifier.size(22.dp)) {
-            val scale = size.width / 24f
-            val strokeWidth = 2.dp.toPx()
-            val stroke = Stroke(
-                width = strokeWidth,
-                cap = StrokeCap.Round,
-                join = StrokeJoin.Round
-            )
-            // 撤销/恢复图标整体下移 2.5 个坐标单位，修正箭头视觉重心偏高的问题。
-            // 只调整 Canvas 内部绘制坐标，不改变 IconButton 的布局和点击区域。
-            val verticalOffset = if (
-                symbol == EditorActionSymbol.Undo || symbol == EditorActionSymbol.Redo
-            ) 2.5f else 0f
-            fun point(x: Float, y: Float) = Offset(x * scale, (y + verticalOffset) * scale)
-
-            val path = Path()
-            when (symbol) {
-                EditorActionSymbol.Collapse -> {
-                    path.moveTo(point(5f, 14f).x, point(5f, 14f).y)
-                    path.lineTo(point(12f, 7f).x, point(12f, 7f).y)
-                    path.lineTo(point(19f, 14f).x, point(19f, 14f).y)
-                }
-
-                EditorActionSymbol.Undo -> {
-                    path.moveTo(point(19f, 12f).x, point(19f, 12f).y)
-                    path.cubicTo(
-                        point(19f, 8f).x, point(19f, 8f).y,
-                        point(16f, 5f).x, point(16f, 5f).y,
-                        point(12f, 5f).x, point(12f, 5f).y
-                    )
-                    path.lineTo(point(6f, 5f).x, point(6f, 5f).y)
-                    path.moveTo(point(10f, 1f).x, point(10f, 1f).y)
-                    path.lineTo(point(6f, 5f).x, point(6f, 5f).y)
-                    path.lineTo(point(10f, 9f).x, point(10f, 9f).y)
-                }
-
-                EditorActionSymbol.Redo -> {
-                    path.moveTo(point(5f, 12f).x, point(5f, 12f).y)
-                    path.cubicTo(
-                        point(5f, 8f).x, point(5f, 8f).y,
-                        point(8f, 5f).x, point(8f, 5f).y,
-                        point(12f, 5f).x, point(12f, 5f).y
-                    )
-                    path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
-                    path.moveTo(point(14f, 1f).x, point(14f, 1f).y)
-                    path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
-                    path.lineTo(point(14f, 9f).x, point(14f, 9f).y)
-                }
-
-                EditorActionSymbol.Paragraph -> {
-                    path.moveTo(point(17f, 5f).x, point(17f, 5f).y)
-                    path.lineTo(point(17f, 13f).x, point(17f, 13f).y)
-                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
-                    path.moveTo(point(10f, 9f).x, point(10f, 9f).y)
-                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
-                    path.lineTo(point(10f, 17f).x, point(10f, 17f).y)
-                }
-            }
-
-            drawPath(path = path, color = iconColor, style = stroke)
-        }
-    }
-}
-
