@@ -117,8 +117,10 @@ import java.time.LocalDate
 fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     // 新建笔记期间的常驻焦点接力点，防止旧输入框失焦时键盘关闭。
     val enterFocusBridge = remember { FocusRequester() }
+    val searchFocusRequester = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -238,6 +240,15 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         pendingNewNoteScrollFromId = null
     }
 
+    // 进入搜索界面后，立即让搜索框获取焦点并弹出键盘进入编辑状态。
+    LaunchedEffect(isSearchMode) {
+        if (isSearchMode) {
+            withFrameNanos { }
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
+
     // 搜索词变化后稍作等待再检索，避免每输入一个字符都立即读取全库。
     LaunchedEffect(isSearchMode, searchText) {
         if (isSearchMode) {
@@ -307,33 +318,88 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(start = 8.dp, end = 4.dp)
+                                .padding(start = 8.dp)
+                                .focusRequester(searchFocusRequester)
                                 .border(
                                     1.dp,
                                     MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
                                     RoundedCornerShape(8.dp)
                                 )
-                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                                .padding(start = 10.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+                            decorationBox = { innerTextField ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        innerTextField()
+                                    }
+                                    if (searchText.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .clip(CircleShape)
+                                                .clickable {
+                                                    searchText = ""
+                                                    viewModel.searchNotes("")
+                                                    searchFocusRequester.requestFocus()
+                                                    keyboardController?.show()
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "清空搜索",
+                                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         )
+                        // 搜索框右边缘与最右侧垃圾箱图标（40dp）之间留出三个垃圾箱图标宽度的空间。
+                        Spacer(modifier = Modifier.width(120.dp))
                     } else {
-                        Surface(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable {
-                                    closeEditor()
-                                    isSearchMode = true
-                                    pendingReorderIds = null
-                                    searchText = ""
-                                    focusManager.clearFocus()
-                                },
-                            color = Color.Transparent
-                        ) {
-                            Icon(
-                                Icons.Outlined.Search,
-                                contentDescription = "搜索笔记",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
+                        if (!isToday) {
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        closeEditor()
+                                        pendingReorderIds = null
+                                        viewModel.returnToToday()
+                                    },
+                                color = Color.Transparent
+                            ) {
+                                Text(
+                                    text = "返回",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        } else {
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        closeEditor()
+                                        isSearchMode = true
+                                        pendingReorderIds = null
+                                        searchText = ""
+                                    },
+                                color = Color.Transparent
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Search,
+                                    contentDescription = "搜索笔记",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Surface(
@@ -355,9 +421,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
+                        Spacer(modifier = Modifier.weight(1f))
                     }
-
-                    Spacer(modifier = Modifier.weight(1f))
 
                     Box(
                         modifier = Modifier
