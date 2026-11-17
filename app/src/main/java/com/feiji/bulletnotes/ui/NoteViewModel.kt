@@ -61,22 +61,28 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     // 搜索结果：仅包含未删除且正文匹配关键词的笔记。
     private val _searchResults = MutableStateFlow<List<NoteEntity>>(emptyList())
     val searchResults: StateFlow<List<NoteEntity>> = _searchResults.asStateFlow()
-    @Volatile private var activeSearchKeyword: String = ""
+    @Volatile private var activeSearchKeywords: List<String> = emptyList()
 
-    /** 按正文检索全部有效笔记，日期从新到旧，同一天内沿用原有顺序。 */
+    /** 按正文检索全部有效笔记；空格分隔多个词，要求每个词都出现在正文中。 */
     fun searchNotes(keyword: String) {
-        val query = keyword.trim()
-        activeSearchKeyword = query
-        if (query.isEmpty()) {
+        val queryWords = keyword.trim()
+            .split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+        activeSearchKeywords = queryWords
+        if (queryWords.isEmpty()) {
             _searchResults.value = emptyList()
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
             val allNotes = noteDao.getAllNotesForBackup()
-            if (activeSearchKeyword == query) {
+            if (activeSearchKeywords == queryWords) {
                 _searchResults.value = allNotes
                     .asSequence()
-                    .filter { !it.isDeleted && it.content.contains(query, ignoreCase = true) }
+                    .filter { note ->
+                        !note.isDeleted && queryWords.all { word ->
+                            note.content.contains(word, ignoreCase = true)
+                        }
+                    }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
                     .toList()
             }
@@ -371,7 +377,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 noteDao.updateNoteContent(id, newContent, System.currentTimeMillis())
                 _searchResults.value = _searchResults.value.map {
                     if (it.id == id) it.copy(content = newContent, updatedAt = System.currentTimeMillis()) else it
-                }.filter { it.content.isNotBlank() && it.content.contains(activeSearchKeyword, ignoreCase = true) }
+                }.filter { note ->
+                    note.content.isNotBlank() && activeSearchKeywords.all { word ->
+                        note.content.contains(word, ignoreCase = true)
+                    }
+                }
             }
         }
     }
