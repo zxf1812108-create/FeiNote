@@ -286,6 +286,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     if (isSearchMode) {
                         Surface(
                             modifier = Modifier
+                                .width(44.dp)
                                 .clip(RoundedCornerShape(6.dp))
                                 .clickable {
                                     closeEditor()
@@ -298,13 +299,21 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 },
                             color = Color.Transparent
                         ) {
-                            Text(
-                                text = "返回",
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "返回",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                         BasicTextField(
                             value = searchText,
@@ -362,43 +371,45 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         // 搜索框与右侧垃圾箱热区保留 12dp 间距（视觉间距约 20dp），兼顾长度与防误触。
                         Spacer(modifier = Modifier.width(12.dp))
                     } else {
-                        if (!isToday) {
-                            Surface(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable {
-                                        closeEditor()
-                                        pendingReorderIds = null
+                        // 固定宽度（44dp），确保“返回”与搜索图标切换时右侧日期标签位置完全不动。
+                        Surface(
+                            modifier = Modifier
+                                .width(44.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    closeEditor()
+                                    pendingReorderIds = null
+                                    if (!isToday) {
                                         viewModel.returnToToday()
-                                    },
-                                color = Color.Transparent
-                            ) {
-                                Text(
-                                    text = "返回",
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        } else {
-                            Surface(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable {
-                                        closeEditor()
+                                    } else {
                                         isSearchMode = true
-                                        pendingReorderIds = null
                                         searchText = ""
-                                    },
-                                color = Color.Transparent
+                                    }
+                                },
+                            color = Color.Transparent
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    Icons.Outlined.Search,
-                                    contentDescription = "搜索笔记",
-                                    tint = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                )
+                                if (!isToday) {
+                                    Text(
+                                        text = "返回",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Outlined.Search,
+                                        contentDescription = "搜索笔记",
+                                        tint = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
                             }
                         }
                         Spacer(modifier = Modifier.width(8.dp))
