@@ -359,8 +359,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 }
                             }
                         )
-                        // 搜索框右边缘与最右侧垃圾箱图标（40dp）之间留出三个垃圾箱图标宽度的空间。
-                        Spacer(modifier = Modifier.width(120.dp))
+                        // 搜索框与右侧垃圾箱热区保留 12dp 间距（视觉间距约 20dp），兼顾长度与防误触。
+                        Spacer(modifier = Modifier.width(12.dp))
                     } else {
                         if (!isToday) {
                             Surface(
