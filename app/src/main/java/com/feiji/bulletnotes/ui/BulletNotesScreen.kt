@@ -3,6 +3,7 @@ package com.feiji.bulletnotes.ui
 import android.widget.Toast
 import android.os.SystemClock
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -88,6 +89,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
@@ -849,6 +851,7 @@ fun BulletNoteRow(
     }
 
     val density = LocalDensity.current
+    val bulletColor = MaterialTheme.colorScheme.onSurface
     val imeInsets = WindowInsets.ime
     val firstLineHeightDp = with(density) { firstLineHeightPx.toDp() }
     val bulletVerticalOffset = if (firstLineHeightPx > 0f) {
@@ -1048,6 +1051,26 @@ fun BulletNoteRow(
                             .size(8.dp)
                             .background(MaterialTheme.colorScheme.onSurface, CircleShape)
                     )
+                }
+
+                BulletType.STAR -> {
+                    Canvas(modifier = Modifier.size(18.dp)) {
+                        val scale = size.width / 18f
+                        val starPath = Path().apply {
+                            moveTo(9f * scale, 0f)
+                            lineTo(11.1f * scale, 6.2f * scale)
+                            lineTo(17.7f * scale, 6.5f * scale)
+                            lineTo(12.6f * scale, 10.6f * scale)
+                            lineTo(14.4f * scale, 17.2f * scale)
+                            lineTo(9f * scale, 13.4f * scale)
+                            lineTo(3.6f * scale, 17.2f * scale)
+                            lineTo(5.4f * scale, 10.6f * scale)
+                            lineTo(0.3f * scale, 6.5f * scale)
+                            lineTo(6.9f * scale, 6.2f * scale)
+                            close()
+                        }
+                        drawPath(path = starPath, color = bulletColor)
+                    }
                 }
             }
         }
