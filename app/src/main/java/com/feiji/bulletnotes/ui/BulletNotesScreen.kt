@@ -89,6 +89,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
@@ -270,37 +273,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (isSearchMode) {
-                        BasicTextField(
-                            value = searchText,
-                            onValueChange = { searchText = it },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.titleMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurface
-                            ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(start = 4.dp, end = 8.dp)
-                                .border(
-                                    1.dp,
-                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .padding(horizontal = 10.dp, vertical = 7.dp),
-                            decorationBox = { inner ->
-                                Box {
-                                    if (searchText.isEmpty()) {
-                                        Text(
-                                            "搜索笔记内容",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    inner()
-                                }
-                            }
-                        )
                         Surface(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
@@ -323,6 +295,39 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
+                        BasicTextField(
+                            value = searchText,
+                            onValueChange = { searchText = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.titleMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 8.dp, end = 4.dp)
+                                .border(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            decorationBox = { inner ->
+                                Box {
+                                    if (searchText.isEmpty()) {
+                                        Text(
+                                            "搜索笔记内容",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Clip
+                                        )
+                                    }
+                                    inner()
+                                }
+                            }
+                        )
                     } else {
                         Surface(
                             modifier = Modifier
@@ -1220,57 +1225,40 @@ fun BulletNoteRow(
                                 innerTextField()
                             }
 
-                            // 收起按钮固定在最左侧；撤销、恢复与换段控制排列在右侧。
+                            // 四个操作统一使用同一套矢量绘制与 IconButton 布局，
+                            // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                TextButton(
-                                    onClick = { onContentClick() },
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "⌃",
-                                        modifier = Modifier.offset(y = 2.dp),
-                                        fontSize = 20.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Spacer(modifier = Modifier.weight(1f))
-                                TextButton(
-                                    onClick = { undoEdit() },
+                                // 撤销、恢复、换段放在左侧；收起按钮放在最右侧。
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Undo,
+                                    contentDescription = "撤销",
                                     enabled = undoHistory.isNotEmpty(),
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "↶",
-                                        fontSize = 20.sp,
-                                        color = if (undoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                                    )
-                                }
-                                TextButton(
-                                    onClick = { redoEdit() },
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    onClick = { undoEdit() }
+                                )
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Redo,
+                                    contentDescription = "恢复",
                                     enabled = redoHistory.isNotEmpty(),
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "↷",
-                                        fontSize = 20.sp,
-                                        color = if (redoHistory.isNotEmpty()) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                                    )
-                                }
-                                TextButton(
-                                    onClick = { insertParagraphAtCursor() },
-                                    modifier = Modifier.focusProperties { canFocus = false }
-                                ) {
-                                    Text(
-                                        text = "↵",
-                                        fontSize = 20.sp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    onClick = { redoEdit() }
+                                )
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Paragraph,
+                                    contentDescription = "换段",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    onClick = { insertParagraphAtCursor() }
+                                )
+                                Spacer(modifier = Modifier.weight(1f))
+                                EditorActionButton(
+                                    symbol = EditorActionSymbol.Collapse,
+                                    contentDescription = "收起编辑",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    onClick = onContentClick
+                                )
                             }
                         }
                     }
@@ -1278,5 +1266,97 @@ fun BulletNoteRow(
             }
         }
 
+    }
+}
+
+
+/** 图标按钮使用统一的 24x24 坐标系绘制，彻底避开字体字形基线差异。 */
+private enum class EditorActionSymbol {
+    Collapse,
+    Undo,
+    Redo,
+    Paragraph
+}
+
+@Composable
+private fun EditorActionButton(
+    symbol: EditorActionSymbol,
+    contentDescription: String,
+    tint: Color,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val iconColor = if (enabled) {
+        tint
+    } else {
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+    }
+
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.focusProperties { canFocus = false }
+    ) {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val scale = size.width / 24f
+            val strokeWidth = 2.dp.toPx()
+            val stroke = Stroke(
+                width = strokeWidth,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+            // 撤销/恢复图标整体下移 2.5 个坐标单位，修正箭头视觉重心偏高的问题。
+            // 只调整 Canvas 内部绘制坐标，不改变 IconButton 的布局和点击区域。
+            val verticalOffset = if (
+                symbol == EditorActionSymbol.Undo || symbol == EditorActionSymbol.Redo
+            ) 2.5f else 0f
+            fun point(x: Float, y: Float) = Offset(x * scale, (y + verticalOffset) * scale)
+
+            val path = Path()
+            when (symbol) {
+                EditorActionSymbol.Collapse -> {
+                    path.moveTo(point(5f, 14f).x, point(5f, 14f).y)
+                    path.lineTo(point(12f, 7f).x, point(12f, 7f).y)
+                    path.lineTo(point(19f, 14f).x, point(19f, 14f).y)
+                }
+
+                EditorActionSymbol.Undo -> {
+                    path.moveTo(point(19f, 12f).x, point(19f, 12f).y)
+                    path.cubicTo(
+                        point(19f, 8f).x, point(19f, 8f).y,
+                        point(16f, 5f).x, point(16f, 5f).y,
+                        point(12f, 5f).x, point(12f, 5f).y
+                    )
+                    path.lineTo(point(6f, 5f).x, point(6f, 5f).y)
+                    path.moveTo(point(10f, 1f).x, point(10f, 1f).y)
+                    path.lineTo(point(6f, 5f).x, point(6f, 5f).y)
+                    path.lineTo(point(10f, 9f).x, point(10f, 9f).y)
+                }
+
+                EditorActionSymbol.Redo -> {
+                    path.moveTo(point(5f, 12f).x, point(5f, 12f).y)
+                    path.cubicTo(
+                        point(5f, 8f).x, point(5f, 8f).y,
+                        point(8f, 5f).x, point(8f, 5f).y,
+                        point(12f, 5f).x, point(12f, 5f).y
+                    )
+                    path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
+                    path.moveTo(point(14f, 1f).x, point(14f, 1f).y)
+                    path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
+                    path.lineTo(point(14f, 9f).x, point(14f, 9f).y)
+                }
+
+                EditorActionSymbol.Paragraph -> {
+                    path.moveTo(point(17f, 5f).x, point(17f, 5f).y)
+                    path.lineTo(point(17f, 13f).x, point(17f, 13f).y)
+                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
+                    path.moveTo(point(10f, 9f).x, point(10f, 9f).y)
+                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
+                    path.lineTo(point(10f, 17f).x, point(10f, 17f).y)
+                }
+            }
+
+            drawPath(path = path, color = iconColor, style = stroke)
+        }
     }
 }
