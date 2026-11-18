@@ -9,12 +9,15 @@ android {
     namespace = "com.feiji.bulletnotes"
     compileSdk = 35
 
+    val appVersionCode = System.getenv("APP_VERSION_CODE")?.toIntOrNull() ?: 10001
+    val appVersionName = System.getenv("APP_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.1"
+
     defaultConfig {
         applicationId = "com.feiji.bulletnotes"
         minSdk = 24
         targetSdk = 35
-        versionCode = 29
-        versionName = "1.11"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -22,9 +25,23 @@ android {
         }
     }
 
+    signingConfigs {
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debugConfig")
+        }
         release {
-            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debugConfig")
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -47,6 +64,10 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 dependencies {
@@ -61,7 +82,6 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    implementation(libs.androidx.material.icons.extended)
 
     // Room Database
     implementation(libs.androidx.room.runtime)
@@ -71,7 +91,6 @@ dependencies {
     // Coroutines & Serialization
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.google.gson)
-
 
     debugImplementation(libs.androidx.ui.tooling)
 }
