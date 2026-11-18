@@ -13,8 +13,8 @@ android {
         applicationId = "com.feiji.bulletnotes"
         minSdk = 24
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.6"
+        versionCode = 25
+        versionName = "1.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
