@@ -59,30 +59,34 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val _editingNoteId = MutableStateFlow<Long?>(null)
     val editingNoteId: StateFlow<Long?> = _editingNoteId.asStateFlow()
 
-    // 搜索结果：仅包含未删除且正文匹配关键词的笔记。
+    // 搜索结果：仅包含未删除、符合指定标识符且正文匹配关键词的笔记。
     private val _searchResults = MutableStateFlow<List<NoteEntity>>(emptyList())
     val searchResults: StateFlow<List<NoteEntity>> = _searchResults.asStateFlow()
     @Volatile private var activeSearchKeywords: List<String> = emptyList()
+    @Volatile private var activeSearchBulletType: BulletType? = null
 
-    /** 按正文检索全部有效笔记；空格分隔多个词，要求每个词都出现在正文中。 */
-    fun searchNotes(keyword: String) {
+    /** 按正文检索全部有效笔记；空格分隔多个词，要求每个词都出现在正文中，并可按标识符类型限定搜索范围。 */
+    fun searchNotes(keyword: String, bulletType: BulletType? = null) {
         val queryWords = keyword.trim()
             .split(Regex("\\s+"))
             .filter { it.isNotBlank() }
         activeSearchKeywords = queryWords
+        activeSearchBulletType = bulletType
         if (queryWords.isEmpty()) {
             _searchResults.value = emptyList()
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
             val allNotes = noteDao.getAllNotesForBackup()
-            if (activeSearchKeywords == queryWords) {
+            if (activeSearchKeywords == queryWords && activeSearchBulletType == bulletType) {
                 _searchResults.value = allNotes
                     .asSequence()
                     .filter { note ->
-                        !note.isDeleted && queryWords.all { word ->
-                            note.content.contains(word, ignoreCase = true)
-                        }
+                        !note.isDeleted &&
+                            (bulletType == null || note.bulletType == bulletType) &&
+                            queryWords.all { word ->
+                                note.content.contains(word, ignoreCase = true)
+                            }
                     }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
                     .toList()
@@ -357,6 +361,26 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         _selectedDate.value = now
         _isToday.value = true
         setEditingNoteId(null)
+    }
+
+    /**
+     * 跳转到最早一条以五角星做标识符的有效笔记所在日期
+     */
+    fun jumpToEarliestStarNoteDate() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val earliestDate = noteDao.getAllActiveNotes()
+                .asSequence()
+                .filter { it.bulletType == BulletType.STAR }
+                .mapNotNull { runCatching { LocalDate.parse(it.dateString) }.getOrNull() }
+                .minOrNull()
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                if (earliestDate != null) {
+                    selectDate(earliestDate)
+                } else {
+                    _userMessage.value = "暂无带五角星标记的笔记"
+                }
+            }
+        }
     }
 
     /**
