@@ -40,7 +40,6 @@ object WebDavBackupManager {
     private const val TAG = "FeiJiWebDav"
     private const val PREFS = "feiji_bullet_notes_prefs"
 
-    private const val KEY_ENABLED = "webdav_enabled_v1"
     private const val KEY_SERVER_URL = "webdav_server_url_v1"
     private const val KEY_REMOTE_FOLDER = "webdav_remote_folder_v1"
     private const val KEY_USERNAME = "webdav_username_v1"
@@ -66,13 +65,15 @@ object WebDavBackupManager {
     private val filePattern = Regex("""^飞记备份 (\d{6})(?:\.json)?$""")
 
     data class WebDavConfig(
-        val enabled: Boolean = false,
         val serverUrl: String = DEFAULT_SERVER_URL,
         val remoteFolder: String = DEFAULT_REMOTE_FOLDER,
         val username: String = "",
         val password: String = "",
         val encryptionPassword: String = ""
     ) {
+        /** 当应用密码不为空时即启用 WebDAV 上传备份。 */
+        val enabled: Boolean get() = password.isNotEmpty()
+
         fun isConfigured(): Boolean =
             serverUrl.trim().isNotEmpty() &&
                 username.trim().isNotEmpty() &&
@@ -114,7 +115,6 @@ object WebDavBackupManager {
     fun getConfig(context: Context): WebDavConfig {
         val p = prefs(context)
         return WebDavConfig(
-            enabled = p.getBoolean(KEY_ENABLED, false),
             serverUrl = p.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL,
             remoteFolder = p.getString(KEY_REMOTE_FOLDER, DEFAULT_REMOTE_FOLDER) ?: DEFAULT_REMOTE_FOLDER,
             username = p.getString(KEY_USERNAME, "") ?: "",
@@ -124,11 +124,6 @@ object WebDavBackupManager {
     }
 
     fun getEncryptionPassword(context: Context): String = readEncryptionPassword(context)
-
-    fun setEnabled(context: Context, enabled: Boolean): WebDavConfig {
-        prefs(context).edit().putBoolean(KEY_ENABLED, enabled).commit()
-        return getConfig(context)
-    }
 
     fun saveSettings(
         context: Context,
@@ -159,6 +154,17 @@ object WebDavBackupManager {
         }
         editor.commit()
         return getConfig(context)
+    }
+
+    fun restoreConfig(context: Context, config: WebDavConfig): WebDavConfig {
+        return saveSettings(
+            context = context,
+            serverUrl = config.serverUrl,
+            remoteFolder = config.remoteFolder,
+            username = config.username,
+            password = config.password,
+            encryptionPassword = config.encryptionPassword
+        )
     }
 
     private fun readEncryptionPassword(context: Context): String {
@@ -284,7 +290,7 @@ object WebDavBackupManager {
             val localYesterday = BackupManager.readBackupBytesForDate(context, yesterday)
             val fileName = localYesterday?.first ?: "飞记备份 ${yesterday.format(nameDate)}.json"
             val rawPayloadBytes = localYesterday?.second
-                ?: BackupManager.snapshotJson(noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+                ?: BackupManager.snapshotJson(context, noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
 
             // 设置了加密密码时，上传前自动加密（若文件已加密则不重复加密），文件名沿用现有规则。
             val payloadBytes = if (
