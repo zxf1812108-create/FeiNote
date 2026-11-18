@@ -8,6 +8,7 @@ import com.feiji.bulletnotes.data.AppDatabase
 import com.feiji.bulletnotes.data.BackupManager
 import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.NoteEntity
+import com.feiji.bulletnotes.data.WebDavBackupManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
@@ -118,10 +119,86 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val _todayBackupPrompt = MutableStateFlow<BackupManager.BackupFile?>(null)
     val todayBackupPrompt: StateFlow<BackupManager.BackupFile?> = _todayBackupPrompt.asStateFlow()
     private val backupMutex = Mutex()
+    private val webDavMutex = Mutex()
     private var lastSnapshot: String? = null
     private var backupLoop: Job? = null
+    private var webDavLoop: Job? = null
     // 保留最近一次正文写入任务，并串成队列，确保退出编辑时能等待全部输入落库。
     @Volatile private var latestContentWriteJob: Job? = null
+
+    // WebDAV 配置与 21:00 后未完成备份的感叹号提示状态
+    private val _webDavConfig = MutableStateFlow(WebDavBackupManager.getConfig(application))
+    val webDavConfig: StateFlow<WebDavBackupManager.WebDavConfig> = _webDavConfig.asStateFlow()
+
+    private val _showWebDavAlert = MutableStateFlow(WebDavBackupManager.shouldShowAlert(application))
+    val showWebDavAlert: StateFlow<Boolean> = _showWebDavAlert.asStateFlow()
+
+    fun setWebDavEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
+        _webDavConfig.value = WebDavBackupManager.setEnabled(app, enabled)
+        _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        if (enabled) {
+            triggerSilentWebDavBackup()
+        }
+    }
+
+    fun saveWebDavSettings(
+        serverUrl: String,
+        remoteFolder: String,
+        username: String,
+        password: String
+    ) {
+        val app = getApplication<Application>()
+        _webDavConfig.value = WebDavBackupManager.saveSettings(
+            context = app,
+            serverUrl = serverUrl,
+            remoteFolder = remoteFolder,
+            username = username,
+            password = password
+        )
+        _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        if (_webDavConfig.value.enabled) {
+            triggerSilentWebDavBackup()
+        }
+    }
+
+    /** 静默尝试执行今日的 WebDAV（昨天数据）备份，全程无任何提示打扰。 */
+    fun triggerSilentWebDavBackup() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            webDavMutex.withLock {
+                WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
+                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+            }
+        }
+    }
+
+    private fun startWebDavLoop() {
+        if (webDavLoop?.isActive == true) return
+        webDavLoop = viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            var minutesElapsed = 0
+            // 启动时先静默检查并尝试备份一次。
+            webDavMutex.withLock {
+                WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
+                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+            }
+            while (isActive) {
+                delay(60_000L)
+                minutesElapsed++
+                val config = WebDavBackupManager.getConfig(app)
+                val completed = WebDavBackupManager.isTodayBackupCompleted(app)
+                // 开启但今日尚未成功时，每 15 分钟静默重试；21:00 后每 5 分钟静默重试。
+                val retryIntervalMinutes = if (WebDavBackupManager.shouldShowAlert(app)) 5 else 15
+                if (config.enabled && !completed && minutesElapsed % retryIntervalMinutes == 0) {
+                    webDavMutex.withLock {
+                        WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
+                    }
+                }
+                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+            }
+        }
+    }
 
     fun dismissBackupSetup() { _needsBackupSetup.value = false }
 
@@ -253,6 +330,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     init {
         if (BackupManager.hasBackupFolder(application)) startBackupLoop()
         else _needsBackupSetup.value = true
+        startWebDavLoop()
     }
 
     fun clearUserMessage() {
