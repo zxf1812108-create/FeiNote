@@ -38,6 +38,7 @@ object WebDavBackupManager {
     private const val KEY_REMOTE_FOLDER = "webdav_remote_folder_v1"
     private const val KEY_USERNAME = "webdav_username_v1"
     private const val KEY_PASSWORD = "webdav_password_v1"
+    private const val KEY_ENCRYPTION_PASSWORD = "webdav_encryption_password_v1"
     private const val KEY_LAST_SUCCESS_DATE = "webdav_last_success_date_v1"
 
     const val DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/"
@@ -56,7 +57,8 @@ object WebDavBackupManager {
         val serverUrl: String = DEFAULT_SERVER_URL,
         val remoteFolder: String = DEFAULT_REMOTE_FOLDER,
         val username: String = "",
-        val password: String = ""
+        val password: String = "",
+        val encryptionPassword: String = ""
     ) {
         fun isConfigured(): Boolean =
             serverUrl.trim().isNotEmpty() &&
@@ -103,7 +105,8 @@ object WebDavBackupManager {
             serverUrl = p.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL,
             remoteFolder = p.getString(KEY_REMOTE_FOLDER, DEFAULT_REMOTE_FOLDER) ?: DEFAULT_REMOTE_FOLDER,
             username = p.getString(KEY_USERNAME, "") ?: "",
-            password = p.getString(KEY_PASSWORD, "") ?: ""
+            password = p.getString(KEY_PASSWORD, "") ?: "",
+            encryptionPassword = p.getString(KEY_ENCRYPTION_PASSWORD, "") ?: ""
         )
     }
 
@@ -117,7 +120,8 @@ object WebDavBackupManager {
         serverUrl: String,
         remoteFolder: String,
         username: String,
-        password: String
+        password: String,
+        encryptionPassword: String = ""
     ): WebDavConfig {
         val normalizedUrl = serverUrl.trim().ifEmpty { DEFAULT_SERVER_URL }
         val normalizedFolder = remoteFolder.trim().trim('/')
@@ -126,6 +130,7 @@ object WebDavBackupManager {
             .putString(KEY_REMOTE_FOLDER, normalizedFolder)
             .putString(KEY_USERNAME, username.trim())
             .putString(KEY_PASSWORD, password)
+            .putString(KEY_ENCRYPTION_PASSWORD, encryptionPassword)
             .commit()
         return getConfig(context)
     }
@@ -173,8 +178,18 @@ object WebDavBackupManager {
             val yesterday = today.minusDays(1)
             val localYesterday = BackupManager.readBackupBytesForDate(context, yesterday)
             val fileName = localYesterday?.first ?: "飞记备份 ${yesterday.format(nameDate)}.json"
-            val payloadBytes = localYesterday?.second
+            val rawPayloadBytes = localYesterday?.second
                 ?: BackupManager.snapshotJson(noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+
+            // 设置了加密密码时，上传前自动加密（若文件已加密则不重复加密），文件名沿用现有规则。
+            val payloadBytes = if (
+                config.encryptionPassword.isNotEmpty() &&
+                !BackupManager.isEncryptedBackupBytes(rawPayloadBytes)
+            ) {
+                BackupManager.encryptBackupBytes(rawPayloadBytes, config.encryptionPassword)
+            } else {
+                rawPayloadBytes
+            }
 
             val fileEndpoint = folderEndpoint.appendSegment(fileName, trailingSlash = false)
             val putRes = executeRequest(
