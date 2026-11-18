@@ -145,15 +145,6 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val _showWebDavAlert = MutableStateFlow(WebDavBackupManager.shouldShowAlert(application))
     val showWebDavAlert: StateFlow<Boolean> = _showWebDavAlert.asStateFlow()
 
-    fun setWebDavEnabled(enabled: Boolean) {
-        val app = getApplication<Application>()
-        _webDavConfig.value = WebDavBackupManager.setEnabled(app, enabled)
-        _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
-        if (enabled) {
-            triggerSilentWebDavBackup()
-        }
-    }
-
     fun saveWebDavSettings(
         serverUrl: String,
         remoteFolder: String,
@@ -162,8 +153,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         encryptionPassword: String = ""
     ) {
         val app = getApplication<Application>()
-        val previousEncryptionPassword = _webDavConfig.value.encryptionPassword
-        _webDavConfig.value = WebDavBackupManager.saveSettings(
+        val previousConfig = _webDavConfig.value
+        val updatedConfig = WebDavBackupManager.saveSettings(
             context = app,
             serverUrl = serverUrl,
             remoteFolder = remoteFolder,
@@ -171,22 +162,37 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             password = password,
             encryptionPassword = encryptionPassword
         )
+        _webDavConfig.value = updatedConfig
         _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
-        if (encryptionPassword != previousEncryptionPassword && BackupManager.hasBackupFolder(app)) {
-            viewModelScope.launch(Dispatchers.IO) {
-                contentWriteMutex.withLock {
-                    backupMutex.withLock {
-                        if (_todayBackupPrompt.value == null) {
-                            val current = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
-                            if (BackupManager.exportBackup(app, noteDao)) {
-                                lastSnapshot = current
-                            }
+        if (updatedConfig != previousConfig) {
+            syncLocalBackupAfterSettingsChange(app)
+        }
+        if (updatedConfig.enabled) {
+            triggerSilentWebDavBackup()
+        }
+    }
+
+    private fun syncLocalBackupAfterSettingsChange(app: Application) {
+        if (!BackupManager.hasBackupFolder(app)) return
+        viewModelScope.launch(Dispatchers.IO) {
+            contentWriteMutex.withLock {
+                backupMutex.withLock {
+                    if (_todayBackupPrompt.value == null) {
+                        val current = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
+                        if (BackupManager.exportBackup(app, noteDao)) {
+                            lastSnapshot = current
                         }
                     }
                 }
             }
         }
-        if (_webDavConfig.value.enabled) {
+    }
+
+    private fun refreshWebDavStateAfterRestore(app: Application) {
+        val updated = WebDavBackupManager.getConfig(app)
+        _webDavConfig.value = updated
+        _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        if (updated.enabled) {
             triggerSilentWebDavBackup()
         }
     }
@@ -247,7 +253,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                         return@withLock
                     }
                     val success = BackupManager.exportBackup(app, noteDao)
-                    if (success) lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                    if (success) lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
                     _userMessage.value = if (success) "备份文件夹已设置，今日备份已保存" else "文件夹已设置，但备份写入失败"
                 }
                 if (_todayBackupPrompt.value == null) startBackupLoop()
@@ -268,8 +274,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 val savedPassword = WebDavBackupManager.getConfig(app).encryptionPassword.takeIf { it.isNotEmpty() }
                 when (val result = BackupManager.restoreBackup(app, noteDao, backup.uri, savedPassword)) {
                     is BackupManager.RestoreResult.Success -> {
+                        refreshWebDavStateAfterRestore(app)
                         _userMessage.value = result.message
-                        lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                        lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
                         _todayBackupPrompt.value = null
                         shouldStartLoop = true
                     }
@@ -297,8 +304,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         if (_todayBackupPrompt.value == null) return
         _todayBackupPrompt.value = null
         viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
             backupMutex.withLock {
-                lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
             }
             startBackupLoop()
         }
@@ -323,8 +331,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 val savedPassword = WebDavBackupManager.getConfig(app).encryptionPassword.takeIf { it.isNotEmpty() }
                 when (val result = BackupManager.restoreBackup(app, noteDao, file.uri, savedPassword)) {
                     is BackupManager.RestoreResult.Success -> {
+                        refreshWebDavStateAfterRestore(app)
                         _userMessage.value = result.message
-                        lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                        lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
                     }
 
                     is BackupManager.RestoreResult.PasswordRequired -> {
@@ -353,8 +362,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 when (val result = BackupManager.restoreBackup(app, noteDao, pending.file.uri, password)) {
                     is BackupManager.RestoreResult.Success -> {
                         _pendingEncryptedRestore.value = null
+                        refreshWebDavStateAfterRestore(app)
                         _userMessage.value = result.message
-                        lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                        lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
                         shouldStartLoop = pending.fromTodayPrompt
                     }
 
@@ -389,7 +399,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun backupIfChangedLocked(app: Application) {
         if (!BackupManager.hasBackupFolder(app)) return
-        val current = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+        val current = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
         if (current != lastSnapshot) {
             if (BackupManager.exportBackup(app, noteDao)) {
                 lastSnapshot = current
@@ -419,7 +429,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             // 启动时记录当前数据作为比较基线；退出编辑时立即备份，另每 5 分钟兜底检查。
             contentWriteMutex.withLock {
                 backupMutex.withLock {
-                    lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                    lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
                 }
             }
             while (isActive) {
