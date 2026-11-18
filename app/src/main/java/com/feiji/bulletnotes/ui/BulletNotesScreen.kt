@@ -155,6 +155,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val backupFiles by viewModel.backupFiles.collectAsState()
     val webDavConfig by viewModel.webDavConfig.collectAsState()
     val showWebDavAlert by viewModel.showWebDavAlert.collectAsState()
+    val pendingEncryptedRestore by viewModel.pendingEncryptedRestore.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
     // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
@@ -1038,6 +1039,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         var usernameInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.username) }
         var passwordInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.password) }
         var passwordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
+        var encryptionPasswordInput by remember(showWebDavSettings) {
+            mutableStateOf(webDavConfig.encryptionPassword)
+        }
+        var encryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
 
         AlertDialog(
             onDismissRequest = {
@@ -1098,6 +1103,30 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         },
                         modifier = Modifier.fillMaxWidth()
                     )
+                    OutlinedTextField(
+                        value = encryptionPasswordInput,
+                        onValueChange = { encryptionPasswordInput = it },
+                        label = { Text("加密密码（留空则不加密）") },
+                        singleLine = true,
+                        visualTransformation = if (encryptionPasswordVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            TextButton(
+                                onClick = { encryptionPasswordVisible = !encryptionPasswordVisible },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    text = if (encryptionPasswordVisible) "隐藏" else "显示",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             },
             confirmButton = {
@@ -1107,7 +1136,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             serverUrl = serverUrlInput,
                             remoteFolder = remoteFolderInput,
                             username = usernameInput,
-                            password = passwordInput
+                            password = passwordInput,
+                            encryptionPassword = encryptionPasswordInput
                         )
                         showWebDavSettings = false
                     }
@@ -1146,7 +1176,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     onClick = {
                         backupToRestore = null
                         closeEditor()
-                        viewModel.restoreSelectedBackup(file.uri)
+                        viewModel.restoreSelectedBackup(file)
                     }
                 ) {
                     Text("确认覆盖恢复", color = MaterialTheme.colorScheme.onSurface)
@@ -1156,6 +1186,84 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 TextButton(
                     onClick = {
                         backupToRestore = null
+                    }
+                ) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // 恢复加密备份时自动弹出的解密密码输入框
+    pendingEncryptedRestore?.let { pending ->
+        var decryptPasswordInput by remember(pending.file.uri) { mutableStateOf("") }
+        var decryptPasswordVisible by remember(pending.file.uri) { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = {
+                viewModel.cancelEncryptedRestore()
+            },
+            title = {
+                Text("输入备份加密密码")
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "「${pending.file.name}」为加密备份，请输入密码以解密并恢复。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    OutlinedTextField(
+                        value = decryptPasswordInput,
+                        onValueChange = { decryptPasswordInput = it },
+                        label = { Text("加密密码") },
+                        singleLine = true,
+                        isError = pending.wrongPassword,
+                        visualTransformation = if (decryptPasswordVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            TextButton(
+                                onClick = { decryptPasswordVisible = !decryptPasswordVisible },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    text = if (decryptPasswordVisible) "隐藏" else "显示",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (pending.wrongPassword) {
+                        Text(
+                            text = "密码错误，请重新输入",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = decryptPasswordInput.isNotEmpty(),
+                    onClick = {
+                        viewModel.confirmEncryptedRestore(decryptPasswordInput)
+                    }
+                ) {
+                    Text("解密并恢复")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.cancelEncryptedRestore()
                     }
                 ) {
                     Text("取消")
