@@ -1043,6 +1043,16 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             mutableStateOf(webDavConfig.encryptionPassword)
         }
         var encryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
+        var confirmEncryptionPasswordInput by remember(showWebDavSettings) {
+            mutableStateOf(webDavConfig.encryptionPassword)
+        }
+        var confirmEncryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
+        var encryptionPasswordMismatchError by remember(showWebDavSettings) { mutableStateOf(false) }
+
+        val isEncryptionPasswordMismatch = encryptionPasswordInput.isNotEmpty() &&
+            encryptionPasswordInput != confirmEncryptionPasswordInput
+        val showMismatchError = encryptionPasswordMismatchError ||
+            (confirmEncryptionPasswordInput.isNotEmpty() && isEncryptionPasswordMismatch)
 
         AlertDialog(
             onDismissRequest = {
@@ -1105,7 +1115,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     )
                     OutlinedTextField(
                         value = encryptionPasswordInput,
-                        onValueChange = { encryptionPasswordInput = it },
+                        onValueChange = {
+                            encryptionPasswordInput = it
+                            if (it.isEmpty()) {
+                                confirmEncryptionPasswordInput = ""
+                            }
+                            encryptionPasswordMismatchError = false
+                        },
                         label = { Text("加密密码（留空则不加密）") },
                         singleLine = true,
                         visualTransformation = if (encryptionPasswordVisible) {
@@ -1127,11 +1143,50 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         },
                         modifier = Modifier.fillMaxWidth()
                     )
+                    OutlinedTextField(
+                        value = confirmEncryptionPasswordInput,
+                        onValueChange = {
+                            confirmEncryptionPasswordInput = it
+                            encryptionPasswordMismatchError = false
+                        },
+                        label = { Text("确认加密密码") },
+                        singleLine = true,
+                        isError = showMismatchError,
+                        visualTransformation = if (confirmEncryptionPasswordVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            TextButton(
+                                onClick = { confirmEncryptionPasswordVisible = !confirmEncryptionPasswordVisible },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    text = if (confirmEncryptionPasswordVisible) "隐藏" else "显示",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (showMismatchError) {
+                        Text(
+                            text = "两次输入的加密密码不一致",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
+                        if (isEncryptionPasswordMismatch) {
+                            encryptionPasswordMismatchError = true
+                            return@TextButton
+                        }
                         viewModel.saveWebDavSettings(
                             serverUrl = serverUrlInput,
                             remoteFolder = remoteFolderInput,
