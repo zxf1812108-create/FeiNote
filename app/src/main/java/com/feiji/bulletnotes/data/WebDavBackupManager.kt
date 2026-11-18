@@ -1,27 +1,30 @@
 package com.feiji.bulletnotes.data
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import android.util.Xml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Credentials
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.xmlpull.v1.XmlPullParser
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.StringReader
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URI
+import java.net.URL
 import java.net.URLDecoder
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
-import java.util.concurrent.TimeUnit
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 /**
- * WebDAV 静默每日备份管理（默认坚果云）：
+ * WebDAV 静默每日备份管理（默认坚果云，纯 Android 标准库实现，零额外第三方依赖）：
  * - 每天备份一次昨天的数据备份（飞记备份 yyMMdd.json）
  * - 备份全程静默无提示；仅当开启功能且 21:00 后仍未备份成功时显示顶栏感叹号
  * - 备份成功后删除云端前天及以前（<= today - 2 days）的飞记备份文件
@@ -41,19 +44,12 @@ object WebDavBackupManager {
     const val DEFAULT_REMOTE_FOLDER = "飞记"
     private val ALERT_TIME: LocalTime = LocalTime.of(21, 0)
 
+    private const val CONNECT_TIMEOUT_MS = 15_000
+    private const val READ_TIMEOUT_MS = 25_000
+    private const val MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
     private val nameDate = DateTimeFormatter.ofPattern("yyMMdd")
     private val filePattern = Regex("""^飞记备份 (\d{6})(?:\.json)?$""")
-    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
-    private val xmlMediaType = "application/xml; charset=utf-8".toMediaType()
-    private val emptyBody = ByteArray(0).toRequestBody(null)
-
-    private val httpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .writeTimeout(25, TimeUnit.SECONDS)
-            .build()
-    }
 
     data class WebDavConfig(
         val enabled: Boolean = false,
@@ -66,6 +62,35 @@ object WebDavBackupManager {
             serverUrl.trim().isNotEmpty() &&
                 username.trim().isNotEmpty() &&
                 password.isNotEmpty()
+    }
+
+    private data class DavEndpoint(
+        val scheme: String,
+        val host: String,
+        val port: Int,
+        val encodedPath: String
+    ) {
+        fun hostHeader(): String {
+            val isDefaultPort = (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
+            return if (isDefaultPort) host else "$host:$port"
+        }
+
+        fun appendSegment(segment: String, trailingSlash: Boolean): DavEndpoint {
+            val base = if (encodedPath.endsWith("/")) encodedPath else "$encodedPath/"
+            val encodedSeg = encodePathSegment(segment)
+            val nextPath = if (trailingSlash) "$base$encodedSeg/" else "$base$encodedSeg"
+            return copy(encodedPath = nextPath)
+        }
+
+        fun toUrlString(): String = "$scheme://${hostHeader()}$encodedPath"
+    }
+
+    private data class HttpResult(
+        val code: Int,
+        val headers: Map<String, String>,
+        val body: ByteArray
+    ) {
+        val isSuccessful: Boolean get() = code in 200..299
     }
 
     private fun prefs(context: Context) =
@@ -138,11 +163,11 @@ object WebDavBackupManager {
         if (isTodayBackupCompleted(context, today)) return@withContext true
         if (!config.isConfigured()) return@withContext false
 
-        val baseUrl = normalizeBaseUrl(config.serverUrl) ?: return@withContext false
-        val authHeader = Credentials.basic(config.username.trim(), config.password, Charsets.UTF_8)
+        val baseEndpoint = parseBaseEndpoint(config.serverUrl) ?: return@withContext false
+        val authHeader = buildBasicAuth(config.username.trim(), config.password)
 
         try {
-            val folderUrl = ensureRemoteFolder(baseUrl, config.remoteFolder, authHeader)
+            val folderEndpoint = ensureRemoteFolder(baseEndpoint, config.remoteFolder, authHeader)
                 ?: return@withContext false
 
             val yesterday = today.minusDays(1)
@@ -151,28 +176,22 @@ object WebDavBackupManager {
             val payloadBytes = localYesterday?.second
                 ?: BackupManager.snapshotJson(noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
 
-            val fileUrl = folderUrl.newBuilder()
-                .addPathSegment(fileName)
-                .build()
-
-            val putRequest = Request.Builder()
-                .url(fileUrl)
-                .header("Authorization", authHeader)
-                .put(payloadBytes.toRequestBody(jsonMediaType))
-                .build()
-
-            val uploadSucceeded = httpClient.newCall(putRequest).execute().use { response ->
-                response.isSuccessful
-            }
-
-            if (!uploadSucceeded) return@withContext false
+            val fileEndpoint = folderEndpoint.appendSegment(fileName, trailingSlash = false)
+            val putRes = executeRequest(
+                method = "PUT",
+                endpoint = fileEndpoint,
+                authHeader = authHeader,
+                contentType = "application/json; charset=utf-8",
+                body = payloadBytes
+            )
+            if (!putRes.isSuccessful) return@withContext false
 
             // 标记今日备份成功，立即消除 21:00 后的感叹号提示。
             prefs(context).edit().putString(KEY_LAST_SUCCESS_DATE, today.toString()).commit()
 
             // 备份成功后，静默清理云端前天及以前（<= today - 2）的飞记备份。
             runCatching {
-                deleteOldBackupsOnServer(folderUrl, authHeader, today.minusDays(2))
+                deleteOldBackupsOnServer(folderEndpoint, authHeader, today.minusDays(2))
             }.onFailure { e ->
                 Log.w(TAG, "Cleanup old WebDAV backups failed", e)
             }
@@ -184,38 +203,90 @@ object WebDavBackupManager {
         }
     }
 
-    private fun normalizeBaseUrl(rawUrl: String): HttpUrl? {
-        val trimmed = rawUrl.trim()
-        if (trimmed.isEmpty()) return null
-        val withTrailingSlash = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
-        return withTrailingSlash.toHttpUrlOrNull()
+    private fun buildBasicAuth(username: String, password: String): String {
+        val raw = "$username:$password".toByteArray(Charsets.UTF_8)
+        val encoded = Base64.encodeToString(raw, Base64.NO_WRAP)
+        return "Basic $encoded"
     }
 
-    /** 逐级确保远程备份目录存在；目录已存在（405/301/2xx）视为成功。 */
+    private fun parseBaseEndpoint(rawUrl: String): DavEndpoint? {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return null
+        return try {
+            val url = URL(if (trimmed.endsWith("/")) trimmed else "$trimmed/")
+            val scheme = url.protocol.lowercase()
+            if (scheme != "https" && scheme != "http") return null
+            val host = url.host
+            if (host.isNullOrBlank()) return null
+            val port = if (url.port > 0) url.port else if (scheme == "https") 443 else 80
+            val rawPath = url.path.ifEmpty { "/" }
+            val normalizedPath = buildString {
+                append('/')
+                rawPath.split('/').filter { it.isNotEmpty() }.forEach { seg ->
+                    append(encodeAlreadyOrRawSegment(seg))
+                    append('/')
+                }
+            }
+            DavEndpoint(scheme, host, port, normalizedPath)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun encodeAlreadyOrRawSegment(segment: String): String {
+        val decoded = decodeSegment(segment)
+        return encodePathSegment(decoded)
+    }
+
+    private fun encodePathSegment(segment: String): String {
+        val bytes = segment.toByteArray(Charsets.UTF_8)
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val c = b.toInt() and 0xFF
+            val isUnreserved = (c in 'A'.code..'Z'.code) ||
+                (c in 'a'.code..'z'.code) ||
+                (c in '0'.code..'9'.code) ||
+                c == '-'.code || c == '.'.code || c == '_'.code || c == '~'.code
+            if (isUnreserved) {
+                sb.append(c.toChar())
+            } else {
+                sb.append('%')
+                sb.append("0123456789ABCDEF"[c ushr 4])
+                sb.append("0123456789ABCDEF"[c and 0x0F])
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun decodeSegment(encoded: String): String {
+        return try {
+            URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8")
+        } catch (_: Exception) {
+            encoded
+        }
+    }
+
+    /** 逐级确保远程备份目录存在；目录已存在（405/301/302/2xx）视为成功。 */
     private fun ensureRemoteFolder(
-        baseUrl: HttpUrl,
+        baseEndpoint: DavEndpoint,
         remoteFolder: String,
         authHeader: String
-    ): HttpUrl? {
+    ): DavEndpoint? {
         val segments = remoteFolder.split('/').map { it.trim() }.filter { it.isNotEmpty() }
-        var current = baseUrl
+        var current = baseEndpoint
         for (segment in segments) {
-            val nextUrl = current.newBuilder()
-                .addPathSegment(segment)
-                .addPathSegment("") // trailing slash for collection
-                .build()
-
-            val mkcolRequest = Request.Builder()
-                .url(nextUrl)
-                .header("Authorization", authHeader)
-                .method("MKCOL", emptyBody)
-                .build()
-
-            val ok = httpClient.newCall(mkcolRequest).execute().use { response ->
-                response.isSuccessful || response.code == 405 || response.code == 301 || response.code == 302
-            }
+            val next = current.appendSegment(segment, trailingSlash = true)
+            val res = executeRequest(
+                method = "MKCOL",
+                endpoint = next,
+                authHeader = authHeader,
+                contentType = null,
+                body = ByteArray(0),
+                followRedirects = false
+            )
+            val ok = res.isSuccessful || res.code == 405 || res.code == 301 || res.code == 302
             if (!ok) return null
-            current = nextUrl
+            current = next
         }
         return current
     }
@@ -229,45 +300,37 @@ object WebDavBackupManager {
         }
     }
 
-    private fun decodeSegment(encoded: String): String {
-        return try {
-            URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8")
-        } catch (_: Exception) {
-            encoded
-        }
-    }
-
     /** 使用 PROPFIND 列出目录中的飞记备份，删除日期 <= cutoffDate（前天及以前）的文件。 */
     private fun deleteOldBackupsOnServer(
-        folderUrl: HttpUrl,
+        folderEndpoint: DavEndpoint,
         authHeader: String,
         cutoffDate: LocalDate
     ) {
         val propfindXml =
             """<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"""
-        val propfindRequest = Request.Builder()
-            .url(folderUrl)
-            .header("Authorization", authHeader)
-            .header("Depth", "1")
-            .method("PROPFIND", propfindXml.toRequestBody(xmlMediaType))
-            .build()
+        val res = executeRequest(
+            method = "PROPFIND",
+            endpoint = folderEndpoint,
+            authHeader = authHeader,
+            extraHeaders = mapOf("Depth" to "1"),
+            contentType = "application/xml; charset=utf-8",
+            body = propfindXml.toByteArray(Charsets.UTF_8)
+        )
 
-        val hrefs: List<String>? = httpClient.newCall(propfindRequest).execute().use { response ->
-            if (response.isSuccessful || response.code == 207) {
-                parseHrefsFromPropfind(response.body?.string().orEmpty())
-            } else {
-                null
-            }
+        val hrefs: List<String>? = if (res.isSuccessful || res.code == 207) {
+            parseHrefsFromPropfind(String(res.body, Charsets.UTF_8))
+        } else {
+            null
         }
 
         if (hrefs != null) {
-            val folderPath = folderUrl.encodedPath.trimEnd('/')
+            val folderPath = folderEndpoint.encodedPath.trimEnd('/')
             for (rawHref in hrefs) {
-                val resolved = folderUrl.resolve(rawHref.trim()) ?: continue
+                val resolved = resolveEndpoint(folderEndpoint, rawHref.trim()) ?: continue
                 val resolvedPath = resolved.encodedPath.trimEnd('/')
                 if (resolvedPath == folderPath) continue
 
-                val lastSegment = resolved.encodedPathSegments.lastOrNull { it.isNotEmpty() } ?: continue
+                val lastSegment = resolvedPath.split('/').lastOrNull { it.isNotEmpty() } ?: continue
                 val fileName = decodeSegment(lastSegment)
                 val fileDate = backupDate(fileName) ?: continue
 
@@ -278,20 +341,226 @@ object WebDavBackupManager {
         } else {
             // 兜底：若服务端不支持 PROPFIND，至少尝试删除前天的备份文件。
             val fallbackName = "飞记备份 ${cutoffDate.format(nameDate)}.json"
-            val fallbackUrl = folderUrl.newBuilder().addPathSegment(fallbackName).build()
-            deleteRemoteFile(fallbackUrl, authHeader)
+            val fallbackEndpoint = folderEndpoint.appendSegment(fallbackName, trailingSlash = false)
+            deleteRemoteFile(fallbackEndpoint, authHeader)
         }
     }
 
-    private fun deleteRemoteFile(fileUrl: HttpUrl, authHeader: String) {
-        val deleteRequest = Request.Builder()
-            .url(fileUrl)
-            .header("Authorization", authHeader)
-            .delete()
-            .build()
-        runCatching {
-            httpClient.newCall(deleteRequest).execute().close()
+    private fun resolveEndpoint(base: DavEndpoint, rawHref: String): DavEndpoint? {
+        if (rawHref.isEmpty()) return null
+        return try {
+            val safeHref = rawHref.replace(" ", "%20")
+            val resolvedUri = URI(base.toUrlString()).resolve(safeHref)
+            val scheme = (resolvedUri.scheme ?: base.scheme).lowercase()
+            if (scheme != "https" && scheme != "http") return null
+            val host = resolvedUri.host ?: base.host
+            val port = if (resolvedUri.port > 0) resolvedUri.port else if (scheme == "https") 443 else 80
+            val rawPath = resolvedUri.rawPath?.takeIf { it.isNotEmpty() } ?: return null
+            DavEndpoint(scheme, host, port, rawPath)
+        } catch (_: Exception) {
+            null
         }
+    }
+
+    private fun deleteRemoteFile(endpoint: DavEndpoint, authHeader: String) {
+        runCatching {
+            executeRequest(
+                method = "DELETE",
+                endpoint = endpoint,
+                authHeader = authHeader,
+                contentType = null,
+                body = null
+            )
+        }
+    }
+
+    private fun executeRequest(
+        method: String,
+        endpoint: DavEndpoint,
+        authHeader: String,
+        extraHeaders: Map<String, String> = emptyMap(),
+        contentType: String? = null,
+        body: ByteArray? = null,
+        followRedirects: Boolean = true,
+        redirectsLeft: Int = 3
+    ): HttpResult {
+        val result = executeSingleRequest(method, endpoint, authHeader, extraHeaders, contentType, body)
+        if (followRedirects && redirectsLeft > 0 && result.code in setOf(301, 302, 307, 308)) {
+            val location = result.headers["location"] ?: return result
+            val nextEndpoint = resolveEndpoint(endpoint, location) ?: return result
+            val sameHost = nextEndpoint.host.equals(endpoint.host, ignoreCase = true) &&
+                nextEndpoint.scheme == endpoint.scheme
+            if (!sameHost) return result
+            return executeRequest(
+                method = method,
+                endpoint = nextEndpoint,
+                authHeader = authHeader,
+                extraHeaders = extraHeaders,
+                contentType = contentType,
+                body = body,
+                followRedirects = true,
+                redirectsLeft = redirectsLeft - 1
+            )
+        }
+        return result
+    }
+
+    private fun executeSingleRequest(
+        method: String,
+        endpoint: DavEndpoint,
+        authHeader: String,
+        extraHeaders: Map<String, String>,
+        contentType: String?,
+        body: ByteArray?
+    ): HttpResult {
+        val socket = openSocket(endpoint)
+        socket.use { sock ->
+            val headerBlock = buildString {
+                append(method).append(' ').append(endpoint.encodedPath).append(" HTTP/1.1\r\n")
+                append("Host: ").append(endpoint.hostHeader()).append("\r\n")
+                append("Authorization: ").append(authHeader).append("\r\n")
+                append("User-Agent: FeiNote/1.4\r\n")
+                append("Connection: close\r\n")
+                for ((k, v) in extraHeaders) {
+                    append(k).append(": ").append(v).append("\r\n")
+                }
+                if (contentType != null) {
+                    append("Content-Type: ").append(contentType).append("\r\n")
+                }
+                if (body != null) {
+                    append("Content-Length: ").append(body.size).append("\r\n")
+                }
+                append("\r\n")
+            }
+
+            val out = sock.getOutputStream()
+            out.write(headerBlock.toByteArray(Charsets.ISO_8859_1))
+            if (body != null && body.isNotEmpty()) {
+                out.write(body)
+            }
+            out.flush()
+
+            val input = BufferedInputStream(sock.getInputStream())
+            val statusLine = readHeaderLine(input) ?: error("Empty HTTP response")
+            val statusParts = statusLine.split(' ', limit = 3)
+            val statusCode = statusParts.getOrNull(1)?.toIntOrNull() ?: error("Invalid status line: $statusLine")
+
+            val headers = linkedMapOf<String, String>()
+            while (true) {
+                val line = readHeaderLine(input) ?: break
+                if (line.isEmpty()) break
+                val colon = line.indexOf(':')
+                if (colon > 0) {
+                    val key = line.substring(0, colon).trim().lowercase()
+                    val value = line.substring(colon + 1).trim()
+                    headers[key] = value
+                }
+            }
+
+            val responseBody = when {
+                statusCode == 204 || statusCode == 304 || method.equals("HEAD", ignoreCase = true) -> ByteArray(0)
+                headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true -> readChunkedBody(input)
+                headers["content-length"]?.toIntOrNull() != null -> {
+                    val len = headers["content-length"]!!.toInt().coerceIn(0, MAX_RESPONSE_BYTES)
+                    readFixedBody(input, len)
+                }
+                else -> readUntilEof(input)
+            }
+
+            return HttpResult(statusCode, headers, responseBody)
+        }
+    }
+
+    private fun openSocket(endpoint: DavEndpoint): Socket {
+        val rawSocket = Socket()
+        rawSocket.connect(InetSocketAddress(endpoint.host, endpoint.port), CONNECT_TIMEOUT_MS)
+        rawSocket.soTimeout = READ_TIMEOUT_MS
+        if (endpoint.scheme == "https") {
+            val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
+            val sslSocket = sslFactory.createSocket(rawSocket, endpoint.host, endpoint.port, true) as SSLSocket
+            sslSocket.soTimeout = READ_TIMEOUT_MS
+            sslSocket.startHandshake()
+            val hostnameValid = HttpsURLConnection.getDefaultHostnameVerifier()
+                .verify(endpoint.host, sslSocket.session)
+            if (!hostnameValid) {
+                sslSocket.close()
+                throw javax.net.ssl.SSLPeerUnverifiedException("Hostname verification failed for ${endpoint.host}")
+            }
+            return sslSocket
+        }
+        return rawSocket
+    }
+
+    private fun readHeaderLine(input: InputStream): String? {
+        val baos = ByteArrayOutputStream()
+        var prev = -1
+        while (true) {
+            val b = input.read()
+            if (b == -1) {
+                return if (baos.size() == 0) null else baos.toString("ISO-8859-1")
+            }
+            if (b == '\n'.code) {
+                val bytes = baos.toByteArray()
+                val len = if (prev == '\r'.code && bytes.isNotEmpty()) bytes.size - 1 else bytes.size
+                return String(bytes, 0, len, Charsets.ISO_8859_1)
+            }
+            baos.write(b)
+            prev = b
+        }
+    }
+
+    private fun readFixedBody(input: InputStream, length: Int): ByteArray {
+        val result = ByteArray(length)
+        var offset = 0
+        while (offset < length) {
+            val read = input.read(result, offset, length - offset)
+            if (read == -1) break
+            offset += read
+        }
+        return if (offset == length) result else result.copyOf(offset)
+    }
+
+    private fun readChunkedBody(input: InputStream): ByteArray {
+        val baos = ByteArrayOutputStream()
+        while (true) {
+            val sizeLine = readHeaderLine(input) ?: break
+            val hexSize = sizeLine.substringBefore(';').trim()
+            val chunkSize = hexSize.toIntOrNull(16) ?: break
+            if (chunkSize == 0) {
+                // Consume trailing headers until empty line
+                while (true) {
+                    val trailer = readHeaderLine(input) ?: break
+                    if (trailer.isEmpty()) break
+                }
+                break
+            }
+            var remaining = chunkSize
+            val buf = ByteArray(minOf(chunkSize, 8192))
+            while (remaining > 0) {
+                val read = input.read(buf, 0, minOf(remaining, buf.size))
+                if (read == -1) break
+                if (baos.size() < MAX_RESPONSE_BYTES) {
+                    val toWrite = minOf(read, MAX_RESPONSE_BYTES - baos.size())
+                    baos.write(buf, 0, toWrite)
+                }
+                remaining -= read
+            }
+            // Consume CRLF after chunk data
+            readHeaderLine(input)
+        }
+        return baos.toByteArray()
+    }
+
+    private fun readUntilEof(input: InputStream): ByteArray {
+        val baos = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        while (baos.size() < MAX_RESPONSE_BYTES) {
+            val read = input.read(buf)
+            if (read == -1) break
+            val toWrite = minOf(read, MAX_RESPONSE_BYTES - baos.size())
+            baos.write(buf, 0, toWrite)
+        }
+        return baos.toByteArray()
     }
 
     private fun parseHrefsFromPropfind(xmlText: String): List<String> {
