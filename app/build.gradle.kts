@@ -71,7 +71,7 @@ dependencies {
     // Coroutines & Serialization
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.google.gson)
-implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
 
     debugImplementation(libs.androidx.ui.tooling)
 }
