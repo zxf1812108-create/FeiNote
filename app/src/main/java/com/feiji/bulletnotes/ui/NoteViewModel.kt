@@ -24,7 +24,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.time.ZoneId
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -553,11 +552,25 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 删除笔记放入回收站 (软删除)
+     * 删除笔记放入回收站 (软删除)，并静默限制回收站最多保留 30 条笔记（超出则自动永久删除最早的笔记）。
      */
     fun moveToTrash(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             noteDao.softDeleteNote(id)
+            val deletedNotes = noteDao.getDeletedNotes().first()
+            if (deletedNotes.size > 30) {
+                val overflowCount = deletedNotes.size - 30
+                deletedNotes
+                    .sortedWith(
+                        compareBy<NoteEntity> { it.deletedAt ?: it.updatedAt }
+                            .thenBy { it.updatedAt }
+                            .thenBy { it.id }
+                    )
+                    .take(overflowCount)
+                    .forEach { oldNote ->
+                        noteDao.deletePermanently(oldNote.id)
+                    }
+            }
             _searchResults.value = _searchResults.value.filterNot { it.id == id }
             if (_editingNoteId.value == id) {
                 _editingNoteId.value = null
@@ -580,17 +593,6 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun permanentlyDelete(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             noteDao.deletePermanently(id)
-        }
-    }
- 
-    /**
-     * 清空回收站全部删除
-     */
-    fun deleteTrashBeforeToday() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val todayStart = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-            val count = noteDao.deleteTrashOlderThan(todayStart - 1L)
-            _userMessage.value = "已删除昨天及以前的 $count 条回收站笔记"
         }
     }
 
