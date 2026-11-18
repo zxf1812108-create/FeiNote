@@ -46,6 +46,7 @@ import java.time.YearMonth
 fun DatePickerHelper(
     initialDate: LocalDate,
     noteDates: Set<LocalDate>,
+    showRelativeShortcuts: Boolean = false,
     onDatePicked: (LocalDate) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -200,14 +201,51 @@ fun DatePickerHelper(
                 }
 
                 Spacer(Modifier.height(4.dp))
-                TextButton(
-                    onClick = { displayedMonth = YearMonth.from(LocalDate.now()) },
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text(
-                        "回到本月",
-                        color = MaterialTheme.colorScheme.onSurface
+                if (showRelativeShortcuts) {
+                    val today = LocalDate.now()
+                    val shortcuts = listOf(
+                        "一周后" to today.plusWeeks(1),
+                        "一月后" to today.plusMonths(1),
+                        "一季后" to today.plusMonths(3),
+                        "半年后" to today.plusMonths(6),
+                        "一年后" to today.plusYears(1)
                     )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        shortcuts.forEach { (label, targetDate) ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { onDatePicked(targetDate) }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    TextButton(
+                        onClick = { displayedMonth = YearMonth.from(LocalDate.now()) },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text(
+                            "回到本月",
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
         }
