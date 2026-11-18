@@ -159,9 +159,16 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var showDatePicker by remember { mutableStateOf(false) }
     // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
     var expandedNoteId by remember { mutableStateOf<Long?>(null) }
+    // 防止连续快速点击新增提示条时重复插入多条空白笔记。
+    var isCreatingFromHint by remember { mutableStateOf(false) }
 
     LaunchedEffect(selectedDate, isSearchMode) {
         expandedNoteId = null
+        isCreatingFromHint = false
+    }
+
+    LaunchedEffect(editingNoteId, notes.size) {
+        isCreatingFromHint = false
     }
 
     // 点击当前编辑项之外的区域时，统一退出编辑并收起展开浏览态，同时触发已有的空笔记清理逻辑。
@@ -859,6 +866,21 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 viewModel.insertNoteAfter(note, "")
                             }
                         )
+                    }
+
+                    // 日期浏览模式且所有笔记均未进入编辑状态时，在最后一条笔记下方显示新增笔记提示条。
+                    if (!isSearchMode && editingNoteId == null) {
+                        item(key = "add_note_hint_bar") {
+                            AddNoteHintRow(
+                                onClick = {
+                                    if (!isCreatingFromHint) {
+                                        isCreatingFromHint = true
+                                        expandedNoteId = null
+                                        viewModel.insertNoteAfter(null, "")
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -1618,6 +1640,68 @@ fun BulletNoteRow(
             }
         }
 
+    }
+}
+
+/**
+ * 日期浏览模式下位于最后一条笔记下方的新增笔记提示条。
+ * 视觉区域与单行笔记正文严格对齐，采用低透明度正文色作为背景与加号颜色。
+ */
+@Composable
+private fun AddNoteHintRow(
+    onClick: () -> Unit
+) {
+    val hintBaseColor = MaterialTheme.colorScheme.onSurface
+    val hintBackgroundColor = hintBaseColor.copy(alpha = 0.06f)
+    val hintIconColor = hintBaseColor.copy(alpha = 0.35f)
+    val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        // 左侧占位宽度（28dp 项目符号槽 + 8dp 间距）与 BulletNoteRow 保持一致，确保覆盖区域与正文完全对齐。
+        Spacer(modifier = Modifier.width(36.dp))
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(6.dp))
+                .background(hintBackgroundColor)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            // 使用与单行笔记正文完全一致的空文本决定高度，保证随系统字体缩放自适应且高度完全一致。
+            Text(
+                text = " ",
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    lineHeight = bodyLineHeight
+                ),
+                maxLines = 1,
+                modifier = Modifier.alpha(0f)
+            )
+            Canvas(modifier = Modifier.size(14.dp)) {
+                val strokeWidth = 1.6.dp.toPx()
+                val halfW = size.width / 2f
+                val halfH = size.height / 2f
+                val inset = strokeWidth / 2f
+                drawLine(
+                    color = hintIconColor,
+                    start = Offset(inset, halfH),
+                    end = Offset(size.width - inset, halfH),
+                    strokeWidth = strokeWidth,
+                    cap = StrokeCap.Round
+                )
+                drawLine(
+                    color = hintIconColor,
+                    start = Offset(halfW, inset),
+                    end = Offset(halfW, size.height - inset),
+                    strokeWidth = strokeWidth,
+                    cap = StrokeCap.Round
+                )
+            }
+        }
     }
 }
 
