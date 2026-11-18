@@ -87,6 +87,24 @@ object BackupManager {
         children(context).firstOrNull { it.name == "$expected.json" || it.name == expected }
     }
 
+    /** 按日期读取本地备份文件原始字节（供 WebDAV 备份昨天数据使用）。 */
+    suspend fun readBackupBytesForDate(context: Context, date: LocalDate): Pair<String, ByteArray>? =
+        withContext(Dispatchers.IO) {
+            if (!hasBackupFolder(context)) return@withContext null
+            try {
+                val baseName = "飞记备份 ${date.format(nameDate)}"
+                val match = children(context).firstOrNull {
+                    it.name == "$baseName.json" || it.name == baseName
+                } ?: return@withContext null
+                val bytes = context.contentResolver.openInputStream(match.uri)?.use { it.readBytes() }
+                    ?: return@withContext null
+                "$baseName.json" to bytes
+            } catch (e: Exception) {
+                Log.w("FeiJiBackup", "Read backup for $date failed", e)
+                null
+            }
+        }
+
     /** 仅首次打开时清理：保留今天及过去三天的日期，其他文件绝不触碰。 */
     suspend fun cleanOldBackupsOncePerDay(context: Context): Int = withContext(Dispatchers.IO) {
         if (!hasBackupFolder(context)) return@withContext 0
@@ -127,7 +145,7 @@ object BackupManager {
             false
         }
     }
- 
+
     suspend fun restoreBackup(context: Context, noteDao: NoteDao, uri: Uri): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
             // 只允许恢复当前授权文件夹中的、符合命名规则的备份文件。
