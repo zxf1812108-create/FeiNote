@@ -1,5 +1,6 @@
 package com.feiji.bulletnotes.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -27,6 +27,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -143,17 +151,44 @@ fun TrashBinDialog(
                                         )
                                     }
 
-                                    // 恢复按钮
+                                    // 恢复按钮（轻量矢量自绘，避免引入庞大的 material-icons-extended 库）
+                                    val restoreTint = MaterialTheme.colorScheme.primary
                                     IconButton(
                                         onClick = { onRestore(note.id) },
-                                        modifier = Modifier.size(32.dp)
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .semantics { contentDescription = "恢复" }
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Restore,
-                                            contentDescription = "恢复",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
+                                        Canvas(modifier = Modifier.size(20.dp)) {
+                                            val strokePx = 1.9.dp.toPx()
+                                            val stroke = Stroke(
+                                                width = strokePx,
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                            val inset = strokePx + 1.5.dp.toPx()
+                                            val arcSize = size.width - inset * 2f
+                                            // 逆时针圆弧
+                                            drawArc(
+                                                color = restoreTint,
+                                                startAngle = -145f,
+                                                sweepAngle = 290f,
+                                                useCenter = false,
+                                                topLeft = Offset(inset, inset),
+                                                size = Size(arcSize, arcSize),
+                                                style = stroke
+                                            )
+                                            // 左上角箭头
+                                            val arrowTipX = inset + arcSize * 0.08f
+                                            val arrowTipY = inset + arcSize * 0.24f
+                                            val arrowLen = arcSize * 0.28f
+                                            val arrow = Path().apply {
+                                                moveTo(arrowTipX, arrowTipY - arrowLen * 0.95f)
+                                                lineTo(arrowTipX, arrowTipY)
+                                                lineTo(arrowTipX + arrowLen, arrowTipY)
+                                            }
+                                            drawPath(path = arrow, color = restoreTint, style = stroke)
+                                        }
                                     }
 
                                 }
