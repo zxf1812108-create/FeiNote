@@ -60,12 +60,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -158,13 +155,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val showWebDavAlert by viewModel.showWebDavAlert.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
+    // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
+    var expandedNoteId by remember { mutableStateOf<Long?>(null) }
 
-    // 点击当前编辑项之外的区域时，统一退出编辑并触发已有的空笔记清理逻辑。
+    LaunchedEffect(selectedDate, isSearchMode) {
+        expandedNoteId = null
+    }
+
+    // 点击当前编辑项之外的区域时，统一退出编辑并收起展开浏览态，同时触发已有的空笔记清理逻辑。
     fun closeEditor() {
         if (editingNoteId != null) {
             viewModel.setEditingNoteId(null)
             focusManager.clearFocus()
         }
+        expandedNoteId = null
     }
 
     val densityForNewNoteScroll = LocalDensity.current
@@ -285,7 +289,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.background)
-                    .clickable(enabled = editingNoteId != null) {
+                    .clickable(enabled = editingNoteId != null || expandedNoteId != null) {
                         closeEditor()
                     }
                     .statusBarsPadding()
@@ -449,6 +453,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 
                     // 仅当开启 WebDAV 且 21:00 后仍未成功完成今日备份时，在垃圾箱旁显示感叹号提示。
                     if (showWebDavAlert) {
+                        val alertColor = MaterialTheme.colorScheme.onSurface
                         Box(
                             modifier = Modifier
                                 .size(28.dp)
@@ -459,12 +464,21 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.PriorityHigh,
-                                contentDescription = "WebDAV 备份尚未完成",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.size(20.dp)
-                            )
+                            Canvas(modifier = Modifier.size(18.dp)) {
+                                val cx = size.width / 2f
+                                drawLine(
+                                    color = alertColor,
+                                    start = Offset(cx, size.height * 0.16f),
+                                    end = Offset(cx, size.height * 0.60f),
+                                    strokeWidth = size.width * 0.14f,
+                                    cap = StrokeCap.Round
+                                )
+                                drawCircle(
+                                    color = alertColor,
+                                    radius = size.width * 0.08f,
+                                    center = Offset(cx, size.height * 0.80f)
+                                )
+                            }
                         }
                     }
 
@@ -538,7 +552,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         )
                     }
                 }
-                .clickable(enabled = editingNoteId != null) {
+                .clickable(enabled = editingNoteId != null || expandedNoteId != null) {
                     closeEditor()
                 }
         ) {
@@ -613,6 +627,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         }
 
                         val isEditing = (editingNoteId == note.id)
+                        val isExpanded = (expandedNoteId == note.id && !isEditing)
 
                         BulletNoteRow(
                             modifier = Modifier
@@ -645,11 +660,18 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 },
                             note = note,
                             isEditing = isEditing,
+                            isExpanded = isExpanded,
                             listState = listState,
                             listViewportBounds = listViewportBounds,
                             onBulletClick = {
                                 if (editingNoteId != note.id) {
-                                    closeEditor()
+                                    if (editingNoteId != null) {
+                                        viewModel.setEditingNoteId(null)
+                                        focusManager.clearFocus()
+                                    }
+                                    if (expandedNoteId != note.id) {
+                                        expandedNoteId = null
+                                    }
                                 }
                                 viewModel.cycleBulletType(note)
                             },
@@ -658,10 +680,15 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 noteToChangeDate = note
                                 showDatePicker = true
                             },
-                            onContentClick = {
+                            onContentClick = { isCollapsedMultiLine ->
                                 if (editingNoteId == note.id) {
                                     closeEditor()
+                                } else if (isCollapsedMultiLine && expandedNoteId != note.id) {
+                                    closeEditor()
+                                    focusManager.clearFocus()
+                                    expandedNoteId = note.id
                                 } else {
+                                    expandedNoteId = null
                                     viewModel.setEditingNoteId(note.id)
                                 }
                             },
@@ -984,15 +1011,14 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             PasswordVisualTransformation()
                         },
                         trailingIcon = {
-                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                                Icon(
-                                    imageVector = if (passwordVisible) {
-                                        Icons.Outlined.VisibilityOff
-                                    } else {
-                                        Icons.Outlined.Visibility
-                                    },
-                                    contentDescription = if (passwordVisible) "隐藏密码" else "显示密码",
-                                    tint = MaterialTheme.colorScheme.onSurface
+                            TextButton(
+                                onClick = { passwordVisible = !passwordVisible },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    text = if (passwordVisible) "隐藏" else "显示",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         },
@@ -1078,12 +1104,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 fun BulletNoteRow(
     note: NoteEntity,
     isEditing: Boolean,
+    isExpanded: Boolean,
     listState: LazyListState,
     listViewportBounds: Rect?,
     modifier: Modifier = Modifier,
     onBulletClick: () -> Unit,
     onBulletLongClick: () -> Unit,
-    onContentClick: () -> Unit,
+    onContentClick: (Boolean) -> Unit,
     onContentChange: (String) -> Unit,
     onEnterPressed: () -> Unit,
     onDragStart: () -> Unit,
@@ -1098,6 +1125,10 @@ fun BulletNoteRow(
     }
     // 记录实际排版后的第一行高度，项目符号据此动态垂直居中，避免固定 dp 偏移。
     var firstLineHeightPx by remember(note.id) { mutableStateOf(0f) }
+    // 记录单行预览时是否发生视觉截断（超宽折行），与显式换行共同判定是否为多行笔记。
+    var isFirstLineEllipsized by remember(note.id, note.content) { mutableStateOf(false) }
+    val hasMoreParagraphs = note.content.contains('\n')
+    val isCollapsedMultiLine = !isExpanded && (hasMoreParagraphs || isFirstLineEllipsized)
     var textFieldCoordinates by remember {
         mutableStateOf<LayoutCoordinates?>(null)
     }
@@ -1378,34 +1409,48 @@ fun BulletNoteRow(
                     }
                 )
                 .clickable(enabled = !isEditing) {
-                    onContentClick()
+                    onContentClick(isCollapsedMultiLine)
                 }
         ) {
             if (!isEditing) {
-                // 浏览模式始终只显示第一行；超出宽度时由 Ellipsis 自动显示省略号。
                 val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = MaterialTheme.colorScheme.onSurface,
                     lineHeight = bodyLineHeight
                 )
-                val firstLine = note.content.substringBefore('\n')
-                val hasMoreParagraphs = note.content.contains('\n')
-                val previewText = when {
-                    hasMoreParagraphs && firstLine.isEmpty() -> "…"
-                    hasMoreParagraphs -> "$firstLine…"
-                    else -> firstLine.ifEmpty { " " }
-                }
-                Text(
-                    text = previewText,
-                    style = paragraphStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    onTextLayout = { layout ->
-                        if (layout.lineCount > 0) {
-                            firstLineHeightPx =
-                                layout.getLineBottom(0) - layout.getLineTop(0)
+                if (isExpanded) {
+                    // 展开浏览模式：完整显示多行笔记内容，不进入编辑状态。
+                    Text(
+                        text = note.content.ifEmpty { " " },
+                        style = paragraphStyle,
+                        onTextLayout = { layout ->
+                            if (layout.lineCount > 0) {
+                                firstLineHeightPx =
+                                    layout.getLineBottom(0) - layout.getLineTop(0)
+                            }
                         }
+                    )
+                } else {
+                    // 收起浏览模式只显示第一行；超出宽度时由 Ellipsis 自动显示省略号。
+                    val firstLine = note.content.substringBefore('\n')
+                    val previewText = when {
+                        hasMoreParagraphs && firstLine.isEmpty() -> "…"
+                        hasMoreParagraphs -> "$firstLine…"
+                        else -> firstLine.ifEmpty { " " }
                     }
-                )
+                    Text(
+                        text = previewText,
+                        style = paragraphStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        onTextLayout = { layout ->
+                            if (layout.lineCount > 0) {
+                                firstLineHeightPx =
+                                    layout.getLineBottom(0) - layout.getLineTop(0)
+                            }
+                            isFirstLineEllipsized = layout.hasVisualOverflow
+                        }
+                    )
+                }
             } else {
                 BasicTextField(
                     value = editValue,
@@ -1512,7 +1557,7 @@ fun BulletNoteRow(
                                     symbol = EditorActionSymbol.Collapse,
                                     contentDescription = "收起编辑",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    onClick = onContentClick
+                                    onClick = { onContentClick(false) }
                                 )
                             }
                         }
