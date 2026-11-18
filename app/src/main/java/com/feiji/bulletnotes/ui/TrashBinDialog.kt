@@ -1,7 +1,5 @@
 package com.feiji.bulletnotes.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,16 +10,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -30,15 +24,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,10 +39,8 @@ import com.feiji.bulletnotes.data.NoteEntity
 fun TrashBinDialog(
     trashNotes: List<NoteEntity>,
     onDismiss: () -> Unit,
-    onRestore: (Long) -> Unit,
-    onDeleteBeforeToday: () -> Unit
+    onRestore: (Long) -> Unit
 ) {
-    var showConfirmClearAllDialog by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -73,10 +59,7 @@ fun TrashBinDialog(
                     .fillMaxWidth()
                     .padding(16.dp)
             ) {
-                // 顶部标题栏：
-                // 左侧：“回收站”
-                // 中间：“全部删除”标识
-                // 右侧：“×”关闭按钮
+                // 顶部标题栏：左侧“回收站”，右侧“×”关闭按钮
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -92,28 +75,6 @@ fun TrashBinDialog(
                     )
 
                     Spacer(modifier = Modifier.weight(1f))
-
-                    // “回收站”右侧与“×”之间的中间区域：“全部删除”标识
-                    if (trashNotes.isNotEmpty()) {
-                        TextButton(
-                            onClick = { showConfirmClearAllDialog = true },
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DeleteForever,
-                                contentDescription = "删除一天前",
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "删除一天前",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
 
                     // 右侧关闭按钮“×”
                     IconButton(
@@ -203,30 +164,4 @@ fun TrashBinDialog(
             }
         }
     }
-
-    // 清空回收站全部删除二次确认弹窗
-    if (showConfirmClearAllDialog) {
-        AlertDialog(
-            onDismissRequest = { showConfirmClearAllDialog = false },
-            title = { Text(text = "删除一天前的笔记", fontWeight = FontWeight.Bold) },
-            text = { Text(text = "永久删除昨天及更早移入回收站的笔记，保留今天移入回收站的笔记。无法确定删除时间的旧笔记也会保留。此操作无法撤销。") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showConfirmClearAllDialog = false
-                        onDeleteBeforeToday()
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
-                ) {
-                    Text(text = "确认删除", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showConfirmClearAllDialog = false }) {
-                    Text(text = "取消")
-                }
-            }
-        )
-    }
 }
-
