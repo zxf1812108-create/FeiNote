@@ -52,19 +52,26 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PriorityHigh
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -103,6 +110,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.feiji.bulletnotes.data.BulletType
@@ -140,10 +149,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var trashBounds by remember { mutableStateOf<Rect?>(null) }
     var hoveringTrash by remember { mutableStateOf(false) }
     var showBackupPicker by remember { mutableStateOf(false) }
+    var showWebDavSettings by remember { mutableStateOf(false) }
     var backupToRestore by remember {
         mutableStateOf<com.feiji.bulletnotes.data.BackupManager.BackupFile?>(null)
     }
     val backupFiles by viewModel.backupFiles.collectAsState()
+    val webDavConfig by viewModel.webDavConfig.collectAsState()
+    val showWebDavAlert by viewModel.showWebDavAlert.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
 
@@ -433,6 +445,27 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             )
                         }
                         Spacer(modifier = Modifier.weight(1f))
+                    }
+
+                    // 仅当开启 WebDAV 且 21:00 后仍未成功完成今日备份时，在垃圾箱旁显示感叹号提示。
+                    if (showWebDavAlert) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    closeEditor()
+                                    viewModel.triggerSilentWebDavBackup()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PriorityHigh,
+                                contentDescription = "WebDAV 备份尚未完成",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
 
                     Box(
@@ -820,18 +853,177 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 }
             },
             confirmButton = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 选择框（切换启用/关闭 WebDAV）+ “WebDAV备份”标签（点击打开设置窗体）
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable {
+                                viewModel.setWebDavEnabled(!webDavConfig.enabled)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .border(
+                                    1.5.dp,
+                                    MaterialTheme.colorScheme.onSurface,
+                                    RoundedCornerShape(3.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (webDavConfig.enabled) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "已启用 WebDAV 备份",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
+                    }
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                showBackupPicker = false
+                                showWebDavSettings = true
+                            },
+                        color = Color.Transparent
+                    ) {
+                        Text(
+                            text = "WebDAV备份",
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    TextButton(
+                        onClick = {
+                            showBackupPicker = false
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("取消", maxLines = 1, softWrap = false)
+                    }
+                    TextButton(
+                        onClick = {
+                            viewModel.loadBackupFiles()
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("刷新", maxLines = 1, softWrap = false)
+                    }
+                }
+            }
+        )
+    }
+
+    // WebDAV 备份设置弹窗（默认为坚果云）
+    if (showWebDavSettings) {
+        var serverUrlInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.serverUrl) }
+        var remoteFolderInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.remoteFolder) }
+        var usernameInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.username) }
+        var passwordInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.password) }
+        var passwordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = {
+                showWebDavSettings = false
+            },
+            title = {
+                Text("WebDAV 备份设置")
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = serverUrlInput,
+                        onValueChange = { serverUrlInput = it },
+                        label = { Text("服务器地址") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = remoteFolderInput,
+                        onValueChange = { remoteFolderInput = it },
+                        label = { Text("备份目录") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = usernameInput,
+                        onValueChange = { usernameInput = it },
+                        label = { Text("账号") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("应用密码") },
+                        singleLine = true,
+                        visualTransformation = if (passwordVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                Icon(
+                                    imageVector = if (passwordVisible) {
+                                        Icons.Outlined.VisibilityOff
+                                    } else {
+                                        Icons.Outlined.Visibility
+                                    },
+                                    contentDescription = if (passwordVisible) "隐藏密码" else "显示密码",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        text = "默认云盘为坚果云，请在坚果云“账户信息 -> 安全选项”中生成应用密码。",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            },
+            confirmButton = {
                 TextButton(
                     onClick = {
-                        viewModel.loadBackupFiles()
+                        viewModel.saveWebDavSettings(
+                            serverUrl = serverUrlInput,
+                            remoteFolder = remoteFolderInput,
+                            username = usernameInput,
+                            password = passwordInput
+                        )
+                        showWebDavSettings = false
                     }
                 ) {
-                    Text("刷新")
+                    Text("保存")
                 }
             },
             dismissButton = {
                 TextButton(
                     onClick = {
-                        showBackupPicker = false
+                        showWebDavSettings = false
                     }
                 ) {
                     Text("取消")
