@@ -129,6 +129,15 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     // 保留最近一次正文写入任务，并串成队列，确保退出编辑时能等待全部输入落库。
     @Volatile private var latestContentWriteJob: Job? = null
 
+    data class PendingEncryptedRestore(
+        val file: BackupManager.BackupFile,
+        val fromTodayPrompt: Boolean,
+        val wrongPassword: Boolean = false
+    )
+
+    private val _pendingEncryptedRestore = MutableStateFlow<PendingEncryptedRestore?>(null)
+    val pendingEncryptedRestore: StateFlow<PendingEncryptedRestore?> = _pendingEncryptedRestore.asStateFlow()
+
     // WebDAV 配置与 21:00 后未完成备份的感叹号提示状态
     private val _webDavConfig = MutableStateFlow(WebDavBackupManager.getConfig(application))
     val webDavConfig: StateFlow<WebDavBackupManager.WebDavConfig> = _webDavConfig.asStateFlow()
@@ -149,7 +158,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         serverUrl: String,
         remoteFolder: String,
         username: String,
-        password: String
+        password: String,
+        encryptionPassword: String = ""
     ) {
         val app = getApplication<Application>()
         _webDavConfig.value = WebDavBackupManager.saveSettings(
@@ -157,7 +167,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             serverUrl = serverUrl,
             remoteFolder = remoteFolder,
             username = username,
-            password = password
+            password = password,
+            encryptionPassword = encryptionPassword
         )
         _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
         if (_webDavConfig.value.enabled) {
@@ -232,20 +243,37 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 用户确认恢复首次选择文件夹时发现的当天备份。 */
+    /** 用户确认恢复首次选择文件夹时发现的当天备份；若为加密文件则优先尝试已保存加密密码，否则弹出密码框。 */
     fun restoreTodayBackupFromPrompt() {
         val backup = _todayBackupPrompt.value ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            var shouldStartLoop = false
             backupMutex.withLock {
                 val app = getApplication<Application>()
-                val (ok, message) = BackupManager.restoreBackup(app, noteDao, backup.uri)
-                _userMessage.value = message
-                if (ok) {
-                    lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
-                    _todayBackupPrompt.value = null
+                val savedPassword = WebDavBackupManager.getConfig(app).encryptionPassword.takeIf { it.isNotEmpty() }
+                when (val result = BackupManager.restoreBackup(app, noteDao, backup.uri, savedPassword)) {
+                    is BackupManager.RestoreResult.Success -> {
+                        _userMessage.value = result.message
+                        lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                        _todayBackupPrompt.value = null
+                        shouldStartLoop = true
+                    }
+
+                    is BackupManager.RestoreResult.PasswordRequired -> {
+                        _todayBackupPrompt.value = null
+                        _pendingEncryptedRestore.value = PendingEncryptedRestore(
+                            file = backup,
+                            fromTodayPrompt = true,
+                            wrongPassword = false
+                        )
+                    }
+
+                    is BackupManager.RestoreResult.Failure -> {
+                        _userMessage.value = result.message
+                    }
                 }
             }
-            if (_todayBackupPrompt.value == null) startBackupLoop()
+            if (shouldStartLoop) startBackupLoop()
         }
     }
 
@@ -273,14 +301,70 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun restoreSelectedBackup(uri: Uri) {
+    fun restoreSelectedBackup(file: BackupManager.BackupFile) {
         viewModelScope.launch(Dispatchers.IO) {
             backupMutex.withLock {
                 val app = getApplication<Application>()
-                val (ok, message) = BackupManager.restoreBackup(app, noteDao, uri)
-                _userMessage.value = message
-                if (ok) lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                val savedPassword = WebDavBackupManager.getConfig(app).encryptionPassword.takeIf { it.isNotEmpty() }
+                when (val result = BackupManager.restoreBackup(app, noteDao, file.uri, savedPassword)) {
+                    is BackupManager.RestoreResult.Success -> {
+                        _userMessage.value = result.message
+                        lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                    }
+
+                    is BackupManager.RestoreResult.PasswordRequired -> {
+                        _pendingEncryptedRestore.value = PendingEncryptedRestore(
+                            file = file,
+                            fromTodayPrompt = false,
+                            wrongPassword = false
+                        )
+                    }
+
+                    is BackupManager.RestoreResult.Failure -> {
+                        _userMessage.value = result.message
+                    }
+                }
             }
+        }
+    }
+
+    /** 用户在解密弹窗中输入密码后执行解密恢复。 */
+    fun confirmEncryptedRestore(password: String) {
+        val pending = _pendingEncryptedRestore.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            var shouldStartLoop = false
+            backupMutex.withLock {
+                val app = getApplication<Application>()
+                when (val result = BackupManager.restoreBackup(app, noteDao, pending.file.uri, password)) {
+                    is BackupManager.RestoreResult.Success -> {
+                        _pendingEncryptedRestore.value = null
+                        _userMessage.value = result.message
+                        lastSnapshot = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                        shouldStartLoop = pending.fromTodayPrompt
+                    }
+
+                    is BackupManager.RestoreResult.PasswordRequired -> {
+                        _pendingEncryptedRestore.value = pending.copy(wrongPassword = true)
+                    }
+
+                    is BackupManager.RestoreResult.Failure -> {
+                        _pendingEncryptedRestore.value = null
+                        _userMessage.value = result.message
+                        if (pending.fromTodayPrompt) {
+                            _todayBackupPrompt.value = pending.file
+                        }
+                    }
+                }
+            }
+            if (shouldStartLoop) startBackupLoop()
+        }
+    }
+
+    fun cancelEncryptedRestore() {
+        val pending = _pendingEncryptedRestore.value ?: return
+        _pendingEncryptedRestore.value = null
+        if (pending.fromTodayPrompt) {
+            _todayBackupPrompt.value = pending.file
         }
     }
 
