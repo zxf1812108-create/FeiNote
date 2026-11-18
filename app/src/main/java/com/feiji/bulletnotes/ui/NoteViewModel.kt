@@ -162,6 +162,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         encryptionPassword: String = ""
     ) {
         val app = getApplication<Application>()
+        val previousEncryptionPassword = _webDavConfig.value.encryptionPassword
         _webDavConfig.value = WebDavBackupManager.saveSettings(
             context = app,
             serverUrl = serverUrl,
@@ -171,6 +172,20 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             encryptionPassword = encryptionPassword
         )
         _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        if (encryptionPassword != previousEncryptionPassword && BackupManager.hasBackupFolder(app)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                contentWriteMutex.withLock {
+                    backupMutex.withLock {
+                        if (_todayBackupPrompt.value == null) {
+                            val current = BackupManager.snapshotJson(noteDao.getAllNotesForBackup())
+                            if (BackupManager.exportBackup(app, noteDao)) {
+                                lastSnapshot = current
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (_webDavConfig.value.enabled) {
             triggerSilentWebDavBackup()
         }
