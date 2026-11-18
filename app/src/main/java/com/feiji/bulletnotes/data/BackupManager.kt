@@ -4,25 +4,67 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.Base64
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.security.NoSuchAlgorithmException
+import java.security.SecureRandom
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+import javax.crypto.BadPaddingException
+import javax.crypto.Cipher
+import javax.crypto.Mac
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 /** SAF 文件夹授权：每日一个 JSON 文件；同日覆盖；仅清理严格早于三天前的本应用备份。 */
 object BackupManager {
     private const val PREFS = "feiji_bullet_notes_prefs"
     private const val KEY_TREE = "saf_backup_tree_uri_v124"
     private const val KEY_CLEANED = "backup_cleanup_date_v124"
+
+    private const val ENC_VERSION = 1
+    private const val ENC_ALG = "AES-256-GCM"
+    private const val ENC_KDF = "PBKDF2WithHmacSHA256"
+    private const val ENC_ITERATIONS = 100_000
+    private const val ENC_KEY_BITS = 256
+    private const val ENC_SALT_BYTES = 16
+    private const val ENC_IV_BYTES = 12
+    private const val ENC_GCM_TAG_BITS = 128
+
     private val gson = Gson()
     private val nameDate = DateTimeFormatter.ofPattern("yyMMdd")
     private val filePattern = Regex("""^飞记备份 (\d{6})(?:\.json)?$""")
 
     data class BackupFile(val name: String, val uri: Uri)
+
+    sealed class RestoreResult {
+        data class Success(val count: Int, val message: String) : RestoreResult()
+        data class PasswordRequired(val wrongPassword: Boolean = false) : RestoreResult()
+        data class Failure(val message: String) : RestoreResult()
+    }
+
+    private data class EncryptedBackupEnvelope(
+        val feiji_encrypted: Boolean = true,
+        val v: Int = ENC_VERSION,
+        val alg: String = ENC_ALG,
+        val kdf: String = ENC_KDF,
+        val iter: Int = ENC_ITERATIONS,
+        val gzip: Boolean = true,
+        val salt: String,
+        val iv: String,
+        val data: String
+    )
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun hasBackupFolder(context: Context): Boolean {
@@ -146,23 +188,168 @@ object BackupManager {
         }
     }
 
-    suspend fun restoreBackup(context: Context, noteDao: NoteDao, uri: Uri): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+    /** 判断字节内容是否已经是飞记加密备份格式，避免重复加密。 */
+    fun isEncryptedBackupBytes(bytes: ByteArray): Boolean {
+        return try {
+            val text = bytes.toString(Charsets.UTF_8)
+            val element = JsonParser.parseString(text)
+            element.isJsonObject && element.asJsonObject.get("feiji_encrypted")?.asBoolean == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 对备份字节进行 GZIP 压缩后加密，输出标准 JSON 外壳。 */
+    fun encryptBackupBytes(plainBytes: ByteArray, password: String): ByteArray {
+        val compressed = ByteArrayOutputStream().use { bos ->
+            GZIPOutputStream(bos).use { gzip ->
+                gzip.write(plainBytes)
+            }
+            bos.toByteArray()
+        }
+
+        val random = SecureRandom()
+        val salt = ByteArray(ENC_SALT_BYTES).also { random.nextBytes(it) }
+        val iv = ByteArray(ENC_IV_BYTES).also { random.nextBytes(it) }
+        val keyBytes = deriveAesKey(password, salt, ENC_ITERATIONS)
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(ENC_GCM_TAG_BITS, iv))
+        val cipherBytes = cipher.doFinal(compressed)
+
+        val envelope = EncryptedBackupEnvelope(
+            salt = Base64.encodeToString(salt, Base64.NO_WRAP),
+            iv = Base64.encodeToString(iv, Base64.NO_WRAP),
+            data = Base64.encodeToString(cipherBytes, Base64.NO_WRAP)
+        )
+        return gson.toJson(envelope).toByteArray(Charsets.UTF_8)
+    }
+
+    private fun decryptEnvelope(envelope: EncryptedBackupEnvelope, password: String): String {
+        val salt = Base64.decode(envelope.salt, Base64.DEFAULT)
+        val iv = Base64.decode(envelope.iv, Base64.DEFAULT)
+        val cipherBytes = Base64.decode(envelope.data, Base64.DEFAULT)
+        val iterations = envelope.iter.coerceIn(1, 2_000_000)
+
+        val keyBytes = deriveAesKey(password, salt, iterations)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(ENC_GCM_TAG_BITS, iv))
+        val decryptedBytes = cipher.doFinal(cipherBytes)
+
+        val plainBytes = if (envelope.gzip) {
+            GZIPInputStream(ByteArrayInputStream(decryptedBytes)).use { it.readBytes() }
+        } else {
+            decryptedBytes
+        }
+        return plainBytes.toString(Charsets.UTF_8)
+    }
+
+    private fun deriveAesKey(password: String, salt: ByteArray, iterations: Int): ByteArray {
+        return try {
+            val factory = SecretKeyFactory.getInstance(ENC_KDF)
+            val spec = PBEKeySpec(password.toCharArray(), salt, iterations, ENC_KEY_BITS)
+            try {
+                factory.generateSecret(spec).encoded
+            } finally {
+                spec.clearPassword()
+            }
+        } catch (_: NoSuchAlgorithmException) {
+            pbkdf2HmacSha256Fallback(password.toByteArray(Charsets.UTF_8), salt, iterations, ENC_KEY_BITS / 8)
+        }
+    }
+
+    private fun pbkdf2HmacSha256Fallback(
+        password: ByteArray,
+        salt: ByteArray,
+        iterations: Int,
+        dkLen: Int
+    ): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(password, "HmacSHA256"))
+        val hLen = mac.macLength
+        val blockCount = (dkLen + hLen - 1) / hLen
+        val out = ByteArray(blockCount * hLen)
+        val saltBlock = ByteArray(salt.size + 4)
+        System.arraycopy(salt, 0, saltBlock, 0, salt.size)
+
+        for (blockIndex in 1..blockCount) {
+            saltBlock[salt.size] = (blockIndex ushr 24).toByte()
+            saltBlock[salt.size + 1] = (blockIndex ushr 16).toByte()
+            saltBlock[salt.size + 2] = (blockIndex ushr 8).toByte()
+            saltBlock[salt.size + 3] = blockIndex.toByte()
+
+            var u = mac.doFinal(saltBlock)
+            val t = u.copyOf()
+            for (i in 2..iterations) {
+                u = mac.doFinal(u)
+                for (j in t.indices) {
+                    t[j] = (t[j].toInt() xor u[j].toInt()).toByte()
+                }
+            }
+            System.arraycopy(t, 0, out, (blockIndex - 1) * hLen, hLen)
+        }
+        return out.copyOf(dkLen)
+    }
+
+    /**
+     * 恢复备份：自动识别明文 JSON 数组与 WebDAV 加密备份外壳，
+     * 遇到加密备份时使用传入密码自动解密，未提供密码或密码错误时返回 PasswordRequired。
+     */
+    suspend fun restoreBackup(
+        context: Context,
+        noteDao: NoteDao,
+        uri: Uri,
+        password: String? = null
+    ): RestoreResult = withContext(Dispatchers.IO) {
         try {
             // 只允许恢复当前授权文件夹中的、符合命名规则的备份文件。
-            if (children(context).none { it.uri == uri && backupDate(it.name) != null })
-                return@withContext false to "备份文件不在授权文件夹中"
-            val json = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: return@withContext false to "无法读取备份文件"
-            if (!JsonParser.parseString(json).isJsonArray) return@withContext false to "备份格式不正确"
+            if (children(context).none { it.uri == uri && backupDate(it.name) != null }) {
+                return@withContext RestoreResult.Failure("备份文件不在授权文件夹中")
+            }
+            val rawText = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                ?: return@withContext RestoreResult.Failure("无法读取备份文件")
+
+            val parsedRoot = JsonParser.parseString(rawText)
+            val isEncrypted = parsedRoot.isJsonObject &&
+                parsedRoot.asJsonObject.get("feiji_encrypted")?.asBoolean == true
+
+            val notesJson = if (isEncrypted) {
+                if (password.isNullOrEmpty()) {
+                    return@withContext RestoreResult.PasswordRequired(wrongPassword = false)
+                }
+                val envelope = gson.fromJson(parsedRoot, EncryptedBackupEnvelope::class.java)
+                    ?: return@withContext RestoreResult.Failure("加密备份格式不正确")
+                if (envelope.salt.isBlank() || envelope.iv.isBlank() || envelope.data.isBlank()) {
+                    return@withContext RestoreResult.Failure("加密备份内容不完整")
+                }
+                try {
+                    decryptEnvelope(envelope, password)
+                } catch (_: BadPaddingException) {
+                    return@withContext RestoreResult.PasswordRequired(wrongPassword = true)
+                }
+            } else {
+                rawText
+            }
+
+            if (!JsonParser.parseString(notesJson).isJsonArray) {
+                return@withContext RestoreResult.Failure("备份格式不正确")
+            }
             val type = object : TypeToken<List<NoteEntity>>() {}.type
-            val notes: List<NoteEntity> = gson.fromJson(json, type) ?: return@withContext false to "备份内容无效"
-            if (notes.any { it.dateString.isBlank() || it.id < 0 })
-                return@withContext false to "备份内容校验失败"
+            val notes: List<NoteEntity> = gson.fromJson(notesJson, type)
+                ?: return@withContext RestoreResult.Failure("备份内容无效")
+            if (notes.any { it.dateString.isBlank() || it.id < 0 }) {
+                return@withContext RestoreResult.Failure("备份内容校验失败")
+            }
             noteDao.restoreAllFromBackup(notes)
-            true to "已从备份恢复 ${notes.size} 条笔记"
+            val msg = if (isEncrypted) {
+                "已解密并恢复 ${notes.size} 条笔记"
+            } else {
+                "已从备份恢复 ${notes.size} 条笔记"
+            }
+            RestoreResult.Success(notes.size, msg)
         } catch (e: Exception) {
             Log.e("FeiJiBackup", "Restore failed", e)
-            false to "恢复失败：${e.localizedMessage ?: "未知错误"}"
+            RestoreResult.Failure("恢复失败：${e.localizedMessage ?: "未知错误"}")
         }
     }
 }
