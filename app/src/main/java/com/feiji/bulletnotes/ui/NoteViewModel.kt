@@ -582,7 +582,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             noteDao.deletePermanently(id)
         }
     }
-
+ 
     /**
      * 清空回收站全部删除
      */
