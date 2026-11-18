@@ -123,6 +123,8 @@ object WebDavBackupManager {
         )
     }
 
+    fun getEncryptionPassword(context: Context): String = readEncryptionPassword(context)
+
     fun setEnabled(context: Context, enabled: Boolean): WebDavConfig {
         prefs(context).edit().putBoolean(KEY_ENABLED, enabled).commit()
         return getConfig(context)
