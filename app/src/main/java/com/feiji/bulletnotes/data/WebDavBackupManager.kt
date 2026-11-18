@@ -1,6 +1,8 @@
 package com.feiji.bulletnotes.data
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
 import android.util.Xml
@@ -16,9 +18,14 @@ import java.net.Socket
 import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
+import java.security.KeyStore
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
@@ -40,6 +47,12 @@ object WebDavBackupManager {
     private const val KEY_PASSWORD = "webdav_password_v1"
     private const val KEY_ENCRYPTION_PASSWORD = "webdav_encryption_password_v1"
     private const val KEY_LAST_SUCCESS_DATE = "webdav_last_success_date_v1"
+
+    private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+    private const val KEYSTORE_ALIAS = "feiji_backup_enc_pwd_key_v1"
+    private const val KEYSTORE_VALUE_PREFIX = "ks1:"
+    private const val KEYSTORE_GCM_TAG_BITS = 128
+    private val keystoreLock = Any()
 
     const val DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/"
     const val DEFAULT_REMOTE_FOLDER = "飞记"
@@ -106,7 +119,7 @@ object WebDavBackupManager {
             remoteFolder = p.getString(KEY_REMOTE_FOLDER, DEFAULT_REMOTE_FOLDER) ?: DEFAULT_REMOTE_FOLDER,
             username = p.getString(KEY_USERNAME, "") ?: "",
             password = p.getString(KEY_PASSWORD, "") ?: "",
-            encryptionPassword = p.getString(KEY_ENCRYPTION_PASSWORD, "") ?: ""
+            encryptionPassword = readEncryptionPassword(context)
         )
     }
 
@@ -125,14 +138,104 @@ object WebDavBackupManager {
     ): WebDavConfig {
         val normalizedUrl = serverUrl.trim().ifEmpty { DEFAULT_SERVER_URL }
         val normalizedFolder = remoteFolder.trim().trim('/')
-        prefs(context).edit()
+        val editor = prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
             .putString(KEY_REMOTE_FOLDER, normalizedFolder)
             .putString(KEY_USERNAME, username.trim())
             .putString(KEY_PASSWORD, password)
-            .putString(KEY_ENCRYPTION_PASSWORD, encryptionPassword)
-            .commit()
+
+        if (encryptionPassword.isEmpty()) {
+            editor.remove(KEY_ENCRYPTION_PASSWORD)
+        } else {
+            val encrypted = encryptPasswordWithKeystore(encryptionPassword)
+            if (encrypted != null) {
+                editor.putString(KEY_ENCRYPTION_PASSWORD, encrypted)
+            } else {
+                Log.e(TAG, "Keystore unavailable; refusing to store backup encryption password in plaintext")
+                editor.remove(KEY_ENCRYPTION_PASSWORD)
+            }
+        }
+        editor.commit()
         return getConfig(context)
+    }
+
+    private fun readEncryptionPassword(context: Context): String {
+        val p = prefs(context)
+        val raw = p.getString(KEY_ENCRYPTION_PASSWORD, "") ?: ""
+        if (raw.isEmpty()) return ""
+        if (raw.startsWith(KEYSTORE_VALUE_PREFIX)) {
+            return decryptPasswordWithKeystore(raw)
+        }
+        // 兼容旧版明文配置：读取后静默迁移到 AndroidKeyStore 加密存储。
+        encryptPasswordWithKeystore(raw)?.let { migrated ->
+            p.edit().putString(KEY_ENCRYPTION_PASSWORD, migrated).apply()
+        }
+        return raw
+    }
+
+    private fun getOrCreateKeystoreKey(forceRecreate: Boolean = false): SecretKey {
+        val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        if (forceRecreate && keyStore.containsAlias(KEYSTORE_ALIAS)) {
+            runCatching { keyStore.deleteEntry(KEYSTORE_ALIAS) }
+        }
+        val existing = (keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+        if (existing != null) return existing
+
+        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        val spec = KeyGenParameterSpec.Builder(
+            KEYSTORE_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build()
+        keyGenerator.init(spec)
+        return keyGenerator.generateKey()
+    }
+
+    private fun encryptPasswordWithKeystore(plain: String): String? = synchronized(keystoreLock) {
+        fun doEncrypt(forceRecreate: Boolean): String {
+            val key = getOrCreateKeystoreKey(forceRecreate)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
+            val ciphertext = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            val ivB64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+            val ctB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+            return "$KEYSTORE_VALUE_PREFIX$ivB64:$ctB64"
+        }
+
+        try {
+            doEncrypt(forceRecreate = false)
+        } catch (first: Exception) {
+            Log.w(TAG, "Keystore encrypt failed, recreating key and retrying", first)
+            try {
+                doEncrypt(forceRecreate = true)
+            } catch (second: Exception) {
+                Log.w(TAG, "Keystore encrypt retry failed", second)
+                null
+            }
+        }
+    }
+
+    private fun decryptPasswordWithKeystore(stored: String): String = synchronized(keystoreLock) {
+        try {
+            val payload = stored.removePrefix(KEYSTORE_VALUE_PREFIX)
+            val sep = payload.indexOf(':')
+            if (sep <= 0 || sep >= payload.length - 1) return ""
+            val iv = Base64.decode(payload.substring(0, sep), Base64.NO_WRAP)
+            val ciphertext = Base64.decode(payload.substring(sep + 1), Base64.NO_WRAP)
+            val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val key = (keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+                ?: return ""
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(KEYSTORE_GCM_TAG_BITS, iv))
+            String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to decrypt backup encryption password from Keystore", e)
+            ""
+        }
     }
 
     fun isTodayBackupCompleted(
