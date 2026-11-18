@@ -959,52 +959,18 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 选择框（切换启用/关闭 WebDAV）+ “WebDAV备份”标签（点击打开设置窗体）
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .clickable {
-                                viewModel.setWebDavEnabled(!webDavConfig.enabled)
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(16.dp)
-                                .border(
-                                    1.5.dp,
-                                    MaterialTheme.colorScheme.onSurface,
-                                    RoundedCornerShape(3.dp)
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (webDavConfig.enabled) {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "已启用 WebDAV 备份",
-                                    tint = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                            }
-                        }
-                    }
-                    Surface(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                showBackupPicker = false
-                                showWebDavSettings = true
-                            },
-                        color = Color.Transparent
+                    // “备份设置”入口（点击打开备份设置窗体）
+                    TextButton(
+                        onClick = {
+                            showBackupPicker = false
+                            showWebDavSettings = true
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = "WebDAV备份",
+                            text = "备份设置",
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
@@ -1032,7 +998,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         )
     }
 
-    // WebDAV 备份设置弹窗（默认为坚果云）
+    // 备份设置弹窗（WebDAV 上传备份 + 加密数据）
     if (showWebDavSettings) {
         var serverUrlInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.serverUrl) }
         var remoteFolderInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.remoteFolder) }
@@ -1058,125 +1024,150 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             onDismissRequest = {
                 showWebDavSettings = false
             },
-            title = {
-                Text("WebDAV 备份设置")
-            },
             text = {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    OutlinedTextField(
-                        value = serverUrlInput,
-                        onValueChange = { serverUrlInput = it },
-                        label = { Text("服务器地址") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = remoteFolderInput,
-                        onValueChange = { remoteFolderInput = it },
-                        label = { Text("备份目录") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = usernameInput,
-                        onValueChange = { usernameInput = it },
-                        label = { Text("账号") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = passwordInput,
-                        onValueChange = { passwordInput = it },
-                        label = { Text("应用密码") },
-                        singleLine = true,
-                        visualTransformation = if (passwordVisible) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        trailingIcon = {
-                            TextButton(
-                                onClick = { passwordVisible = !passwordVisible },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Text(
-                                    text = if (passwordVisible) "隐藏" else "显示",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = encryptionPasswordInput,
-                        onValueChange = {
-                            encryptionPasswordInput = it
-                            if (it.isEmpty()) {
-                                confirmEncryptionPasswordInput = ""
-                            }
-                            encryptionPasswordMismatchError = false
-                        },
-                        label = { Text("加密密码（留空则不加密）") },
-                        singleLine = true,
-                        visualTransformation = if (encryptionPasswordVisible) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        trailingIcon = {
-                            TextButton(
-                                onClick = { encryptionPasswordVisible = !encryptionPasswordVisible },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Text(
-                                    text = if (encryptionPasswordVisible) "隐藏" else "显示",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = confirmEncryptionPasswordInput,
-                        onValueChange = {
-                            confirmEncryptionPasswordInput = it
-                            encryptionPasswordMismatchError = false
-                        },
-                        label = { Text("确认加密密码") },
-                        singleLine = true,
-                        isError = showMismatchError,
-                        visualTransformation = if (confirmEncryptionPasswordVisible) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        trailingIcon = {
-                            TextButton(
-                                onClick = { confirmEncryptionPasswordVisible = !confirmEncryptionPasswordVisible },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Text(
-                                    text = if (confirmEncryptionPasswordVisible) "隐藏" else "显示",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (showMismatchError) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text(
-                            text = "两次输入的加密密码不一致",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.error
+                            text = "WebDAV上传备份：",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
+                        OutlinedTextField(
+                            value = serverUrlInput,
+                            onValueChange = { serverUrlInput = it },
+                            label = { Text("服务器地址") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = remoteFolderInput,
+                            onValueChange = { remoteFolderInput = it },
+                            label = { Text("备份目录") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = usernameInput,
+                            onValueChange = { usernameInput = it },
+                            label = { Text("账号") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = passwordInput,
+                            onValueChange = { passwordInput = it },
+                            label = { Text("应用密码（留空则不上传）") },
+                            singleLine = true,
+                            visualTransformation = if (passwordVisible) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                TextButton(
+                                    onClick = { passwordVisible = !passwordVisible },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        text = if (passwordVisible) "隐藏" else "显示",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+                    )
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "加密数据：",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        OutlinedTextField(
+                            value = encryptionPasswordInput,
+                            onValueChange = {
+                                encryptionPasswordInput = it
+                                if (it.isEmpty()) {
+                                    confirmEncryptionPasswordInput = ""
+                                }
+                                encryptionPasswordMismatchError = false
+                            },
+                            label = { Text("加密密码（留空则不加密）") },
+                            singleLine = true,
+                            visualTransformation = if (encryptionPasswordVisible) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                TextButton(
+                                    onClick = { encryptionPasswordVisible = !encryptionPasswordVisible },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        text = if (encryptionPasswordVisible) "隐藏" else "显示",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = confirmEncryptionPasswordInput,
+                            onValueChange = {
+                                confirmEncryptionPasswordInput = it
+                                encryptionPasswordMismatchError = false
+                            },
+                            label = { Text("确认加密密码") },
+                            singleLine = true,
+                            isError = showMismatchError,
+                            visualTransformation = if (confirmEncryptionPasswordVisible) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                TextButton(
+                                    onClick = { confirmEncryptionPasswordVisible = !confirmEncryptionPasswordVisible },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        text = if (confirmEncryptionPasswordVisible) "隐藏" else "显示",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (showMismatchError) {
+                            Text(
+                                text = "两次输入的加密密码不一致",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
             },
