@@ -176,7 +176,13 @@ object BackupManager {
                 DocumentsContract.createDocument(context.contentResolver, parent, "application/json", name)
                     ?: error("无法创建备份文件")
             }
-            val bytes = snapshotJson(noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+            val plainBytes = snapshotJson(noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+            val encryptionPassword = WebDavBackupManager.getConfig(context).encryptionPassword
+            val bytes = if (encryptionPassword.isNotEmpty()) {
+                encryptBackupBytes(plainBytes, encryptionPassword)
+            } else {
+                plainBytes
+            }
             context.contentResolver.openOutputStream(destination, "rwt")?.use { output ->
                 output.write(bytes)
                 output.flush()
