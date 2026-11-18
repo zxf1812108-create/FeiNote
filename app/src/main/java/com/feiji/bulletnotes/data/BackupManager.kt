@@ -33,6 +33,7 @@ object BackupManager {
     private const val KEY_TREE = "saf_backup_tree_uri_v124"
     private const val KEY_CLEANED = "backup_cleanup_date_v124"
 
+    private const val BACKUP_SCHEMA_VERSION = 2
     private const val ENC_VERSION = 1
     private const val ENC_ALG = "AES-256-GCM"
     private const val ENC_KDF = "PBKDF2WithHmacSHA256"
@@ -53,6 +54,21 @@ object BackupManager {
         data class PasswordRequired(val wrongPassword: Boolean = false) : RestoreResult()
         data class Failure(val message: String) : RestoreResult()
     }
+
+    private data class BackupSettings(
+        val webDavEnabled: Boolean? = null,
+        val webDavServerUrl: String? = null,
+        val webDavRemoteFolder: String? = null,
+        val webDavUsername: String? = null,
+        val webDavPassword: String? = null,
+        val backupEncryptionPassword: String? = null
+    )
+
+    private data class BackupPayload(
+        val feiji_backup_version: Int = BACKUP_SCHEMA_VERSION,
+        val notes: List<NoteEntity>? = null,
+        val settings: BackupSettings? = null
+    )
 
     private data class EncryptedBackupEnvelope(
         val feiji_encrypted: Boolean = true,
@@ -163,7 +179,22 @@ object BackupManager {
         deleted
     }
 
-    fun snapshotJson(notes: List<NoteEntity>): String = gson.toJson(notes)
+    fun snapshotJson(context: Context, notes: List<NoteEntity>): String {
+        val config = WebDavBackupManager.getConfig(context)
+        val payload = BackupPayload(
+            feiji_backup_version = BACKUP_SCHEMA_VERSION,
+            notes = notes,
+            settings = BackupSettings(
+                webDavEnabled = config.enabled,
+                webDavServerUrl = config.serverUrl,
+                webDavRemoteFolder = config.remoteFolder,
+                webDavUsername = config.username,
+                webDavPassword = config.password,
+                backupEncryptionPassword = config.encryptionPassword
+            )
+        )
+        return gson.toJson(payload)
+    }
 
     suspend fun exportBackup(context: Context, noteDao: NoteDao): Boolean = withContext(Dispatchers.IO) {
         if (!hasBackupFolder(context)) return@withContext false
@@ -176,8 +207,8 @@ object BackupManager {
                 DocumentsContract.createDocument(context.contentResolver, parent, "application/json", name)
                     ?: error("无法创建备份文件")
             }
-            val plainBytes = snapshotJson(noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
-            val encryptionPassword = WebDavBackupManager.getConfig(context).encryptionPassword
+            val plainBytes = snapshotJson(context, noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+            val encryptionPassword = WebDavBackupManager.getEncryptionPassword(context)
             val bytes = if (encryptionPassword.isNotEmpty()) {
                 encryptBackupBytes(plainBytes, encryptionPassword)
             } else {
@@ -319,7 +350,7 @@ object BackupManager {
             val isEncrypted = parsedRoot.isJsonObject &&
                 parsedRoot.asJsonObject.get("feiji_encrypted")?.asBoolean == true
 
-            val notesJson = if (isEncrypted) {
+            val plainJson = if (isEncrypted) {
                 if (password.isNullOrEmpty()) {
                     return@withContext RestoreResult.PasswordRequired(wrongPassword = false)
                 }
@@ -337,20 +368,56 @@ object BackupManager {
                 rawText
             }
 
-            if (!JsonParser.parseString(notesJson).isJsonArray) {
-                return@withContext RestoreResult.Failure("备份格式不正确")
+            val payloadElement = JsonParser.parseString(plainJson)
+            val notes: List<NoteEntity>
+            val restoredSettings: BackupSettings?
+
+            when {
+                // 兼容旧版备份：顶层直接是笔记 JSON 数组
+                payloadElement.isJsonArray -> {
+                    val type = object : TypeToken<List<NoteEntity>>() {}.type
+                    notes = gson.fromJson(payloadElement, type)
+                        ?: return@withContext RestoreResult.Failure("备份内容无效")
+                    restoredSettings = null
+                }
+
+                // 新版备份：包含 notes 与 settings
+                payloadElement.isJsonObject && payloadElement.asJsonObject.get("notes")?.isJsonArray == true -> {
+                    val payload = gson.fromJson(payloadElement, BackupPayload::class.java)
+                        ?: return@withContext RestoreResult.Failure("备份内容无效")
+                    notes = payload.notes ?: return@withContext RestoreResult.Failure("备份内容无效")
+                    restoredSettings = payload.settings
+                }
+
+                else -> {
+                    return@withContext RestoreResult.Failure("备份格式不正确")
+                }
             }
-            val type = object : TypeToken<List<NoteEntity>>() {}.type
-            val notes: List<NoteEntity> = gson.fromJson(notesJson, type)
-                ?: return@withContext RestoreResult.Failure("备份内容无效")
+
             if (notes.any { it.dateString.isBlank() || it.id < 0 }) {
                 return@withContext RestoreResult.Failure("备份内容校验失败")
             }
             noteDao.restoreAllFromBackup(notes)
-            val msg = if (isEncrypted) {
-                "已解密并恢复 ${notes.size} 条笔记"
-            } else {
-                "已从备份恢复 ${notes.size} 条笔记"
+
+            val hasSettings = restoredSettings != null
+            if (restoredSettings != null) {
+                WebDavBackupManager.restoreConfig(
+                    context = context,
+                    config = WebDavBackupManager.WebDavConfig(
+                        serverUrl = restoredSettings.webDavServerUrl ?: WebDavBackupManager.DEFAULT_SERVER_URL,
+                        remoteFolder = restoredSettings.webDavRemoteFolder ?: WebDavBackupManager.DEFAULT_REMOTE_FOLDER,
+                        username = restoredSettings.webDavUsername ?: "",
+                        password = restoredSettings.webDavPassword ?: "",
+                        encryptionPassword = restoredSettings.backupEncryptionPassword ?: ""
+                    )
+                )
+            }
+
+            val msg = when {
+                isEncrypted && hasSettings -> "已解密并恢复 ${notes.size} 条笔记及设置"
+                isEncrypted -> "已解密并恢复 ${notes.size} 条笔记"
+                hasSettings -> "已从备份恢复 ${notes.size} 条笔记及设置"
+                else -> "已从备份恢复 ${notes.size} 条笔记"
             }
             RestoreResult.Success(notes.size, msg)
         } catch (e: Exception) {
