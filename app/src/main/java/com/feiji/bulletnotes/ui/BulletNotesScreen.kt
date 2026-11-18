@@ -573,7 +573,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         Icon(
                             Icons.Outlined.Delete,
                             contentDescription = "回收站",
-                            tint = MaterialTheme.colorScheme.onSurface
+                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
                         )
                     }
                 }
@@ -896,9 +896,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             },
             onRestore = { id ->
                 viewModel.restoreFromTrash(id)
-            },
-            onDeleteBeforeToday = {
-                viewModel.deleteTrashBeforeToday()
             }
         )
     }
