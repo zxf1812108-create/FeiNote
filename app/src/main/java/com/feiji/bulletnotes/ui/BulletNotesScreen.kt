@@ -1430,13 +1430,10 @@ fun BulletNoteRow(
                         }
                     )
                 } else {
-                    // 收起浏览模式只显示第一行；超出宽度时由 Ellipsis 自动显示省略号。
+                    // 收起浏览模式只显示第一行；换行符前的第一行能完整显示时不添加省略号，
+                    // 仅当第一行内容超出显示宽度时由 Ellipsis 自动在行末显示省略号。
                     val firstLine = note.content.substringBefore('\n')
-                    val previewText = when {
-                        hasMoreParagraphs && firstLine.isEmpty() -> "…"
-                        hasMoreParagraphs -> "$firstLine…"
-                        else -> firstLine.ifEmpty { " " }
-                    }
+                    val previewText = firstLine.ifEmpty { " " }
                     Text(
                         text = previewText,
                         style = paragraphStyle,
