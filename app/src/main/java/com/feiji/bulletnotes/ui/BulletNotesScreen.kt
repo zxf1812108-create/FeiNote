@@ -137,6 +137,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val noteDates by viewModel.noteDates.collectAsState()
     var isSearchMode by remember { mutableStateOf(false) }
     var searchText by remember { mutableStateOf("") }
+    // 单击搜索图标限定搜索圆点笔记，长按搜索图标限定搜索五角星笔记。
+    var searchBulletFilter by remember { mutableStateOf(BulletType.BULLET_DOT) }
     val visibleNotes = if (isSearchMode) searchResults else notes
     val trashNotes by viewModel.trashNotes.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
@@ -266,10 +268,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     }
 
     // 搜索词变化后稍作等待再检索，避免每输入一个字符都立即读取全库。
-    LaunchedEffect(isSearchMode, searchText) {
+    LaunchedEffect(isSearchMode, searchText, searchBulletFilter) {
         if (isSearchMode) {
             delay(180)
-            viewModel.searchNotes(searchText)
+            viewModel.searchNotes(searchText, searchBulletFilter)
         }
     }
 
@@ -300,6 +302,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (isSearchMode) {
+                        val indicatorColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                         Surface(
                             modifier = Modifier
                                 .width(44.dp)
@@ -310,7 +313,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     isSearchMode = false
                                     pendingReorderIds = null
                                     searchText = ""
-                                    viewModel.searchNotes("")
+                                    viewModel.searchNotes("", null)
                                     viewModel.returnToToday()
                                 },
                             color = Color.Transparent
@@ -367,7 +370,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                                 .clip(CircleShape)
                                                 .clickable {
                                                     searchText = ""
-                                                    viewModel.searchNotes("")
+                                                    viewModel.searchNotes("", searchBulletFilter)
                                                     searchFocusRequester.requestFocus()
                                                     keyboardController?.show()
                                                 },
@@ -384,24 +387,68 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 }
                             }
                         )
-                        // 搜索框与右侧垃圾箱热区保留 12dp 间距（视觉间距约 20dp），兼顾长度与防误触。
-                        Spacer(modifier = Modifier.width(12.dp))
+                        // 统一固定 8dp 间距 + 28dp 符号槽位，与右侧 40dp 垃圾箱图标（含 8dp 左内边距）左右视觉间距完全对称。
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier.size(28.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (searchBulletFilter == BulletType.STAR) {
+                                Canvas(modifier = Modifier.size(18.dp)) {
+                                    val scale = size.width / 18f
+                                    val starPath = Path().apply {
+                                        moveTo(9f * scale, 0f)
+                                        lineTo(11.1f * scale, 6.2f * scale)
+                                        lineTo(17.7f * scale, 6.5f * scale)
+                                        lineTo(12.6f * scale, 10.6f * scale)
+                                        lineTo(14.4f * scale, 17.2f * scale)
+                                        lineTo(9f * scale, 13.4f * scale)
+                                        lineTo(3.6f * scale, 17.2f * scale)
+                                        lineTo(5.4f * scale, 10.6f * scale)
+                                        lineTo(0.3f * scale, 6.5f * scale)
+                                        lineTo(6.9f * scale, 6.2f * scale)
+                                        close()
+                                    }
+                                    drawPath(path = starPath, color = indicatorColor)
+                                }
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(indicatorColor, CircleShape)
+                                )
+                            }
+                        }
                     } else {
                         // 固定宽度（44dp），确保“返回”与搜索图标切换时右侧日期标签位置完全不动。
                         Surface(
                             modifier = Modifier
                                 .width(44.dp)
                                 .clip(RoundedCornerShape(6.dp))
-                                .clickable {
-                                    closeEditor()
-                                    pendingReorderIds = null
-                                    if (!isToday) {
-                                        viewModel.returnToToday()
-                                    } else {
-                                        isSearchMode = true
-                                        searchText = ""
+                                .combinedClickable(
+                                    onClick = {
+                                        closeEditor()
+                                        pendingReorderIds = null
+                                        if (!isToday) {
+                                            viewModel.returnToToday()
+                                        } else {
+                                            searchBulletFilter = BulletType.BULLET_DOT
+                                            isSearchMode = true
+                                            searchText = ""
+                                            viewModel.searchNotes("", BulletType.BULLET_DOT)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        if (isToday) {
+                                            closeEditor()
+                                            pendingReorderIds = null
+                                            searchBulletFilter = BulletType.STAR
+                                            isSearchMode = true
+                                            searchText = ""
+                                            viewModel.searchNotes("", BulletType.STAR)
+                                        }
                                     }
-                                },
+                                ),
                             color = Color.Transparent
                         ) {
                             Box(
@@ -432,11 +479,18 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         Surface(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable {
-                                    closeEditor()
-                                    noteToChangeDate = null
-                                    showDatePicker = true
-                                },
+                                .combinedClickable(
+                                    onClick = {
+                                        closeEditor()
+                                        noteToChangeDate = null
+                                        showDatePicker = true
+                                    },
+                                    onLongClick = {
+                                        closeEditor()
+                                        pendingReorderIds = null
+                                        viewModel.jumpToEarliestStarNoteDate()
+                                    }
+                                ),
                             color = Color.Transparent
                         ) {
                             Text(
