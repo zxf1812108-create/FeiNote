@@ -1064,7 +1064,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         OutlinedTextField(
                             value = passwordInput,
                             onValueChange = { passwordInput = it },
-                            label = { Text("应用密码（留空则不上传）") },
+                            label = { Text("应用密码(留空则不上传)") },
                             singleLine = true,
                             visualTransformation = if (passwordVisible) {
                                 VisualTransformation.None
@@ -1099,7 +1099,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "加密数据：",
+                            text = "加密备份：",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -1112,7 +1112,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 }
                                 encryptionPasswordMismatchError = false
                             },
-                            label = { Text("加密密码（留空则不加密）") },
+                            label = { Text("加密密码(留空则不加密)") },
                             singleLine = true,
                             visualTransformation = if (encryptionPasswordVisible) {
                                 VisualTransformation.None
