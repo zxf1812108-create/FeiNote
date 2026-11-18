@@ -887,6 +887,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             initialDate = noteToChangeDate?.dateString
                 ?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: selectedDate,
             noteDates = noteDates,
+            showRelativeShortcuts = noteToChangeDate != null,
             onDatePicked = { pickedDate ->
                 val note = noteToChangeDate
 
