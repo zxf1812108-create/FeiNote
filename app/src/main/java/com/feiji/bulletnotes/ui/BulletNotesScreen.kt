@@ -1051,7 +1051,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedTextField(
                         value = serverUrlInput,
@@ -1097,11 +1097,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
-                    )
-                    Text(
-                        text = "默认云盘为坚果云，请在坚果云“账户信息 -> 安全选项”中生成应用密码。",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                     )
                 }
             },
