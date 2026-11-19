@@ -1079,6 +1079,47 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * 按笔记 ID 相对目标锚点重排序（用于今天折叠隐藏部分五角星笔记时，确保拖拽不打乱隐藏项顺序）。
+     */
+    fun reorderNoteRelativeTo(
+        movedNoteId: Long,
+        anchorNoteId: Long?,
+        insertBeforeAnchor: Boolean
+    ) {
+        val currentList = notes.value.toMutableList()
+        val fromIndex = currentList.indexOfFirst { it.id == movedNoteId }
+        if (fromIndex < 0) return
+
+        val movedItem = currentList.removeAt(fromIndex)
+        val insertIndex = if (anchorNoteId != null) {
+            val anchorIdx = currentList.indexOfFirst { it.id == anchorNoteId }
+            if (anchorIdx >= 0) {
+                if (insertBeforeAnchor) anchorIdx else anchorIdx + 1
+            } else {
+                fromIndex.coerceIn(0, currentList.size)
+            }
+        } else {
+            if (insertBeforeAnchor) 0 else currentList.size
+        }
+        currentList.add(insertIndex.coerceIn(0, currentList.size), movedItem)
+
+        val now = System.currentTimeMillis()
+        val updatedList = currentList.mapIndexedNotNull { index, note ->
+            if (note.orderIndex != index) {
+                note.copy(orderIndex = index, updatedAt = now)
+            } else {
+                null
+            }
+        }
+
+        if (updatedList.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            noteDao.updateNotes(updatedList)
+            notifyLocalDataChangedForSync()
+        }
+    }
+
+    /**
      * 删除笔记放入回收站 (软删除)，并静默限制回收站最多保留 30 条笔记（超出则自动永久删除最早的笔记）。
      */
     fun moveToTrash(id: Long) {
