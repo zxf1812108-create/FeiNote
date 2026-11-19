@@ -2,6 +2,7 @@ package com.feiji.bulletnotes.data
 
 import android.content.Context
 import java.security.MessageDigest
+import kotlin.math.roundToInt
 
 /**
  * 统一多设备确定性合并内核（供坚果云 WebDAV 准实时同步、同 Wi-Fi 自动同步与每日备份防覆盖共用）：
@@ -69,12 +70,14 @@ object SyncMergeEngine {
             val bulletType = raw.bulletType ?: BulletType.SQUARE
             val normalizedSid = normalizeSyncId(raw.copy(dateString = dateString, content = content))
             result.add(
-                raw.copy(
-                    id = 0L,
-                    syncId = normalizedSid,
-                    content = content,
-                    dateString = dateString,
-                    bulletType = bulletType
+                SpacedRepetitionEngine.sanitizeNoteReviewFields(
+                    raw.copy(
+                        id = 0L,
+                        syncId = normalizedSid,
+                        content = content,
+                        dateString = dateString,
+                        bulletType = bulletType
+                    )
                 )
             )
         }
@@ -460,6 +463,7 @@ object SyncMergeEngine {
     private fun appendNotesToDigest(md: MessageDigest, notes: List<NoteEntity>) {
         val sortedNotes = notes.sortedBy { normalizeSyncId(it) }
         for (n in sortedNotes) {
+            val safeEaseInt = (SpacedRepetitionEngine.normalizeEaseFactor(n.easeFactor) * 100f).roundToInt()
             val line = buildString {
                 append("N|")
                 append(normalizeSyncId(n)).append('|')
@@ -470,6 +474,10 @@ object SyncMergeEngine {
                 append(n.createdAt).append('|')
                 append(n.updatedAt).append('|')
                 append(n.deletedAt ?: -1L).append('|')
+                append(n.reviewCount.coerceAtLeast(0)).append('|')
+                append(n.reviewIntervalDays.coerceIn(0, SpacedRepetitionEngine.MAX_INTERVAL_DAYS)).append('|')
+                append(safeEaseInt).append('|')
+                append(n.lastReviewedAt ?: -1L).append('|')
                 append(n.content.length).append(':').append(n.content)
                 append('\n')
             }
@@ -510,7 +518,12 @@ object SyncMergeEngine {
             local.isDeleted != merged.isDeleted ||
             local.createdAt != merged.createdAt ||
             local.updatedAt != merged.updatedAt ||
-            local.deletedAt != merged.deletedAt
+            local.deletedAt != merged.deletedAt ||
+            local.reviewCount != merged.reviewCount ||
+            local.reviewIntervalDays != merged.reviewIntervalDays ||
+            SpacedRepetitionEngine.normalizeEaseFactor(local.easeFactor) !=
+                SpacedRepetitionEngine.normalizeEaseFactor(merged.easeFactor) ||
+            local.lastReviewedAt != merged.lastReviewedAt
     }
 
     private fun sha256Hex(bytes: ByteArray): String =
