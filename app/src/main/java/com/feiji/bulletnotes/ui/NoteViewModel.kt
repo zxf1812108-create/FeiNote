@@ -11,6 +11,7 @@ import com.feiji.bulletnotes.data.LanServerService
 import com.feiji.bulletnotes.data.LanWebServer
 import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.data.WebDavBackupManager
+import com.feiji.bulletnotes.data.WifiAutoSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
@@ -128,8 +129,12 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private var lastSnapshot: String? = null
     private var backupLoop: Job? = null
     private var webDavLoop: Job? = null
+    private var webDavForegroundSyncLoop: Job? = null
+    private var debouncedWebDavSyncJob: Job? = null
     // 保留最近一次正文写入任务，并串成队列，确保退出编辑时能等待全部输入落库。
     @Volatile private var latestContentWriteJob: Job? = null
+    @Volatile private var isAppInForeground: Boolean = false
+    @Volatile private var lastWebDavSyncAttemptMs: Long = 0L
 
     data class PendingEncryptedRestore(
         val file: BackupManager.BackupFile,
@@ -165,12 +170,174 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         LanServerService.refreshPin(app)
     }
 
+    /**
+     * 前后台状态变化回调：
+     * - 前台：启动坚果云准实时同步（立即同步 + 每 90 秒轻量轮询）与同 Wi-Fi 自动同步（若已启用）；
+     * - 后台：立即停止所有轮询与局域网监听释放资源；若有尚未发出的防抖改动，立即补发一次单次上传。
+     */
+    fun onAppForegroundChanged(isForeground: Boolean) {
+        isAppInForeground = isForeground
+        updateWifiAutoSyncLifecycle()
+        if (isForeground) {
+            startForegroundWebDavSyncLoop()
+        } else {
+            webDavForegroundSyncLoop?.cancel()
+            webDavForegroundSyncLoop = null
+            val pendingPush = debouncedWebDavSyncJob
+            if (pendingPush?.isActive == true) {
+                pendingPush.cancel()
+                debouncedWebDavSyncJob = null
+                val app = getApplication<Application>()
+                viewModelScope.launch(Dispatchers.IO) {
+                    performWebDavSyncAndBackup(app, runDailyBackup = false, force = true)
+                }
+            }
+        }
+    }
+
+    private fun updateWifiAutoSyncLifecycle() {
+        val app = getApplication<Application>()
+        val config = WebDavBackupManager.getConfig(app)
+        if (isAppInForeground && config.wifiAutoSyncEnabled && config.encryptionPassword.isNotEmpty()) {
+            WifiAutoSyncManager.start(
+                context = app,
+                noteDao = noteDao,
+                withDbLock = { block -> contentWriteMutex.withLock { block() } },
+                isEditingProvider = { _editingNoteId.value != null },
+                onSyncApplied = { notesChanged, settingsChanged ->
+                    handleRemoteSyncApplied(notesChanged, settingsChanged, fromWifi = true)
+                }
+            )
+        } else {
+            WifiAutoSyncManager.stop()
+        }
+    }
+
+    private fun startForegroundWebDavSyncLoop() {
+        webDavForegroundSyncLoop?.cancel()
+        val app = getApplication<Application>()
+        val cfg = WebDavBackupManager.getConfig(app)
+        if (!isAppInForeground || !cfg.enabled || !cfg.isConfigured()) return
+
+        webDavForegroundSyncLoop = viewModelScope.launch(Dispatchers.IO) {
+            // 回到前台立即先拉取最新同步再执行每日备份，避免未同步旧数据覆盖昨日快照。
+            performWebDavSyncAndBackup(app, runDailyBackup = true, force = false)
+            while (isActive && isAppInForeground) {
+                delay(90_000L)
+                if (!isAppInForeground) break
+                performWebDavSyncAndBackup(app, runDailyBackup = false, force = false)
+            }
+        }
+    }
+
+    private fun notifyLocalDataChangedForSync() {
+        WifiAutoSyncManager.notifyLocalDataChanged()
+        scheduleDebouncedWebDavSync()
+    }
+
+    /** 本地笔记或设置变更后防抖 8 秒静默推送到坚果云，避免连续输入触发高频请求。 */
+    private fun scheduleDebouncedWebDavSync() {
+        val app = getApplication<Application>()
+        val cfg = WebDavBackupManager.getConfig(app)
+        if (!cfg.enabled || !cfg.isConfigured()) return
+        debouncedWebDavSyncJob?.cancel()
+        debouncedWebDavSyncJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(8_000L)
+            performWebDavSyncAndBackup(app, runDailyBackup = false, force = true)
+        }
+    }
+
+    private suspend fun performWebDavSyncAndBackup(
+        app: Application,
+        runDailyBackup: Boolean,
+        force: Boolean
+    ) {
+        webDavMutex.withLock {
+            val config = WebDavBackupManager.getConfig(app)
+            if (config.enabled && config.isConfigured()) {
+                val now = System.currentTimeMillis()
+                val shouldRunSync = force || (now - lastWebDavSyncAttemptMs >= 3_000L)
+                if (shouldRunSync) {
+                    lastWebDavSyncAttemptMs = now
+                    val syncRes = WebDavBackupManager.syncWithServer(
+                        context = app,
+                        noteDao = noteDao,
+                        withDbLock = { block -> contentWriteMutex.withLock { block() } },
+                        isEditingProvider = { _editingNoteId.value != null }
+                    )
+                    if (syncRes.pulledChanges > 0 || syncRes.settingsChanged) {
+                        handleRemoteSyncApplied(
+                            notesChanged = syncRes.pulledChanges > 0,
+                            settingsChanged = syncRes.settingsChanged,
+                            fromWifi = false
+                        )
+                    }
+                }
+                if (runDailyBackup) {
+                    WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
+                }
+            }
+            _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        }
+    }
+
+    private fun handleRemoteSyncApplied(
+        notesChanged: Boolean,
+        settingsChanged: Boolean,
+        fromWifi: Boolean
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            if (settingsChanged) {
+                val updated = WebDavBackupManager.getConfig(app)
+                _webDavConfig.value = updated
+                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+                updateWifiAutoSyncLifecycle()
+                if (updated.enabled && isAppInForeground) {
+                    startForegroundWebDavSyncLoop()
+                }
+            }
+            if (notesChanged && activeSearchKeywords.isNotEmpty()) {
+                val keywords = activeSearchKeywords
+                val bulletType = activeSearchBulletType
+                val allNotes = noteDao.getAllNotesForBackup()
+                if (activeSearchKeywords == keywords && activeSearchBulletType == bulletType) {
+                    _searchResults.value = allNotes
+                        .asSequence()
+                        .filter { note ->
+                            !note.isDeleted &&
+                                (bulletType == null || note.bulletType == bulletType) &&
+                                keywords.all { word -> note.content.contains(word, ignoreCase = true) }
+                        }
+                        .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
+                        .toList()
+                }
+            }
+            if (notesChanged || settingsChanged) {
+                if (!fromWifi) {
+                    // 云端拉回更新后刷新局域网摘要，便于同 Wi-Fi 下的离线副机及时拿到最新状态
+                    WifiAutoSyncManager.notifyLocalDataChanged()
+                } else {
+                    // 局域网同步完成后防抖同步到坚果云，保持云端与局域网两端一致
+                    scheduleDebouncedWebDavSync()
+                }
+                if (_todayBackupPrompt.value == null) {
+                    backupIfChanged(app)
+                }
+                if (fromWifi) {
+                    _userMessage.value = "已与局域网设备完成同步"
+                }
+            }
+        }
+    }
+
     fun saveWebDavSettings(
         serverUrl: String,
         remoteFolder: String,
         username: String,
         password: String,
-        encryptionPassword: String = ""
+        encryptionPassword: String = "",
+        wifiAutoSyncEnabled: Boolean = _webDavConfig.value.wifiAutoSyncEnabled
     ) {
         val app = getApplication<Application>()
         val previousConfig = _webDavConfig.value
@@ -180,15 +347,27 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             remoteFolder = remoteFolder,
             username = username,
             password = password,
-            encryptionPassword = encryptionPassword
+            encryptionPassword = encryptionPassword,
+            wifiAutoSyncEnabled = wifiAutoSyncEnabled
         )
         _webDavConfig.value = updatedConfig
         _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        updateWifiAutoSyncLifecycle()
         if (updatedConfig != previousConfig) {
             syncLocalBackupAfterSettingsChange(app)
+            WifiAutoSyncManager.notifyLocalDataChanged()
         }
         if (updatedConfig.enabled) {
-            triggerSilentWebDavBackup()
+            if (isAppInForeground) {
+                startForegroundWebDavSyncLoop()
+            } else {
+                triggerSilentWebDavBackup()
+            }
+        } else {
+            webDavForegroundSyncLoop?.cancel()
+            webDavForegroundSyncLoop = null
+            debouncedWebDavSyncJob?.cancel()
+            debouncedWebDavSyncJob = null
         }
     }
 
@@ -212,19 +391,22 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         val updated = WebDavBackupManager.getConfig(app)
         _webDavConfig.value = updated
         _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+        updateWifiAutoSyncLifecycle()
+        WifiAutoSyncManager.notifyLocalDataChanged()
         if (updated.enabled) {
-            triggerSilentWebDavBackup()
+            if (isAppInForeground) {
+                startForegroundWebDavSyncLoop()
+            } else {
+                triggerSilentWebDavBackup()
+            }
         }
     }
 
-    /** 静默尝试执行今日的 WebDAV（昨天数据）备份，全程无任何提示打扰。 */
+    /** 静默尝试执行 WebDAV 同步与今日（昨天数据）防覆盖备份，全程无任何提示打扰。 */
     fun triggerSilentWebDavBackup() {
         viewModelScope.launch(Dispatchers.IO) {
             val app = getApplication<Application>()
-            webDavMutex.withLock {
-                WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
-                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
-            }
+            performWebDavSyncAndBackup(app, runDailyBackup = true, force = false)
         }
     }
 
@@ -233,24 +415,22 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         webDavLoop = viewModelScope.launch(Dispatchers.IO) {
             val app = getApplication<Application>()
             var minutesElapsed = 0
-            // 启动时先静默检查并尝试备份一次。
-            webDavMutex.withLock {
-                WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
-                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
-            }
             while (isActive) {
                 delay(60_000L)
                 minutesElapsed++
+                if (!isAppInForeground) {
+                    _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
+                    continue
+                }
                 val config = WebDavBackupManager.getConfig(app)
                 val completed = WebDavBackupManager.isTodayBackupCompleted(app)
-                // 开启但今日尚未成功时，每 15 分钟静默重试；21:00 后每 5 分钟静默重试。
+                // 仅在前台且今日每日备份尚未成功时静默重试；21:00 后每 5 分钟重试，此前每 15 分钟重试。
                 val retryIntervalMinutes = if (WebDavBackupManager.shouldShowAlert(app)) 5 else 15
                 if (config.enabled && !completed && minutesElapsed % retryIntervalMinutes == 0) {
-                    webDavMutex.withLock {
-                        WebDavBackupManager.backupYesterdayIfNeeded(app, noteDao)
-                    }
+                    performWebDavSyncAndBackup(app, runDailyBackup = true, force = false)
+                } else {
+                    _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
                 }
-                _showWebDavAlert.value = WebDavBackupManager.shouldShowAlert(app)
             }
         }
     }
@@ -559,6 +739,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                         backupIfChangedLocked(app)
                     }
                 }
+                notifyLocalDataChangedForSync()
             }
         }
     }
@@ -575,6 +756,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             val updated = note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis())
             noteDao.updateNote(updated)
             _searchResults.value = _searchResults.value.map { if (it.id == updated.id) updated else it }
+            notifyLocalDataChangedForSync()
         }
     }
 
@@ -593,6 +775,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             if (newDate != _selectedDate.value) {
                 _userMessage.value = "笔记已移动至 $newDateStr"
             }
+            notifyLocalDataChangedForSync()
         }
     }
 
@@ -638,11 +821,12 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 更新后续项的 orderIndex
-            val updatedList = currentList.map { item ->
+            val now = System.currentTimeMillis()
+            val updatedList = currentList.mapNotNull { item ->
                 if (item.orderIndex >= newOrder) {
-                    item.copy(orderIndex = item.orderIndex + 1)
+                    item.copy(orderIndex = item.orderIndex + 1, updatedAt = now)
                 } else {
-                    item
+                    null
                 }
             }
             if (updatedList.isNotEmpty()) {
@@ -653,9 +837,12 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 content = initialContent,
                 dateString = currentDateStr,
                 bulletType = BulletType.SQUARE,
-                orderIndex = newOrder
+                orderIndex = newOrder,
+                createdAt = now,
+                updatedAt = now
             )
             val newId = noteDao.insertNote(newNote)
+            notifyLocalDataChangedForSync()
             kotlinx.coroutines.withContext(Dispatchers.Main) { setEditingNoteId(newId) }
         }
     }
@@ -670,13 +857,20 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         val movedItem = currentList.removeAt(fromIndex)
         currentList.add(toIndex, movedItem)
 
-        // 重新分配连续 orderIndex
-        val updatedList = currentList.mapIndexed { index, note ->
-            note.copy(orderIndex = index)
+        // 重新分配连续 orderIndex（仅对排序发生变化的笔记更新时间戳，便于多设备同步排序）
+        val now = System.currentTimeMillis()
+        val updatedList = currentList.mapIndexedNotNull { index, note ->
+            if (note.orderIndex != index) {
+                note.copy(orderIndex = index, updatedAt = now)
+            } else {
+                null
+            }
         }
 
+        if (updatedList.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             noteDao.updateNotes(updatedList)
+            notifyLocalDataChangedForSync()
         }
     }
 
@@ -697,13 +891,14 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     .take(overflowCount)
                     .forEach { oldNote ->
-                        noteDao.deletePermanently(oldNote.id)
+                        noteDao.deletePermanentlyWithTombstone(oldNote.id)
                     }
             }
             _searchResults.value = _searchResults.value.filterNot { it.id == id }
             if (_editingNoteId.value == id) {
                 _editingNoteId.value = null
             }
+            notifyLocalDataChangedForSync()
         }
     }
 
@@ -713,16 +908,25 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun restoreFromTrash(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             noteDao.restoreNote(id)
+            notifyLocalDataChangedForSync()
         }
     }
 
     /**
-     * 彻底删除单条笔记
+     * 彻底删除单条笔记（写入同步墓碑，避免多设备同步时重新复活）
      */
     fun permanentlyDelete(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
-            noteDao.deletePermanently(id)
+            noteDao.deletePermanentlyWithTombstone(id)
+            notifyLocalDataChangedForSync()
         }
+    }
+
+    override fun onCleared() {
+        webDavForegroundSyncLoop?.cancel()
+        debouncedWebDavSyncJob?.cancel()
+        WifiAutoSyncManager.stop()
+        super.onCleared()
     }
 
 }
