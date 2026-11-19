@@ -16,6 +16,10 @@ import java.util.UUID
  * @property createdAt 创建时间毫秒值
  * @property updatedAt 更新时间毫秒值
  * @property syncId 跨设备同步全局唯一标识 (UUID)
+ * @property reviewCount 五角星知识卡片连续记住次数（用于记忆曲线推演）
+ * @property reviewIntervalDays 当前记忆曲线间隔天数
+ * @property easeFactor 记忆熟练倍率（默认 2.5，范围 1.3~3.5）
+ * @property lastReviewedAt 最近一次复习时间戳毫秒值
  */
 @Entity(tableName = "notes")
 data class NoteEntity(
@@ -29,7 +33,11 @@ data class NoteEntity(
     val deletedAt: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
-    val syncId: String = UUID.randomUUID().toString()
+    val syncId: String = UUID.randomUUID().toString(),
+    val reviewCount: Int = 0,
+    val reviewIntervalDays: Int = 0,
+    val easeFactor: Float = SpacedRepetitionEngine.DEFAULT_EASE_FACTOR,
+    val lastReviewedAt: Long? = null
 )
 
 /**
