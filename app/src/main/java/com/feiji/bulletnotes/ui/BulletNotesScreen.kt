@@ -819,29 +819,17 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             if (isSearchMode && searchText.isBlank()) {
                 // 搜索界面未输入关键词时保持空白，不显示日期笔记。
             } else if (displayNotes.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable(enabled = !isSearchMode) {
-                            viewModel.insertNoteAfter(null, "")
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = if (isSearchMode) "没有找到匹配的笔记" else "今天暂无笔记",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "点击此处开始记录",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
+                if (!isSearchMode) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                viewModel.insertNoteAfter(null, "")
+                            }
+                    )
                 }
             } else {
                 LazyColumn(
