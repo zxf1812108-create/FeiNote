@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.feiji.bulletnotes.data.AppDatabase
 import com.feiji.bulletnotes.data.BackupManager
 import com.feiji.bulletnotes.data.BulletType
+import com.feiji.bulletnotes.data.LanServerService
+import com.feiji.bulletnotes.data.LanWebServer
 import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.data.WebDavBackupManager
 import kotlinx.coroutines.Dispatchers
@@ -144,6 +146,24 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _showWebDavAlert = MutableStateFlow(WebDavBackupManager.shouldShowAlert(application))
     val showWebDavAlert: StateFlow<Boolean> = _showWebDavAlert.asStateFlow()
+
+    // 局域网电脑/设备直连服务状态
+    val lanServerState: StateFlow<LanWebServer.LanServerState> = LanWebServer.state
+
+    fun startLanServer() {
+        val app = getApplication<Application>()
+        LanServerService.startService(app)
+    }
+
+    fun stopLanServer() {
+        val app = getApplication<Application>()
+        LanServerService.stopService(app)
+    }
+
+    fun refreshLanPin() {
+        val app = getApplication<Application>()
+        LanServerService.refreshPin(app)
+    }
 
     fun saveWebDavSettings(
         serverUrl: String,
