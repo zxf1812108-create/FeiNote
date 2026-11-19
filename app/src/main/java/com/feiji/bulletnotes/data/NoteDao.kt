@@ -59,9 +59,61 @@ interface NoteDao {
     @Query("DELETE FROM notes")
     suspend fun deleteAll()
 
+    @Query("SELECT * FROM deleted_sync_tombstones")
+    suspend fun getAllTombstones(): List<DeletedNoteTombstone>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTombstone(tombstone: DeletedNoteTombstone)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTombstones(tombstones: List<DeletedNoteTombstone>)
+
+    @Query("DELETE FROM deleted_sync_tombstones WHERE deletedAt < :cutoff")
+    suspend fun pruneOldTombstones(cutoff: Long)
+
+    @Query("DELETE FROM deleted_sync_tombstones")
+    suspend fun deleteAllTombstones()
+
+    @Transaction
+    suspend fun deletePermanentlyWithTombstone(
+        id: Long,
+        deletedAt: Long = System.currentTimeMillis()
+    ) {
+        val existing = getNoteById(id)
+        if (existing != null && existing.syncId.isNotBlank()) {
+            val effectiveDeletedAt = maxOf(deletedAt, existing.updatedAt + 1L)
+            insertTombstone(DeletedNoteTombstone(syncId = existing.syncId, deletedAt = effectiveDeletedAt))
+        }
+        deletePermanently(id)
+    }
+
+    @Transaction
+    suspend fun applySyncMerge(
+        toInsert: List<NoteEntity>,
+        toUpdate: List<NoteEntity>,
+        toDeleteIds: List<Long>,
+        mergedTombstones: List<DeletedNoteTombstone>,
+        tombstoneCutoff: Long
+    ) {
+        for (id in toDeleteIds) {
+            deletePermanently(id)
+        }
+        if (toUpdate.isNotEmpty()) {
+            updateNotes(toUpdate)
+        }
+        if (toInsert.isNotEmpty()) {
+            insertNotes(toInsert)
+        }
+        if (mergedTombstones.isNotEmpty()) {
+            insertTombstones(mergedTombstones)
+        }
+        pruneOldTombstones(tombstoneCutoff)
+    }
+
     @Transaction
     suspend fun restoreAllFromBackup(notes: List<NoteEntity>) {
         deleteAll()
+        deleteAllTombstones()
         insertNotes(notes)
     }
 }
