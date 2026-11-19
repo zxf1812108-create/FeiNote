@@ -29,6 +29,15 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE id = :id LIMIT 1")
     suspend fun getNoteById(id: Long): NoteEntity?
 
+    @Query("SELECT * FROM notes WHERE dateString = :date AND isDeleted = 0 ORDER BY orderIndex ASC, id ASC")
+    suspend fun getActiveNotesByDateOnce(date: String): List<NoteEntity>
+
+    @Query(
+        "SELECT * FROM notes WHERE isDeleted = 0 AND bulletType = :bulletType AND dateString < :today " +
+            "ORDER BY dateString ASC, orderIndex ASC, createdAt ASC, id ASC"
+    )
+    suspend fun getOverdueNotesByType(bulletType: BulletType, today: String): List<NoteEntity>
+
     @Query("SELECT * FROM notes WHERE isDeleted = 0")
     suspend fun getAllActiveNotes(): List<NoteEntity>
 
