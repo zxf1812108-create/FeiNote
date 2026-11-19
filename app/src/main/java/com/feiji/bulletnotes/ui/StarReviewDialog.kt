@@ -14,7 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -33,14 +32,12 @@ import java.util.Locale
 /**
  * 长按五角星知识卡片时弹出的极简熟悉度选择窗：
  * - 展示当前复习进度摘要；
- * - 提供“陌生 / 大概了解 / 很熟悉”三档选项并实时预览下次复习间隔与日期，点选即刻生效；
- * - 底部保留“自选日期”次要入口，可随时切回原日历弹窗手动指定日期。
+ * - 提供“陌生 / 大概了解 / 很熟悉”三档选项并实时预览下次复习间隔与日期，点选即刻生效。
  */
 @Composable
 fun StarReviewDialog(
     note: NoteEntity,
     onSelectFamiliarity: (ReviewFamiliarity) -> Unit,
-    onPickCustomDate: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val today = remember(note.id) { LocalDate.now() }
@@ -70,7 +67,7 @@ fun StarReviewDialog(
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
-                .width(300.dp)
+                .width(286.dp)
                 .border(
                     width = 1.dp,
                     color = borderColor,
@@ -83,7 +80,7 @@ fun StarReviewDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 18.dp, end = 18.dp, top = 16.dp, bottom = 10.dp)
+                    .padding(horizontal = 18.dp, vertical = 18.dp)
             ) {
                 Text(
                     text = "复习熟悉度",
@@ -115,7 +112,7 @@ fun StarReviewDialog(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .height(46.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .border(
                                     width = 1.dp,
@@ -140,19 +137,6 @@ fun StarReviewDialog(
                             )
                         }
                     }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                TextButton(
-                    onClick = onPickCustomDate,
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text(
-                        text = "自选日期",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f)
-                    )
                 }
             }
         }
