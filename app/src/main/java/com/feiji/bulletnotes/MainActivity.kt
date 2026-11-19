@@ -39,6 +39,12 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.triggerSilentWebDavBackup()
+        viewModel.onAppForegroundChanged(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        viewModel.onAppForegroundChanged(false)
     }
 }
 
