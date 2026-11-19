@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
@@ -87,6 +89,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -102,6 +105,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -123,11 +127,14 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.feiji.bulletnotes.data.BulletType
+import com.feiji.bulletnotes.data.KeywordHintEngine
+import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.NoteEntity
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -156,6 +163,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var searchBulletFilter by remember { mutableStateOf(squareOrDotSearchFilter) }
     val visibleNotes = if (isSearchMode) searchResults else notes
     val trashNotes by viewModel.trashNotes.collectAsState()
+    val keywordHintIndex by viewModel.keywordHintIndex.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
     val userMessage by viewModel.userMessage.collectAsState()
 
@@ -760,6 +768,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             isExpanded = isExpanded,
                             listState = listState,
                             listViewportBounds = listViewportBounds,
+                            keywordHintIndex = keywordHintIndex,
+                            displayDateFormatter = viewModel.displayDateFormatter,
                             onBulletClick = {
                                 if (editingNoteId != note.id) {
                                     if (editingNoteId != null) {
@@ -900,6 +910,19 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 pendingNewNoteScrollFromId = note.id
                                 enterFocusBridge.requestFocus()
                                 viewModel.insertNoteAfter(note, "")
+                            },
+                            onHintBulletClick = { hintNote ->
+                                viewModel.cycleBulletType(hintNote)
+                            },
+                            onHintBulletLongClick = { hintNote ->
+                                noteToChangeDate = hintNote
+                                showDatePicker = true
+                            },
+                            onHintContentChange = { hintNoteId, newText ->
+                                viewModel.updateNoteContent(hintNoteId, newText)
+                            },
+                            onHintEditFinished = { hintNoteId ->
+                                viewModel.finishInlineNoteEdit(hintNoteId)
                             }
                         )
                     }
@@ -1644,6 +1667,8 @@ fun BulletNoteRow(
     isExpanded: Boolean,
     listState: LazyListState,
     listViewportBounds: Rect?,
+    keywordHintIndex: KeywordHintIndex,
+    displayDateFormatter: DateTimeFormatter,
     modifier: Modifier = Modifier,
     onBulletClick: () -> Unit,
     onBulletLongClick: () -> Unit,
@@ -1652,7 +1677,11 @@ fun BulletNoteRow(
     onEnterPressed: () -> Unit,
     onDragStart: () -> Unit,
     onDragDelta: (Float, Offset) -> Unit,
-    onDragFinish: (Offset?) -> Unit
+    onDragFinish: (Offset?) -> Unit,
+    onHintBulletClick: (NoteEntity) -> Unit,
+    onHintBulletLongClick: (NoteEntity) -> Unit,
+    onHintContentChange: (Long, String) -> Unit,
+    onHintEditFinished: (Long) -> Unit
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
@@ -1717,6 +1746,109 @@ fun BulletNoteRow(
         onContentChange(next)
     }
 
+    // 关键字即时提示卡片状态（仅绑定到当前笔记的本次编辑会话）
+    var activeHintKeyword by remember(note.id, isEditing) { mutableStateOf<String?>(null) }
+    var activeHintDisplayKeyword by remember(note.id, isEditing) { mutableStateOf("") }
+    var hintPageIndex by remember(note.id, isEditing) { mutableStateOf(0) }
+    var expandedHintNoteId by remember(note.id, isEditing) { mutableStateOf<Long?>(null) }
+    var editingHintNoteId by remember(note.id, isEditing) { mutableStateOf<Long?>(null) }
+    var pinnedEditingHintNote by remember(note.id, isEditing) { mutableStateOf<NoteEntity?>(null) }
+    val dismissedHintKeywords = remember(note.id, isEditing) { mutableStateListOf<String>() }
+    var lastCheckedEditText by remember(note.id, isEditing) { mutableStateOf(note.content) }
+
+    fun finishHintCardEditing(restoreMainFocus: Boolean = false) {
+        val editingId = editingHintNoteId
+        if (editingId != null) {
+            editingHintNoteId = null
+            pinnedEditingHintNote = null
+            onHintEditFinished(editingId)
+        }
+        if (restoreMainFocus && isEditing) {
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
+
+    // 退出编辑或组件销毁时，确保卡片内未收尾的原地编辑也落库并触发备份/同步。
+    DisposableEffect(note.id, isEditing) {
+        onDispose {
+            val editingId = editingHintNoteId
+            if (editingId != null) {
+                editingHintNoteId = null
+                pinnedEditingHintNote = null
+                onHintEditFinished(editingId)
+            }
+        }
+    }
+
+    // 输入防抖检测：聚焦本次新录入区间，支持 @关键字@ 和 #关键字#。
+    LaunchedEffect(isEditing, editValue.text, editValue.composition, keywordHintIndex) {
+        if (!isEditing) return@LaunchedEffect
+        val currentText = editValue.text
+        if (currentText.length < lastCheckedEditText.length) {
+            lastCheckedEditText = currentText
+            return@LaunchedEffect
+        }
+        if (currentText == lastCheckedEditText) return@LaunchedEffect
+
+        delay(180)
+        val match = KeywordHintEngine.findMatchOnEdit(
+            previousText = lastCheckedEditText,
+            currentText = currentText,
+            cursorPosition = editValue.selection.end,
+            index = keywordHintIndex,
+            excludeNoteId = note.id,
+            dismissedKeywords = dismissedHintKeywords.toSet()
+        )
+        if (match != null) {
+            if (activeHintKeyword != match.normalizedKeyword) {
+                finishHintCardEditing(restoreMainFocus = false)
+                activeHintKeyword = match.normalizedKeyword
+                activeHintDisplayKeyword = match.displayKeyword
+                hintPageIndex = 0
+                expandedHintNoteId = null
+            }
+            lastCheckedEditText = currentText
+        } else if (editValue.composition == null) {
+            // 中文拼音仍在组词时不推进基线，待词组上屏后再与组词前基线比对。
+            lastCheckedEditText = currentText
+        }
+    }
+
+    val liveHintEntry = activeHintKeyword?.let { keywordHintIndex.byNormalizedKeyword[it] }
+    val liveHintNotes = remember(liveHintEntry, note.id) {
+        liveHintEntry?.notes?.filter { it.id != note.id }.orEmpty()
+    }
+    LaunchedEffect(liveHintNotes, editingHintNoteId) {
+        val editingId = editingHintNoteId
+        if (editingId != null) {
+            liveHintNotes.firstOrNull { it.id == editingId }?.let { updated ->
+                pinnedEditingHintNote = updated
+            }
+        } else if (activeHintKeyword != null && liveHintNotes.isEmpty()) {
+            activeHintKeyword = null
+            expandedHintNoteId = null
+            hintPageIndex = 0
+        }
+    }
+    val displayedHintNotes = remember(liveHintNotes, editingHintNoteId, pinnedEditingHintNote) {
+        val editingId = editingHintNoteId
+        val pinned = pinnedEditingHintNote
+        if (editingId != null && pinned != null && liveHintNotes.none { it.id == editingId }) {
+            listOf(pinned) + liveHintNotes
+        } else {
+            liveHintNotes
+        }
+    }
+
+    // 提示卡片弹出或展开/进入原地编辑时，自动滚动到可视区域内，避免被键盘遮挡。
+    LaunchedEffect(isEditing, activeHintKeyword, expandedHintNoteId, editingHintNoteId) {
+        if (isEditing && activeHintKeyword != null) {
+            withFrameNanos { }
+            withFrameNanos { }
+            bringIntoViewRequester.bringIntoView()
+        }
+    }
+
     // 编辑时请求焦点，并在键盘弹出后将整行移动到可视区域。
     LaunchedEffect(isEditing) {
         if (isEditing) {
@@ -1743,7 +1875,7 @@ fun BulletNoteRow(
         textLayout,
         listViewportBounds
     ) {
-        if (!isEditing) return@LaunchedEffect
+        if (!isEditing || editingHintNoteId != null) return@LaunchedEffect
 
         snapshotFlow {
             imeInsets.getBottom(density)
@@ -1787,7 +1919,7 @@ fun BulletNoteRow(
         }
     }
 
-    Row(
+    Column(
         modifier = modifier
             .bringIntoViewRequester(bringIntoViewRequester)
             .fillMaxWidth()
@@ -1799,239 +1931,680 @@ fun BulletNoteRow(
                     Color.Transparent
                 }
             )
-            .padding(horizontal = 6.dp, vertical = 6.dp),
-        // 多行笔记时，项目符号固定对齐第一行，不随整条笔记高度垂直居中。
-        verticalAlignment = Alignment.Top
+            .padding(horizontal = 6.dp, vertical = 6.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .offset(y = bulletVerticalOffset)
-                .clip(RoundedCornerShape(4.dp))
-                .combinedClickable(
-                    onClick = onBulletClick,
-                    onLongClick = onBulletLongClick
-                ),
-            contentAlignment = Alignment.Center
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            // 多行笔记时，项目符号固定对齐第一行，不随整条笔记高度垂直居中。
+            verticalAlignment = Alignment.Top
         ) {
-            when (note.bulletType) {
-                BulletType.SQUARE -> {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .border(
-                                1.5.dp,
-                                MaterialTheme.colorScheme.onSurface,
-                                RoundedCornerShape(3.dp)
-                            )
-                    )
-                }
-
-                BulletType.CHECKED -> {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .border(
-                                1.5.dp,
-                                MaterialTheme.colorScheme.onSurface,
-                                RoundedCornerShape(3.dp)
-                            )
-                    )
-                }
-
-                BulletType.BULLET_DOT -> {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(MaterialTheme.colorScheme.onSurface, CircleShape)
-                    )
-                }
-
-                BulletType.STAR -> {
-                    Canvas(modifier = Modifier.size(18.dp)) {
-                        val scale = size.width / 18f
-                        val starPath = Path().apply {
-                            moveTo(9f * scale, 0f)
-                            lineTo(11.1f * scale, 6.2f * scale)
-                            lineTo(17.7f * scale, 6.5f * scale)
-                            lineTo(12.6f * scale, 10.6f * scale)
-                            lineTo(14.4f * scale, 17.2f * scale)
-                            lineTo(9f * scale, 13.4f * scale)
-                            lineTo(3.6f * scale, 17.2f * scale)
-                            lineTo(5.4f * scale, 10.6f * scale)
-                            lineTo(0.3f * scale, 6.5f * scale)
-                            lineTo(6.9f * scale, 6.2f * scale)
-                            close()
-                        }
-                        drawPath(path = starPath, color = bulletColor)
-                    }
-                }
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .offset(y = bulletVerticalOffset)
+                    .clip(RoundedCornerShape(4.dp))
+                    .combinedClickable(
+                        onClick = onBulletClick,
+                        onLongClick = onBulletLongClick
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                NoteBulletGlyph(bulletType = note.bulletType, color = bulletColor)
             }
-        }
 
-        Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .then(
-                    if (!isEditing) {
-                        Modifier
-                            .onGloballyPositioned {
-                                dragCoordinates = it
-                            }
-                            .pointerInput(note.id) {
-                                detectDragGesturesAfterLongPress(
-                                    onDragStart = { point ->
-                                        lastDragRoot =
-                                            dragCoordinates?.localToRoot(point)
-                                        onDragStart()
-                                    },
-                                    onDrag = { change, amount ->
-                                        change.consume()
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .then(
+                        if (!isEditing) {
+                            Modifier
+                                .onGloballyPositioned {
+                                    dragCoordinates = it
+                                }
+                                .pointerInput(note.id) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { point ->
+                                            lastDragRoot =
+                                                dragCoordinates?.localToRoot(point)
+                                            onDragStart()
+                                        },
+                                        onDrag = { change, amount ->
+                                            change.consume()
 
-                                        dragCoordinates
-                                            ?.localToRoot(change.position)
-                                            ?.let { root ->
-                                                lastDragRoot = root
-                                                onDragDelta(amount.y, root)
-                                            }
-                                    },
-                                    onDragEnd = {
-                                        onDragFinish(lastDragRoot)
-                                        lastDragRoot = null
-                                    },
-                                    onDragCancel = {
-                                        onDragFinish(null)
-                                        lastDragRoot = null
-                                    }
-                                )
-                            }
-                    } else {
-                        Modifier
+                                            dragCoordinates
+                                                ?.localToRoot(change.position)
+                                                ?.let { root ->
+                                                    lastDragRoot = root
+                                                    onDragDelta(amount.y, root)
+                                                }
+                                        },
+                                        onDragEnd = {
+                                            onDragFinish(lastDragRoot)
+                                            lastDragRoot = null
+                                        },
+                                        onDragCancel = {
+                                            onDragFinish(null)
+                                            lastDragRoot = null
+                                        }
+                                    )
+                                }
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .clickable(enabled = !isEditing) {
+                        onContentClick(isCollapsedMultiLine)
                     }
-                )
-                .clickable(enabled = !isEditing) {
-                    onContentClick(isCollapsedMultiLine)
-                }
-        ) {
-            if (!isEditing) {
-                val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
-                    color = MaterialTheme.colorScheme.onSurface,
-                    lineHeight = bodyLineHeight
-                )
-                if (isExpanded) {
-                    // 展开浏览模式：完整显示多行笔记内容，不进入编辑状态。
-                    Text(
-                        text = note.content.ifEmpty { " " },
-                        style = paragraphStyle,
-                        onTextLayout = { layout ->
-                            if (layout.lineCount > 0) {
-                                firstLineHeightPx =
-                                    layout.getLineBottom(0) - layout.getLineTop(0)
-                            }
-                        }
-                    )
-                } else {
-                    // 收起浏览模式只显示第一行；换行符前的第一行能完整显示时不添加省略号，
-                    // 仅当第一行内容超出显示宽度时由 Ellipsis 自动在行末显示省略号。
-                    val firstLine = note.content.substringBefore('\n')
-                    val previewText = firstLine.ifEmpty { " " }
-                    Text(
-                        text = previewText,
-                        style = paragraphStyle,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        onTextLayout = { layout ->
-                            if (layout.lineCount > 0) {
-                                firstLineHeightPx =
-                                    layout.getLineBottom(0) - layout.getLineTop(0)
-                            }
-                            isFirstLineEllipsized = layout.hasVisualOverflow
-                        }
-                    )
-                }
-            } else {
-                BasicTextField(
-                    value = editValue,
-                    onValueChange = { newValue ->
-                        val textChanged = newValue.text != editValue.text
-                        if (textChanged) {
-                            undoHistory.add(editValue.text)
-                            if (undoHistory.size > 100) undoHistory.removeAt(0)
-                            redoHistory.clear()
-                        }
-                        editValue = newValue
-
-                        // 仅正文真正变化时写数据库，保留 selection 和 IME composition。
-                        if (textChanged) {
-                            onContentChange(newValue.text)
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester)
-                        .onGloballyPositioned { coordinates ->
-                            textFieldCoordinates = coordinates
-                        },
-                    // 编辑时段内行高保持系统主题默认值，不整体放大行高。
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+            ) {
+                if (!isEditing) {
+                    val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    onTextLayout = { layout ->
-                        textLayout = layout
-                        if (layout.lineCount > 0) {
-                            firstLineHeightPx =
-                                layout.getLineBottom(0) - layout.getLineTop(0)
-                        }
-                    },
-                    // 回车键直接输入换行符，不再结束当前笔记编辑。
-                    keyboardOptions = KeyboardOptions.Default,
-                    keyboardActions = KeyboardActions.Default,
-                    decorationBox = { innerTextField ->
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Box(modifier = Modifier.fillMaxWidth()) {
-                                innerTextField()
+                    )
+                    if (isExpanded) {
+                        // 展开浏览模式：完整显示多行笔记内容，不进入编辑状态。
+                        Text(
+                            text = note.content.ifEmpty { " " },
+                            style = paragraphStyle,
+                            onTextLayout = { layout ->
+                                if (layout.lineCount > 0) {
+                                    firstLineHeightPx =
+                                        layout.getLineBottom(0) - layout.getLineTop(0)
+                                }
                             }
+                        )
+                    } else {
+                        // 收起浏览模式只显示第一行；换行符前的第一行能完整显示时不添加省略号，
+                        // 仅当第一行内容超出显示宽度时由 Ellipsis 自动在行末显示省略号。
+                        val firstLine = note.content.substringBefore('\n')
+                        val previewText = firstLine.ifEmpty { " " }
+                        Text(
+                            text = previewText,
+                            style = paragraphStyle,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            onTextLayout = { layout ->
+                                if (layout.lineCount > 0) {
+                                    firstLineHeightPx =
+                                        layout.getLineBottom(0) - layout.getLineTop(0)
+                                }
+                                isFirstLineEllipsized = layout.hasVisualOverflow
+                            }
+                        )
+                    }
+                } else {
+                    BasicTextField(
+                        value = editValue,
+                        onValueChange = { newValue ->
+                            val textChanged = newValue.text != editValue.text
+                            if (textChanged) {
+                                undoHistory.add(editValue.text)
+                                if (undoHistory.size > 100) undoHistory.removeAt(0)
+                                redoHistory.clear()
+                            }
+                            editValue = newValue
 
-                            // 操作图标统一使用同一套矢量绘制与 IconButton 布局，
-                            // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // 撤销、恢复靠右排布，与最右侧的收起按钮之间空出一个按钮宽度（48.dp）。
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Undo,
-                                    contentDescription = "撤销",
-                                    enabled = undoHistory.isNotEmpty(),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    onClick = { undoEdit() }
-                                )
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Redo,
-                                    contentDescription = "恢复",
-                                    enabled = redoHistory.isNotEmpty(),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    onClick = { redoEdit() }
-                                )
-                                Spacer(modifier = Modifier.width(48.dp))
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Collapse,
-                                    contentDescription = "收起编辑",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    onClick = { onContentClick(false) }
-                                )
+                            // 仅正文真正变化时写数据库，保留 selection 和 IME composition。
+                            if (textChanged) {
+                                onContentChange(newValue.text)
                             }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused && editingHintNoteId != null) {
+                                    finishHintCardEditing(restoreMainFocus = false)
+                                }
+                            }
+                            .onGloballyPositioned { coordinates ->
+                                textFieldCoordinates = coordinates
+                            },
+                        // 编辑时段内行高保持系统主题默认值，不整体放大行高。
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            lineHeight = bodyLineHeight
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        onTextLayout = { layout ->
+                            textLayout = layout
+                            if (layout.lineCount > 0) {
+                                firstLineHeightPx =
+                                    layout.getLineBottom(0) - layout.getLineTop(0)
+                            }
+                        },
+                        // 回车键直接输入换行符，不再结束当前笔记编辑。
+                        keyboardOptions = KeyboardOptions.Default,
+                        keyboardActions = KeyboardActions.Default,
+                        decorationBox = { innerTextField ->
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Box(modifier = Modifier.fillMaxWidth()) {
+                                    innerTextField()
+                                }
+
+                                // 操作图标统一使用同一套矢量绘制与 IconButton 布局，
+                                // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // 撤销、恢复靠右排布，与最右侧的收起按钮之间空出一个按钮宽度（48.dp）。
+                                    EditorActionButton(
+                                        symbol = EditorActionSymbol.Undo,
+                                        contentDescription = "撤销",
+                                        enabled = undoHistory.isNotEmpty(),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        onClick = { undoEdit() }
+                                    )
+                                    EditorActionButton(
+                                        symbol = EditorActionSymbol.Redo,
+                                        contentDescription = "恢复",
+                                        enabled = redoHistory.isNotEmpty(),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        onClick = { redoEdit() }
+                                    )
+                                    Spacer(modifier = Modifier.width(48.dp))
+                                    EditorActionButton(
+                                        symbol = EditorActionSymbol.Collapse,
+                                        contentDescription = "收起编辑",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        onClick = {
+                                            finishHintCardEditing(restoreMainFocus = false)
+                                            onContentClick(false)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        if (isEditing && activeHintKeyword != null && displayedHintNotes.isNotEmpty()) {
+            val safePageIndex = hintPageIndex.coerceIn(0, displayedHintNotes.lastIndex)
+            val currentHintNote = displayedHintNotes[safePageIndex]
+            val displayKeyword = liveHintEntry?.displayKeyword ?: activeHintDisplayKeyword
+
+            Spacer(modifier = Modifier.height(4.dp))
+            KeywordHintCard(
+                displayKeyword = displayKeyword,
+                hintNote = currentHintNote,
+                pageIndex = safePageIndex,
+                totalPages = displayedHintNotes.size,
+                displayDateFormatter = displayDateFormatter,
+                isExpanded = expandedHintNoteId == currentHintNote.id,
+                isEditingHint = editingHintNoteId == currentHintNote.id,
+                onNavigatePage = { delta ->
+                    if (displayedHintNotes.size > 1) {
+                        finishHintCardEditing(restoreMainFocus = false)
+                        expandedHintNoteId = null
+                        hintPageIndex = (safePageIndex + delta + displayedHintNotes.size) % displayedHintNotes.size
+                    }
+                },
+                onDismiss = {
+                    finishHintCardEditing(restoreMainFocus = true)
+                    activeHintKeyword?.let { normalized ->
+                        if (normalized !in dismissedHintKeywords) {
+                            dismissedHintKeywords.add(normalized)
                         }
                     }
+                    activeHintKeyword = null
+                    expandedHintNoteId = null
+                    hintPageIndex = 0
+                },
+                onBulletClick = {
+                    val toggledNext = when (currentHintNote.bulletType) {
+                        BulletType.SQUARE, BulletType.CHECKED -> BulletType.BULLET_DOT
+                        BulletType.BULLET_DOT -> BulletType.STAR
+                        BulletType.STAR -> BulletType.SQUARE
+                    }
+                    if (pinnedEditingHintNote?.id == currentHintNote.id) {
+                        pinnedEditingHintNote = currentHintNote.copy(bulletType = toggledNext)
+                    }
+                    onHintBulletClick(currentHintNote)
+                },
+                onBulletLongClick = {
+                    onHintBulletLongClick(currentHintNote)
+                },
+                onContentClick = { isTruncatedPreview ->
+                    if (editingHintNoteId == currentHintNote.id) {
+                        finishHintCardEditing(restoreMainFocus = true)
+                    } else if (isTruncatedPreview && expandedHintNoteId != currentHintNote.id) {
+                        expandedHintNoteId = currentHintNote.id
+                    } else {
+                        expandedHintNoteId = null
+                        pinnedEditingHintNote = currentHintNote
+                        editingHintNoteId = currentHintNote.id
+                    }
+                },
+                onContentChange = { newText ->
+                    if (pinnedEditingHintNote?.id == currentHintNote.id) {
+                        pinnedEditingHintNote = pinnedEditingHintNote?.copy(content = newText)
+                    }
+                    onHintContentChange(currentHintNote.id, newText)
+                },
+                onCollapseHintEdit = {
+                    finishHintCardEditing(restoreMainFocus = true)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun NoteBulletGlyph(
+    bulletType: BulletType,
+    color: Color
+) {
+    when (bulletType) {
+        BulletType.SQUARE, BulletType.CHECKED -> {
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .border(
+                        1.5.dp,
+                        color,
+                        RoundedCornerShape(3.dp)
+                    )
+            )
+        }
+
+        BulletType.BULLET_DOT -> {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(color, CircleShape)
+            )
+        }
+
+        BulletType.STAR -> {
+            Canvas(modifier = Modifier.size(18.dp)) {
+                val scale = size.width / 18f
+                val starPath = Path().apply {
+                    moveTo(9f * scale, 0f)
+                    lineTo(11.1f * scale, 6.2f * scale)
+                    lineTo(17.7f * scale, 6.5f * scale)
+                    lineTo(12.6f * scale, 10.6f * scale)
+                    lineTo(14.4f * scale, 17.2f * scale)
+                    lineTo(9f * scale, 13.4f * scale)
+                    lineTo(3.6f * scale, 17.2f * scale)
+                    lineTo(5.4f * scale, 10.6f * scale)
+                    lineTo(0.3f * scale, 6.5f * scale)
+                    lineTo(6.9f * scale, 6.2f * scale)
+                    close()
+                }
+                drawPath(path = starPath, color = color)
+            }
+        }
+    }
+}
+
+/**
+ * 笔记编辑态下内联展示的关键字即时提示卡片：
+ * - 紧贴当前编辑笔记的工具栏下方，不抢焦点；
+ * - 多条命中时支持右上角 ‹ 1/N › 循环翻页与卡片区域左右滑动切页；
+ * - 默认最多展开 3 行并带省略号提示，点击展开全文，再次点击（或 3 行以内直接点击）原地进入编辑模式。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun KeywordHintCard(
+    displayKeyword: String,
+    hintNote: NoteEntity,
+    pageIndex: Int,
+    totalPages: Int,
+    displayDateFormatter: DateTimeFormatter,
+    isExpanded: Boolean,
+    isEditingHint: Boolean,
+    onNavigatePage: (Int) -> Unit,
+    onDismiss: () -> Unit,
+    onBulletClick: () -> Unit,
+    onBulletLongClick: () -> Unit,
+    onContentClick: (Boolean) -> Unit,
+    onContentChange: (String) -> Unit,
+    onCollapseHintEdit: () -> Unit
+) {
+    val density = LocalDensity.current
+    val bulletColor = MaterialTheme.colorScheme.onSurface
+    val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
+    val hintFocusRequester = remember { FocusRequester() }
+    val cardInteractionSource = remember { MutableInteractionSource() }
+
+    var firstLineHeightPx by remember(hintNote.id) { mutableStateOf(0f) }
+    var isPreviewOverflow by remember(hintNote.id, hintNote.content) { mutableStateOf(false) }
+
+    val lines = remember(hintNote.content) { hintNote.content.split('\n') }
+    val hasMoreThan3Paragraphs = lines.size > 3
+    val previewText = remember(hintNote.content, hasMoreThan3Paragraphs) {
+        if (hasMoreThan3Paragraphs) {
+            lines.take(3).joinToString("\n") + "…"
+        } else {
+            hintNote.content.ifEmpty { " " }
+        }
+    }
+    val isTruncatedPreview = !isExpanded && (hasMoreThan3Paragraphs || isPreviewOverflow)
+
+    val firstLineHeightDp = with(density) { firstLineHeightPx.toDp() }
+    val bulletVerticalOffset = if (firstLineHeightPx > 0f) {
+        (firstLineHeightDp - 28.dp) / 2
+    } else {
+        0.dp
+    }
+
+    var hintEditValue by remember(hintNote.id, isEditingHint) {
+        mutableStateOf(
+            TextFieldValue(
+                hintNote.content,
+                selection = TextRange(hintNote.content.length)
+            )
+        )
+    }
+    val hintUndoHistory = remember(hintNote.id, isEditingHint) { mutableStateListOf<String>() }
+    val hintRedoHistory = remember(hintNote.id, isEditingHint) { mutableStateListOf<String>() }
+
+    fun undoHintEdit() {
+        if (hintUndoHistory.isEmpty()) return
+        hintRedoHistory.add(hintEditValue.text)
+        val previous = hintUndoHistory.removeAt(hintUndoHistory.lastIndex)
+        hintEditValue = TextFieldValue(previous, selection = TextRange(previous.length))
+        onContentChange(previous)
+    }
+
+    fun redoHintEdit() {
+        if (hintRedoHistory.isEmpty()) return
+        hintUndoHistory.add(hintEditValue.text)
+        val next = hintRedoHistory.removeAt(hintRedoHistory.lastIndex)
+        hintEditValue = TextFieldValue(next, selection = TextRange(next.length))
+        onContentChange(next)
+    }
+
+    LaunchedEffect(isEditingHint, hintNote.id) {
+        if (isEditingHint) {
+            withFrameNanos { }
+            runCatching { hintFocusRequester.requestFocus() }
+        }
+    }
+
+    val formattedDate = remember(hintNote.dateString, displayDateFormatter) {
+        runCatching {
+            LocalDate.parse(hintNote.dateString).format(displayDateFormatter)
+        }.getOrDefault(hintNote.dateString)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.background)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                shape = RoundedCornerShape(8.dp)
+            )
+            // 吸收卡片空白区域点击，防止误触外层关闭主编辑器的逻辑。
+            .clickable(
+                interactionSource = cardInteractionSource,
+                indication = null,
+                onClick = {}
+            )
+            .then(
+                if (!isEditingHint && totalPages > 1) {
+                    Modifier.pointerInput(hintNote.id, totalPages, pageIndex) {
+                        var totalHorizontalDrag = 0f
+                        val swipeThreshold = with(density) { 48.dp.toPx() }
+                        detectHorizontalDragGestures(
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                totalHorizontalDrag += dragAmount
+                            },
+                            onDragEnd = {
+                                when {
+                                    totalHorizontalDrag <= -swipeThreshold -> onNavigatePage(1)
+                                    totalHorizontalDrag >= swipeThreshold -> onNavigatePage(-1)
+                                }
+                                totalHorizontalDrag = 0f
+                            },
+                            onDragCancel = {
+                                totalHorizontalDrag = 0f
+                            }
+                        )
+                    }
+                } else {
+                    Modifier
+                }
+            )
+            .padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 8.dp)
+    ) {
+        // 卡片顶栏：关键字 + 笔记日期 + 多条翻页符号（仅 >1 条显示）+ 关闭按钮
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "提示 · $displayKeyword",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = formattedDate,
+                maxLines = 1,
+                softWrap = false,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.weight(1f))
+
+            if (totalPages > 1) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .clickable { onNavigatePage(-1) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "‹",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                    )
+                }
+                Text(
+                    text = "${pageIndex + 1}/$totalPages",
+                    maxLines = 1,
+                    softWrap = false,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .clickable { onNavigatePage(1) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "›",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "关闭提示",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.size(15.dp)
                 )
             }
         }
 
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 4.dp, bottom = 6.dp)
+                .height(0.5.dp)
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+        )
+
+        // 卡片内单条笔记区：左侧符号 + 右侧正文（与主界面操作逻辑保持一致）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 4.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .offset(y = bulletVerticalOffset)
+                    .clip(RoundedCornerShape(4.dp))
+                    .combinedClickable(
+                        onClick = onBulletClick,
+                        onLongClick = onBulletLongClick
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                NoteBulletGlyph(bulletType = hintNote.bulletType, color = bulletColor)
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(enabled = !isEditingHint) {
+                        onContentClick(isTruncatedPreview)
+                    }
+            ) {
+                if (!isEditingHint) {
+                    val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = bodyLineHeight
+                    )
+                    if (isExpanded) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = hintNote.content.ifEmpty { " " },
+                                style = paragraphStyle,
+                                onTextLayout = { layout ->
+                                    if (layout.lineCount > 0) {
+                                        firstLineHeightPx =
+                                            layout.getLineBottom(0) - layout.getLineTop(0)
+                                    }
+                                }
+                            )
+                        }
+                    } else {
+                        // 默认最多展开 3 行；超出 3 行时在末尾显示省略号。
+                        Text(
+                            text = previewText,
+                            style = paragraphStyle,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                            onTextLayout = { layout ->
+                                if (layout.lineCount > 0) {
+                                    firstLineHeightPx =
+                                        layout.getLineBottom(0) - layout.getLineTop(0)
+                                }
+                                isPreviewOverflow = layout.hasVisualOverflow
+                            }
+                        )
+                    }
+                } else {
+                    BasicTextField(
+                        value = hintEditValue,
+                        onValueChange = { newValue ->
+                            val textChanged = newValue.text != hintEditValue.text
+                            if (textChanged) {
+                                hintUndoHistory.add(hintEditValue.text)
+                                if (hintUndoHistory.size > 100) hintUndoHistory.removeAt(0)
+                                hintRedoHistory.clear()
+                            }
+                            hintEditValue = newValue
+                            if (textChanged) {
+                                onContentChange(newValue.text)
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(hintFocusRequester),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            lineHeight = bodyLineHeight
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        onTextLayout = { layout ->
+                            if (layout.lineCount > 0) {
+                                firstLineHeightPx =
+                                    layout.getLineBottom(0) - layout.getLineTop(0)
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions.Default,
+                        keyboardActions = KeyboardActions.Default,
+                        decorationBox = { innerTextField ->
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 200.dp)
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    innerTextField()
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    EditorActionButton(
+                                        symbol = EditorActionSymbol.Undo,
+                                        contentDescription = "撤销",
+                                        enabled = hintUndoHistory.isNotEmpty(),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        onClick = { undoHintEdit() }
+                                    )
+                                    EditorActionButton(
+                                        symbol = EditorActionSymbol.Redo,
+                                        contentDescription = "恢复",
+                                        enabled = hintRedoHistory.isNotEmpty(),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        onClick = { redoHintEdit() }
+                                    )
+                                    Spacer(modifier = Modifier.width(48.dp))
+                                    EditorActionButton(
+                                        symbol = EditorActionSymbol.Collapse,
+                                        contentDescription = "收起编辑",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        onClick = onCollapseHintEdit
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+        }
     }
 }
 
