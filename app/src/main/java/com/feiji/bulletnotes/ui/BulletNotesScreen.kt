@@ -83,8 +83,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -187,7 +189,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         // 无论是否授予通知权限，都启动局域网直连服务（授予时通知栏会显示停止按钮）
         viewModel.startLanServer()
     }
+    val starReviewUndoEvent by viewModel.starReviewUndoEvent.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
+    var noteToReview by remember { mutableStateOf<NoteEntity?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
     // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
     var expandedNoteId by remember { mutableStateOf<Long?>(null) }
@@ -322,8 +326,67 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         }
     }
 
+    // 五角星知识卡片复习排期后的极简可撤销轻提示
+    LaunchedEffect(starReviewUndoEvent?.eventId) {
+        val event = starReviewUndoEvent ?: return@LaunchedEffect
+        val parsedTarget = runCatching { LocalDate.parse(event.targetDateString) }.getOrNull()
+        val displayTarget = parsedTarget?.format(viewModel.displayDateFormatter) ?: event.targetDateString
+        snackbarHostState.currentSnackbarData?.dismiss()
+        val result = snackbarHostState.showSnackbar(
+            message = "已移至 $displayTarget 复习 (+${event.intervalDays}天)",
+            actionLabel = "撤销",
+            duration = SnackbarDuration.Short
+        )
+        if (result == SnackbarResult.ActionPerformed) {
+            viewModel.undoStarReview(event.previousNote)
+        }
+        viewModel.clearStarReviewUndoEvent(event.eventId)
+    }
+
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState) { data ->
+                Surface(
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                            shape = RoundedCornerShape(12.dp)
+                        ),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.background,
+                    shadowElevation = 2.dp,
+                    tonalElevation = 0.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = data.visuals.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        data.visuals.actionLabel?.let { actionLabel ->
+                            TextButton(onClick = { data.performAction() }) {
+                                Text(
+                                    text = actionLabel,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             Column(
@@ -784,8 +847,12 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             },
                             onBulletLongClick = {
                                 closeEditor()
-                                noteToChangeDate = note
-                                showDatePicker = true
+                                if (note.bulletType == BulletType.STAR) {
+                                    noteToReview = note
+                                } else {
+                                    noteToChangeDate = note
+                                    showDatePicker = true
+                                }
                             },
                             onContentClick = { isCollapsedMultiLine ->
                                 if (editingNoteId == note.id) {
@@ -915,8 +982,12 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 viewModel.cycleBulletType(hintNote)
                             },
                             onHintBulletLongClick = { hintNote ->
-                                noteToChangeDate = hintNote
-                                showDatePicker = true
+                                if (hintNote.bulletType == BulletType.STAR) {
+                                    noteToReview = hintNote
+                                } else {
+                                    noteToChangeDate = hintNote
+                                    showDatePicker = true
+                                }
                             },
                             onHintContentChange = { hintNoteId, newText ->
                                 viewModel.updateNoteContent(hintNoteId, newText)
@@ -980,6 +1051,25 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             onDismiss = {
                 noteToChangeDate = null
                 showDatePicker = false
+            }
+        )
+    }
+
+    // 五角星知识卡片熟悉度选择弹窗
+    noteToReview?.let { targetNote ->
+        StarReviewDialog(
+            note = targetNote,
+            onSelectFamiliarity = { familiarity ->
+                viewModel.reviewStarNote(targetNote, familiarity)
+                noteToReview = null
+            },
+            onPickCustomDate = {
+                noteToChangeDate = targetNote
+                noteToReview = null
+                showDatePicker = true
+            },
+            onDismiss = {
+                noteToReview = null
             }
         )
     }
