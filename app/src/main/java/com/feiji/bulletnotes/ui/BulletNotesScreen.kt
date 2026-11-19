@@ -942,7 +942,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             initialDate = noteToChangeDate?.dateString
                 ?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: selectedDate,
             noteDates = noteDates,
-            showRelativeShortcuts = noteToChangeDate != null,
             onDatePicked = { pickedDate ->
                 val note = noteToChangeDate
 
@@ -1718,30 +1717,6 @@ fun BulletNoteRow(
         onContentChange(next)
     }
 
-    // 专用“换段”按钮：在当前选区/光标位置插入换行，并将光标移到新段落开头。
-    // 不再尝试检测软键盘回车键长按，因为多数输入法不会向应用提供完整的按下/抬起事件。
-    fun insertParagraphAtCursor() {
-        val selectionStart = minOf(editValue.selection.start, editValue.selection.end)
-            .coerceIn(0, editValue.text.length)
-        val selectionEnd = maxOf(editValue.selection.start, editValue.selection.end)
-            .coerceIn(0, editValue.text.length)
-        val updatedText = buildString {
-            append(editValue.text.substring(0, selectionStart))
-            append('\n')
-            append(editValue.text.substring(selectionEnd))
-        }
-        undoHistory.add(editValue.text)
-        if (undoHistory.size > 100) undoHistory.removeAt(0)
-        redoHistory.clear()
-        val cursorPosition = selectionStart + 1
-        editValue = editValue.copy(
-            text = updatedText,
-            selection = TextRange(cursorPosition),
-            composition = null
-        )
-        onContentChange(updatedText)
-    }
-
     // 编辑时请求焦点，并在键盘弹出后将整行移动到可视区域。
     LaunchedEffect(isEditing) {
         if (isEditing) {
@@ -2021,13 +1996,14 @@ fun BulletNoteRow(
                                 innerTextField()
                             }
 
-                            // 四个操作统一使用同一套矢量绘制与 IconButton 布局，
+                            // 操作图标统一使用同一套矢量绘制与 IconButton 布局，
                             // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // 撤销、恢复、换段放在左侧；收起按钮放在最右侧。
+                                // 撤销、恢复靠右排布，与最右侧的收起按钮之间空出一个按钮宽度（48.dp）。
                                 EditorActionButton(
                                     symbol = EditorActionSymbol.Undo,
                                     contentDescription = "撤销",
@@ -2042,13 +2018,7 @@ fun BulletNoteRow(
                                     tint = MaterialTheme.colorScheme.primary,
                                     onClick = { redoEdit() }
                                 )
-                                EditorActionButton(
-                                    symbol = EditorActionSymbol.Paragraph,
-                                    contentDescription = "换段",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    onClick = { insertParagraphAtCursor() }
-                                )
-                                Spacer(modifier = Modifier.weight(1f))
+                                Spacer(modifier = Modifier.width(48.dp))
                                 EditorActionButton(
                                     symbol = EditorActionSymbol.Collapse,
                                     contentDescription = "收起编辑",
@@ -2132,8 +2102,7 @@ private fun AddNoteHintRow(
 private enum class EditorActionSymbol {
     Collapse,
     Undo,
-    Redo,
-    Paragraph
+    Redo
 }
 
 @Composable
@@ -2202,15 +2171,6 @@ private fun EditorActionButton(
                     path.moveTo(point(14f, 1f).x, point(14f, 1f).y)
                     path.lineTo(point(18f, 5f).x, point(18f, 5f).y)
                     path.lineTo(point(14f, 9f).x, point(14f, 9f).y)
-                }
-
-                EditorActionSymbol.Paragraph -> {
-                    path.moveTo(point(17f, 5f).x, point(17f, 5f).y)
-                    path.lineTo(point(17f, 13f).x, point(17f, 13f).y)
-                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
-                    path.moveTo(point(10f, 9f).x, point(10f, 9f).y)
-                    path.lineTo(point(6f, 13f).x, point(6f, 13f).y)
-                    path.lineTo(point(10f, 17f).x, point(10f, 17f).y)
                 }
             }
 
