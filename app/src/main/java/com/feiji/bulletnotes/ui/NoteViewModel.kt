@@ -1,6 +1,7 @@
 package com.feiji.bulletnotes.ui
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,6 +13,8 @@ import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.LanServerService
 import com.feiji.bulletnotes.data.LanWebServer
 import com.feiji.bulletnotes.data.NoteEntity
+import com.feiji.bulletnotes.data.ReviewFamiliarity
+import com.feiji.bulletnotes.data.SpacedRepetitionEngine
 import com.feiji.bulletnotes.data.WebDavBackupManager
 import com.feiji.bulletnotes.data.WifiAutoSyncManager
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +37,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 class NoteViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        private const val PREFS_NAME = "feiji_bullet_notes_prefs"
+        private const val KEY_LAST_STAR_ROLLOVER_DATE = "star_rollover_date_v1"
+    }
 
     private val db = AppDatabase.getInstance(application)
     private val noteDao = db.noteDao()
@@ -124,6 +132,17 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val _userMessage = MutableStateFlow<String?>(null)
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
 
+    // 五角星知识卡片复习后的可撤销事件
+    data class StarReviewUndoEvent(
+        val eventId: Long,
+        val previousNote: NoteEntity,
+        val targetDateString: String,
+        val intervalDays: Int
+    )
+
+    private val _starReviewUndoEvent = MutableStateFlow<StarReviewUndoEvent?>(null)
+    val starReviewUndoEvent: StateFlow<StarReviewUndoEvent?> = _starReviewUndoEvent.asStateFlow()
+
     // 文件夹首次授权与备份列表
     private val _needsBackupSetup = MutableStateFlow(false)
     val needsBackupSetup: StateFlow<Boolean> = _needsBackupSetup.asStateFlow()
@@ -186,6 +205,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         isAppInForeground = isForeground
         updateWifiAutoSyncLifecycle()
         if (isForeground) {
+            refreshTodayOnForegroundIfNeeded()
+            rolloverOverdueStarNotesIfFirstOpenToday()
             startForegroundWebDavSyncLoop()
         } else {
             webDavForegroundSyncLoop?.cancel()
@@ -647,9 +668,105 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        rolloverOverdueStarNotesIfFirstOpenToday()
         if (BackupManager.hasBackupFolder(application)) startBackupLoop()
         else _needsBackupSetup.value = true
         startWebDavLoop()
+    }
+
+    /** 跨日从后台回到前台时刷新“今天”日期状态；若原本停留在今天则同步前进到新的一天。 */
+    private fun refreshTodayOnForegroundIfNeeded() {
+        val now = LocalDate.now()
+        if (_today.value != now) {
+            val wasViewingToday = _isToday.value
+            _today.value = now
+            if (wasViewingToday) {
+                _selectedDate.value = now
+                _isToday.value = true
+            } else {
+                _isToday.value = (_selectedDate.value == now)
+            }
+        }
+    }
+
+    /**
+     * 每天首次打开软件时检查：将早于今天的五角星笔记自动调整到今天，
+     * 并按原日期越早越靠前排在今天列表最前方，保留今天已有笔记的相对顺序。
+     */
+    private fun rolloverOverdueStarNotesIfFirstOpenToday() {
+        val app = getApplication<Application>()
+        val today = LocalDate.now()
+        val todayStr = today.format(dateFormatter)
+        val prefs = app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getString(KEY_LAST_STAR_ROLLOVER_DATE, null) == todayStr) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            var movedAny = false
+            contentWriteMutex.withLock {
+                if (prefs.getString(KEY_LAST_STAR_ROLLOVER_DATE, null) == todayStr) return@withLock
+
+                val overdueStars = noteDao.getOverdueNotesByType(BulletType.STAR, todayStr)
+                    .filter { note ->
+                        runCatching { LocalDate.parse(note.dateString).isBefore(today) }.getOrDefault(false)
+                    }
+
+                if (overdueStars.isNotEmpty()) {
+                    val todayNotes = noteDao.getActiveNotesByDateOnce(todayStr)
+                    val now = System.currentTimeMillis()
+                    val updates = ArrayList<NoteEntity>(overdueStars.size + todayNotes.size)
+
+                    overdueStars.forEachIndexed { index, note ->
+                        updates.add(
+                            note.copy(
+                                dateString = todayStr,
+                                orderIndex = index,
+                                updatedAt = now
+                            )
+                        )
+                    }
+
+                    val baseIndex = overdueStars.size
+                    todayNotes.forEachIndexed { offset, note ->
+                        val shiftedOrder = baseIndex + offset
+                        if (note.orderIndex != shiftedOrder) {
+                            updates.add(
+                                note.copy(
+                                    orderIndex = shiftedOrder,
+                                    updatedAt = now
+                                )
+                            )
+                        }
+                    }
+
+                    if (updates.isNotEmpty()) {
+                        noteDao.updateNotes(updates)
+                        movedAny = true
+                    }
+                }
+
+                prefs.edit().putString(KEY_LAST_STAR_ROLLOVER_DATE, todayStr).commit()
+            }
+
+            if (movedAny) {
+                if (activeSearchKeywords.isNotEmpty()) {
+                    val keywords = activeSearchKeywords
+                    val bulletTypes = activeSearchBulletTypes
+                    val allNotes = noteDao.getAllNotesForBackup()
+                    if (activeSearchKeywords == keywords && activeSearchBulletTypes == bulletTypes) {
+                        _searchResults.value = allNotes
+                            .asSequence()
+                            .filter { note ->
+                                !note.isDeleted &&
+                                    (bulletTypes == null || note.bulletType in bulletTypes) &&
+                                    keywords.all { word -> note.content.contains(word, ignoreCase = true) }
+                            }
+                            .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
+                            .toList()
+                    }
+                }
+                notifyLocalDataChangedForSync()
+            }
+        }
     }
 
     fun clearUserMessage() {
@@ -781,6 +898,88 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 _userMessage.value = "笔记已移动至 $newDateStr"
             }
             notifyLocalDataChangedForSync()
+        }
+    }
+
+    /**
+     * 长按五角星知识卡片后按熟悉度排期：
+     * 根据历史复习记录按记忆曲线推演下次复习日期，原子更新日期与复习状态，并发送可撤销提示事件。
+     */
+    fun reviewStarNote(note: NoteEntity, familiarity: ReviewFamiliarity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val pendingContentWrite = latestContentWriteJob
+            pendingContentWrite?.join()
+            var undoEvent: StarReviewUndoEvent? = null
+            contentWriteMutex.withLock {
+                val latest = noteDao.getNoteById(note.id) ?: note
+                if (latest.isDeleted) return@withLock
+                val today = LocalDate.now()
+                val schedule = SpacedRepetitionEngine.computeNextReview(latest, familiarity, today)
+                val targetDateStr = schedule.nextDate.format(dateFormatter)
+                val targetOrderIndex = if (targetDateStr != latest.dateString) {
+                    val targetDayNotes = noteDao.getNotesByDate(targetDateStr).first()
+                    (targetDayNotes.maxOfOrNull { it.orderIndex } ?: -1) + 1
+                } else {
+                    latest.orderIndex
+                }
+                val now = System.currentTimeMillis()
+                val updated = latest.copy(
+                    dateString = targetDateStr,
+                    orderIndex = targetOrderIndex,
+                    reviewCount = schedule.nextReviewCount,
+                    reviewIntervalDays = schedule.nextIntervalDays,
+                    easeFactor = schedule.nextEaseFactor,
+                    lastReviewedAt = now,
+                    updatedAt = now
+                )
+                noteDao.updateNote(updated)
+                _searchResults.value = _searchResults.value
+                    .map { if (it.id == updated.id) updated else it }
+                    .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
+                undoEvent = StarReviewUndoEvent(
+                    eventId = now,
+                    previousNote = latest,
+                    targetDateString = targetDateStr,
+                    intervalDays = schedule.nextIntervalDays
+                )
+            }
+            undoEvent?.let { event ->
+                _starReviewUndoEvent.value = event
+                notifyLocalDataChangedForSync()
+            }
+        }
+    }
+
+    /**
+     * 撤销刚刚执行的五角星知识卡片复习排期，恢复原日期、排序及历史记忆曲线字段。
+     */
+    fun undoStarReview(previousNote: NoteEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            contentWriteMutex.withLock {
+                val current = noteDao.getNoteById(previousNote.id) ?: return@withLock
+                if (current.isDeleted) return@withLock
+                val restored = current.copy(
+                    dateString = previousNote.dateString,
+                    orderIndex = previousNote.orderIndex,
+                    reviewCount = previousNote.reviewCount,
+                    reviewIntervalDays = previousNote.reviewIntervalDays,
+                    easeFactor = previousNote.easeFactor,
+                    lastReviewedAt = previousNote.lastReviewedAt,
+                    updatedAt = System.currentTimeMillis()
+                )
+                noteDao.updateNote(restored)
+                _searchResults.value = _searchResults.value
+                    .map { if (it.id == restored.id) restored else it }
+                    .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
+            }
+            _starReviewUndoEvent.value = null
+            notifyLocalDataChangedForSync()
+        }
+    }
+
+    fun clearStarReviewUndoEvent(eventId: Long) {
+        if (_starReviewUndoEvent.value?.eventId == eventId) {
+            _starReviewUndoEvent.value = null
         }
     }
 
