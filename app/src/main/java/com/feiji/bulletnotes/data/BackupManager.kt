@@ -273,7 +273,7 @@ object BackupManager {
     fun extractNotesFromPlainBackupJson(plainJson: String): List<NoteEntity>? {
         return try {
             val payloadElement = JsonParser.parseString(plainJson)
-            when {
+            val parsed = when {
                 payloadElement.isJsonArray -> {
                     val type = object : TypeToken<List<NoteEntity>>() {}.type
                     gson.fromJson<List<NoteEntity>>(payloadElement, type)
@@ -285,6 +285,7 @@ object BackupManager {
 
                 else -> null
             }
+            parsed?.map { SpacedRepetitionEngine.sanitizeNoteReviewFields(it) }
         } catch (_: Exception) {
             null
         }
@@ -466,7 +467,8 @@ object BackupManager {
             if (notes.any { it.dateString.isBlank() || it.id < 0 }) {
                 return@withContext RestoreResult.Failure("备份内容校验失败")
             }
-            noteDao.restoreAllFromBackup(notes)
+            val sanitizedNotes = notes.map { SpacedRepetitionEngine.sanitizeNoteReviewFields(it) }
+            noteDao.restoreAllFromBackup(sanitizedNotes)
 
             val hasSettings = restoredSettings != null
             if (restoredSettings != null) {
