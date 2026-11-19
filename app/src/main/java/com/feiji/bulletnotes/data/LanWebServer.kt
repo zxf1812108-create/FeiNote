@@ -457,7 +457,7 @@ object LanWebServer {
                 ?: LocalDate.now().toString()
             val existing = noteDao.getNotesByDate(dateStr).first()
             val nextOrder = (existing.maxOfOrNull { it.orderIndex } ?: 0) + 1
-            val bullet = if (content.contains('\n')) BulletType.STAR else BulletType.SQUARE
+            val bullet = BulletType.SQUARE
             val now = System.currentTimeMillis()
             val newNote = NoteEntity(
                 content = content,
@@ -489,19 +489,15 @@ object LanWebServer {
                     writeJson(sock, 404, mapOf("error" to "笔记不存在"))
                     return
                 }
-                if (note.bulletType != BulletType.STAR) {
-                    val nextType = if (note.bulletType == BulletType.BULLET_DOT) {
-                        BulletType.SQUARE
-                    } else {
-                        BulletType.BULLET_DOT
-                    }
-                    val updated = note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis())
-                    noteDao.updateNote(updated)
-                    scheduleLocalBackup(appContext, noteDao)
-                    writeJson(sock, 200, mapOf("ok" to true, "note" to updated))
-                } else {
-                    writeJson(sock, 200, mapOf("ok" to true, "note" to note))
+                val nextType = when (note.bulletType) {
+                    BulletType.SQUARE, BulletType.CHECKED -> BulletType.BULLET_DOT
+                    BulletType.BULLET_DOT -> BulletType.STAR
+                    BulletType.STAR -> BulletType.SQUARE
                 }
+                val updated = note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis())
+                noteDao.updateNote(updated)
+                scheduleLocalBackup(appContext, noteDao)
+                writeJson(sock, 200, mapOf("ok" to true, "note" to updated))
                 return
             }
 
@@ -521,19 +517,8 @@ object LanWebServer {
                     writeJson(sock, 409, mapOf("error" to "笔记已在手机端被更新", "note" to note))
                     return
                 }
-                val hasLineBreak = newContent.contains('\n')
-                val nextBullet = when {
-                    hasLineBreak && note.bulletType in setOf(
-                        BulletType.SQUARE,
-                        BulletType.CHECKED,
-                        BulletType.BULLET_DOT
-                    ) -> BulletType.STAR
-                    !hasLineBreak && note.bulletType == BulletType.STAR -> BulletType.BULLET_DOT
-                    else -> note.bulletType
-                }
                 val updated = note.copy(
                     content = newContent,
-                    bulletType = nextBullet,
                     updatedAt = System.currentTimeMillis()
                 )
                 noteDao.updateNote(updated)
