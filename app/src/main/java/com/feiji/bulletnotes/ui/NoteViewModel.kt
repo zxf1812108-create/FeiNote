@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.feiji.bulletnotes.data.AppDatabase
 import com.feiji.bulletnotes.data.BackupManager
 import com.feiji.bulletnotes.data.BulletType
+import com.feiji.bulletnotes.data.KeywordHintEngine
+import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.LanServerService
 import com.feiji.bulletnotes.data.LanWebServer
 import com.feiji.bulletnotes.data.NoteEntity
@@ -112,6 +114,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     // 回收站笔记列表
     val trashNotes: StateFlow<List<NoteEntity>> = noteDao.getDeletedNotes()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // 关键字即时提示索引：仅监听包含成对 @ 或 # 的未删除笔记，变更与同步后自动刷新。
+    val keywordHintIndex: StateFlow<KeywordHintIndex> = noteDao.getKeywordCandidateNotes()
+        .map { candidates -> KeywordHintEngine.buildIndex(candidates) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), KeywordHintIndex.EMPTY)
 
     // 提示信息 / Toast 弹窗
     private val _userMessage = MutableStateFlow<String?>(null)
@@ -716,6 +723,28 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 notifyLocalDataChangedForSync()
             }
+        }
+    }
+
+    /**
+     * 结束关键字提示卡片内某条关联笔记的原地编辑：
+     * 等待正文串行写入完成、清理空内容并触发备份与同步，不影响主编辑笔记的 editingNoteId。
+     */
+    fun finishInlineNoteEdit(noteId: Long) {
+        val pendingContentWrite = latestContentWriteJob
+        viewModelScope.launch(Dispatchers.IO) {
+            pendingContentWrite?.join()
+            val app = getApplication<Application>()
+            contentWriteMutex.withLock {
+                val edited = noteDao.getNoteById(noteId)
+                if (edited != null && !edited.isDeleted && edited.content.isBlank()) {
+                    noteDao.deletePermanently(noteId)
+                }
+                backupMutex.withLock {
+                    backupIfChangedLocked(app)
+                }
+            }
+            notifyLocalDataChangedForSync()
         }
     }
 
