@@ -61,7 +61,8 @@ object BackupManager {
         val webDavRemoteFolder: String? = null,
         val webDavUsername: String? = null,
         val webDavPassword: String? = null,
-        val backupEncryptionPassword: String? = null
+        val backupEncryptionPassword: String? = null,
+        val wifiAutoSyncEnabled: Boolean? = null
     )
 
     private data class BackupPayload(
@@ -190,10 +191,22 @@ object BackupManager {
                 webDavRemoteFolder = config.remoteFolder,
                 webDavUsername = config.username,
                 webDavPassword = config.password,
-                backupEncryptionPassword = config.encryptionPassword
+                backupEncryptionPassword = config.encryptionPassword,
+                wifiAutoSyncEnabled = config.wifiAutoSyncEnabled
             )
         )
         return gson.toJson(payload)
+    }
+
+    /** 生成标准备份字节（若已设置加密密码则自动加密，否则输出明文 JSON）。 */
+    suspend fun buildBackupBytes(context: Context, noteDao: NoteDao): ByteArray = withContext(Dispatchers.IO) {
+        val plainBytes = snapshotJson(context, noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+        val encryptionPassword = WebDavBackupManager.getEncryptionPassword(context)
+        if (encryptionPassword.isNotEmpty()) {
+            encryptBackupBytes(plainBytes, encryptionPassword)
+        } else {
+            plainBytes
+        }
     }
 
     suspend fun exportBackup(context: Context, noteDao: NoteDao): Boolean = withContext(Dispatchers.IO) {
@@ -207,13 +220,7 @@ object BackupManager {
                 DocumentsContract.createDocument(context.contentResolver, parent, "application/json", name)
                     ?: error("无法创建备份文件")
             }
-            val plainBytes = snapshotJson(context, noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
-            val encryptionPassword = WebDavBackupManager.getEncryptionPassword(context)
-            val bytes = if (encryptionPassword.isNotEmpty()) {
-                encryptBackupBytes(plainBytes, encryptionPassword)
-            } else {
-                plainBytes
-            }
+            val bytes = buildBackupBytes(context, noteDao)
             context.contentResolver.openOutputStream(destination, "rwt")?.use { output ->
                 output.write(bytes)
                 output.flush()
@@ -233,6 +240,53 @@ object BackupManager {
             element.isJsonObject && element.asJsonObject.get("feiji_encrypted")?.asBoolean == true
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /**
+     * 若字节内容为飞记加密格式则使用传入密码解密并返回明文 JSON；
+     * 若未加密则直接返回 UTF-8 文本；若加密但密码为空/错误或内容损坏则返回 null。
+     */
+    fun decryptBackupBytesIfNeeded(bytes: ByteArray, password: String?): String? {
+        return try {
+            val rawText = bytes.toString(Charsets.UTF_8)
+            val parsedRoot = JsonParser.parseString(rawText)
+            val isEncrypted = parsedRoot.isJsonObject &&
+                parsedRoot.asJsonObject.get("feiji_encrypted")?.asBoolean == true
+            if (!isEncrypted) {
+                rawText
+            } else {
+                if (password.isNullOrEmpty()) return null
+                val envelope = gson.fromJson(parsedRoot, EncryptedBackupEnvelope::class.java)
+                    ?: return null
+                if (envelope.salt.isBlank() || envelope.iv.isBlank() || envelope.data.isBlank()) {
+                    return null
+                }
+                decryptEnvelope(envelope, password)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 从明文备份 JSON（兼容 v1 数组与 v2 payload 对象）提取笔记列表，供每日备份防覆盖合并使用。 */
+    fun extractNotesFromPlainBackupJson(plainJson: String): List<NoteEntity>? {
+        return try {
+            val payloadElement = JsonParser.parseString(plainJson)
+            when {
+                payloadElement.isJsonArray -> {
+                    val type = object : TypeToken<List<NoteEntity>>() {}.type
+                    gson.fromJson<List<NoteEntity>>(payloadElement, type)
+                }
+
+                payloadElement.isJsonObject && payloadElement.asJsonObject.get("notes")?.isJsonArray == true -> {
+                    gson.fromJson(payloadElement, BackupPayload::class.java)?.notes
+                }
+
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -346,6 +400,21 @@ object BackupManager {
             val rawText = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
                 ?: return@withContext RestoreResult.Failure("无法读取备份文件")
 
+            restoreBackupFromText(context, noteDao, rawText, password)
+        } catch (e: Exception) {
+            Log.e("FeiJiBackup", "Restore failed", e)
+            RestoreResult.Failure("恢复失败：${e.localizedMessage ?: "未知错误"}")
+        }
+    }
+
+    /** 从备份 JSON 文本恢复（供本地 SAF 与局域网直连共用；自动识别加密外壳与新旧版本格式）。 */
+    suspend fun restoreBackupFromText(
+        context: Context,
+        noteDao: NoteDao,
+        rawText: String,
+        password: String? = null
+    ): RestoreResult = withContext(Dispatchers.IO) {
+        try {
             val parsedRoot = JsonParser.parseString(rawText)
             val isEncrypted = parsedRoot.isJsonObject &&
                 parsedRoot.asJsonObject.get("feiji_encrypted")?.asBoolean == true
@@ -401,6 +470,7 @@ object BackupManager {
 
             val hasSettings = restoredSettings != null
             if (restoredSettings != null) {
+                val restoredEncPwd = restoredSettings.backupEncryptionPassword ?: ""
                 WebDavBackupManager.restoreConfig(
                     context = context,
                     config = WebDavBackupManager.WebDavConfig(
@@ -408,7 +478,8 @@ object BackupManager {
                         remoteFolder = restoredSettings.webDavRemoteFolder ?: WebDavBackupManager.DEFAULT_REMOTE_FOLDER,
                         username = restoredSettings.webDavUsername ?: "",
                         password = restoredSettings.webDavPassword ?: "",
-                        encryptionPassword = restoredSettings.backupEncryptionPassword ?: ""
+                        encryptionPassword = restoredEncPwd,
+                        wifiAutoSyncEnabled = (restoredSettings.wifiAutoSyncEnabled == true) && restoredEncPwd.isNotEmpty()
                     )
                 )
             }
@@ -421,7 +492,7 @@ object BackupManager {
             }
             RestoreResult.Success(notes.size, msg)
         } catch (e: Exception) {
-            Log.e("FeiJiBackup", "Restore failed", e)
+            Log.e("FeiJiBackup", "Restore from text failed", e)
             RestoreResult.Failure("恢复失败：${e.localizedMessage ?: "未知错误"}")
         }
     }
