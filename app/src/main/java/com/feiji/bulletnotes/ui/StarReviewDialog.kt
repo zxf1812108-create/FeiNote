@@ -26,13 +26,11 @@ import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.data.ReviewFamiliarity
 import com.feiji.bulletnotes.data.SpacedRepetitionEngine
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 /**
  * 长按五角星知识卡片时弹出的极简熟悉度选择窗：
  * - 展示当前复习进度摘要；
- * - 提供“陌生 / 大概了解 / 很熟悉”三档选项并实时预览下次复习间隔与日期，点选即刻生效。
+ * - 提供“陌生 / 大概了解 / 很熟悉”三档选项并实时预览下次复习间隔天数，点选即刻生效。
  */
 @Composable
 fun StarReviewDialog(
@@ -41,8 +39,6 @@ fun StarReviewDialog(
     onDismiss: () -> Unit
 ) {
     val today = remember(note.id) { LocalDate.now() }
-    val sameYearFormatter = remember { DateTimeFormatter.ofPattern("MM-dd", Locale.CHINA) }
-    val crossYearFormatter = remember { DateTimeFormatter.ofPattern("yy-MM-dd", Locale.CHINA) }
 
     val options = remember(note.id, note.reviewCount, note.reviewIntervalDays, note.easeFactor, today) {
         ReviewFamiliarity.entries.map { familiarity ->
@@ -67,20 +63,20 @@ fun StarReviewDialog(
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
-                .width(286.dp)
+                .width(248.dp)
                 .border(
                     width = 1.dp,
                     color = borderColor,
-                    shape = RoundedCornerShape(18.dp)
+                    shape = RoundedCornerShape(16.dp)
                 ),
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.background,
             tonalElevation = 0.dp
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 18.dp)
+                    .padding(horizontal = 16.dp, vertical = 16.dp)
             ) {
                 Text(
                     text = "复习熟悉度",
@@ -95,24 +91,19 @@ fun StarReviewDialog(
                     color = mutedTextColor
                 )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     options.forEach { (familiarity, schedule) ->
-                        val dateLabel = if (schedule.nextDate.year == today.year) {
-                            schedule.nextDate.format(sameYearFormatter)
-                        } else {
-                            schedule.nextDate.format(crossYearFormatter)
-                        }
-                        val previewText = "+${schedule.nextIntervalDays}天 · $dateLabel"
+                        val previewText = "+${schedule.nextIntervalDays}天"
 
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(46.dp)
+                                .height(44.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .border(
                                     width = 1.dp,
