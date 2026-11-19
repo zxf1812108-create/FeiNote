@@ -1,7 +1,16 @@
 package com.feiji.bulletnotes.ui
 
-import android.widget.Toast
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -13,6 +22,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -149,13 +159,21 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var hoveringTrash by remember { mutableStateOf(false) }
     var showBackupPicker by remember { mutableStateOf(false) }
     var showWebDavSettings by remember { mutableStateOf(false) }
+    var showLanServerDialog by remember { mutableStateOf(false) }
     var backupToRestore by remember {
         mutableStateOf<com.feiji.bulletnotes.data.BackupManager.BackupFile?>(null)
     }
     val backupFiles by viewModel.backupFiles.collectAsState()
     val webDavConfig by viewModel.webDavConfig.collectAsState()
     val showWebDavAlert by viewModel.showWebDavAlert.collectAsState()
+    val lanServerState by viewModel.lanServerState.collectAsState()
     val pendingEncryptedRestore by viewModel.pendingEncryptedRestore.collectAsState()
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // 无论是否授予通知权限，都启动局域网直连服务（授予时通知栏会显示停止按钮）
+        viewModel.startLanServer()
+    }
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
     // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
@@ -959,18 +977,49 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // “备份设置”入口（点击打开备份设置窗体）
+                    // 左侧入口：「电脑直连」+「备份设置」
+                    TextButton(
+                        onClick = {
+                            showBackupPicker = false
+                            showLanServerDialog = true
+                        },
+                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (lanServerState.running) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF2E7D32))
+                                )
+                            }
+                            Text(
+                                text = "电脑直连",
+                                maxLines = 1,
+                                softWrap = false,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
                     TextButton(
                         onClick = {
                             showBackupPicker = false
                             showWebDavSettings = true
                         },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
                     ) {
                         Text(
                             text = "备份设置",
                             maxLines = 1,
                             softWrap = false,
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
@@ -981,18 +1030,209 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         onClick = {
                             showBackupPicker = false
                         },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
                     ) {
-                        Text("取消", maxLines = 1, softWrap = false)
+                        Text(
+                            text = "取消",
+                            maxLines = 1,
+                            softWrap = false,
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
                     TextButton(
                         onClick = {
                             viewModel.loadBackupFiles()
                         },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
                     ) {
-                        Text("刷新", maxLines = 1, softWrap = false)
+                        Text(
+                            text = "刷新",
+                            maxLines = 1,
+                            softWrap = false,
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
+                }
+            }
+        )
+    }
+
+    // 局域网电脑/安卓设备直连控制弹窗
+    if (showLanServerDialog) {
+        val formattedPin = if (lanServerState.pin.length == 6) {
+            lanServerState.pin.substring(0, 3) + " " + lanServerState.pin.substring(3)
+        } else {
+            lanServerState.pin
+        }
+
+        AlertDialog(
+            onDismissRequest = {
+                showLanServerDialog = false
+            },
+            title = {
+                Text(
+                    text = "局域网电脑直连",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (!lanServerState.running) {
+                        Text(
+                            text = "开启后，同一 Wi-Fi 或热点下的电脑、平板或其他手机，可直接用浏览器读写本机笔记。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "· 锁屏或切到后台仍保持连接，通知栏可随时停止\n· 每次随机生成 6 位配对码，无操作 30 分钟自动关闭",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                        lanServerState.errorMessage?.let { err ->
+                            Text(
+                                text = err,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "在同局域网浏览器中打开：",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                        val displayUrls = if (lanServerState.urls.isNotEmpty()) {
+                            lanServerState.urls
+                        } else {
+                            listOf("http://127.0.0.1:${lanServerState.port}")
+                        }
+                        displayUrls.forEach { url ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = url,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = {
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        cm?.setPrimaryClip(ClipData.newPlainText("FeiNote LAN URL", url))
+                                        Toast.makeText(context, "已复制访问地址", Toast.LENGTH_SHORT).show()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text("复制", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                        }
+                        if (lanServerState.urls.isEmpty()) {
+                            Text(
+                                text = "未检测到 Wi-Fi/热点局域网 IP，请连接 Wi-Fi 或开启热点（也支持 USB 线 adb forward 访问本机地址）。",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "配对码",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                                Text(
+                                    text = formattedPin,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    viewModel.refreshLanPin()
+                                    Toast.makeText(context, "配对码已刷新，旧连接已断开", Toast.LENGTH_SHORT).show()
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text("换一个", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+
+                        val statusDetail = buildString {
+                            if (lanServerState.activeSessions > 0 && !lanServerState.lastClientIp.isNullOrBlank()) {
+                                append("已连接（${lanServerState.activeSessions} 台设备，最近：${lanServerState.lastClientIp}）")
+                            } else {
+                                append("等待浏览器连接")
+                            }
+                            append("\n锁屏切后台持续运行 · 无操作 30 分钟自动关闭")
+                        }
+                        Text(
+                            text = statusDetail,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (!lanServerState.running) {
+                    TextButton(
+                        onClick = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                viewModel.startLanServer()
+                            }
+                        }
+                    ) {
+                        Text("开启直连")
+                    }
+                } else {
+                    TextButton(
+                        onClick = {
+                            viewModel.stopLanServer()
+                        }
+                    ) {
+                        Text("停止直连", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showLanServerDialog = false
+                    }
+                ) {
+                    Text(if (lanServerState.running) "后台保持" else "关闭")
                 }
             }
         )
