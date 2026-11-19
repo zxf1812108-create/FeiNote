@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>飞记 · 局域网直连</title>
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --card: #ffffff;
+    --text: #1c1c1a;
+    --muted: #6f6f6a;
+    --border: rgba(28, 28, 26, 0.12);
+    --border-strong: rgba(28, 28, 26, 0.28);
+    --hover: rgba(28, 28, 26, 0.05);
+    --danger: #b42318;
+    --ok: #1f6f43;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413;
+      --card: #1d1d1b;
+      --text: #ecece8;
+      --muted: #9a9a94;
+      --border: rgba(236, 236, 232, 0.14);
+      --border-strong: rgba(236, 236, 232, 0.3);
+      --hover: rgba(236, 236, 232, 0.06);
+      --danger: #f97066;
+      --ok: #5ec289;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea, select {
+    font: inherit;
+    color: inherit;
+  }
+  button {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 8px;
+    padding: 6px 12px;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  }
+  button:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--border-strong);
+  }
+  button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  button.primary {
+    background: var(--text);
+    color: var(--card);
+    border-color: var(--text);
+  }
+  button.primary:hover:not(:disabled) {
+    opacity: 0.88;
+    background: var(--text);
+  }
+  button.ghost {
+    border-color: transparent;
+    background: transparent;
+  }
+  button.ghost:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: transparent;
+  }
+  button.danger {
+    color: var(--danger);
+    border-color: transparent;
+    background: transparent;
+  }
+  button.danger:hover:not(:disabled) {
+    background: rgba(180, 35, 24, 0.08);
+  }
+
+  /* Auth screen */
+  .auth-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .auth-card {
+    width: 100%;
+    max-width: 360px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px 24px;
+  }
+  .auth-title {
+    margin: 0 0 6px;
+    font-size: 19px;
+    font-weight: 700;
+  }
+  .auth-sub {
+    margin: 0 0 20px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .pin-input {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 22px;
+    letter-spacing: 6px;
+    text-align: center;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background: var(--bg);
+    outline: none;
+  }
+  .pin-input:focus {
+    border-color: var(--text);
+  }
+  .auth-error {
+    min-height: 20px;
+    margin: 10px 0 12px;
+    color: var(--danger);
+    font-size: 13px;
+    text-align: center;
+  }
+
+  /* Main layout */
+  .app {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 16px 16px 64px;
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
+    padding: 8px 0 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .topbar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .brand {
+    font-weight: 700;
+    font-size: 17px;
+    margin-right: 4px;
+  }
+  .date-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .date-picker {
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 8px;
+    padding: 5px 10px;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .weekday {
+    font-size: 13px;
+    color: var(--muted);
+    min-width: 24px;
+  }
+  .spacer { flex: 1; }
+  .status-pill {
+    font-size: 12px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+  .status-dot.offline { background: var(--danger); }
+
+  .search-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .search-input {
+    flex: 1;
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 8px;
+    padding: 7px 12px;
+    outline: none;
+    font-size: 14px;
+  }
+  .search-input:focus {
+    border-color: var(--border-strong);
+  }
+  .filter-select {
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: 8px;
+    padding: 7px 8px;
+    font-size: 13px;
+  }
+
+  /* Notes list */
+  .notes-card {
+    margin-top: 14px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .note-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .note-row:last-child { border-bottom: none; }
+  .bullet-btn {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    margin-top: -1px;
+  }
+  .bullet-btn:hover { background: var(--hover); }
+  .bullet-btn.star { cursor: default; }
+  .note-main {
+    flex: 1;
+    min-width: 0;
+  }
+  .note-meta {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .note-date-link {
+    color: var(--muted);
+    text-decoration: underline;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    padding: 0;
+    font-size: 12px;
+  }
+  .note-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    cursor: text;
+    padding: 2px 4px;
+    border-radius: 6px;
+  }
+  .note-content:hover { background: var(--hover); }
+  .note-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.7;
+  }
+  .note-row:hover .note-actions { opacity: 1; }
+  .icon-btn {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .editor-box {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .editor-textarea {
+    width: 100%;
+    min-height: 74px;
+    resize: vertical;
+    border: 1px solid var(--border-strong);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 10px 12px;
+    outline: none;
+    line-height: 1.6;
+  }
+  .editor-textarea:focus { border-color: var(--text); }
+  .editor-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  /* Quick composer */
+  .composer {
+    margin-top: 14px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .composer textarea {
+    width: 100%;
+    min-height: 80px;
+    resize: vertical;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 10px 12px;
+    outline: none;
+    line-height: 1.6;
+  }
+  .composer textarea:focus { border-color: var(--border-strong); }
+
+  .empty {
+    padding: 36px 16px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    background: var(--text);
+    color: var(--card);
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    z-index: 50;
+  }
+  .toast.show { opacity: 0.94; }
+
+  .hidden { display: none !important; }
+
+  @media (max-width: 600px) {
+    .app { padding: 10px 10px 56px; }
+    .note-row { padding: 10px; }
+    .note-actions { opacity: 1; }
+    .date-picker { padding: 5px 6px; font-size: 13px; }
+    button { padding: 6px 9px; font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Auth view -->
+<div id="authView" class="auth-wrap hidden">
+  <form id="authForm" class="auth-card">
+    <h1 class="auth-title">飞记 · 局域网直连</h1>
+    <p class="auth-sub">请输入手机「电脑直连」窗口上显示的 6 位配对码</p>
+    <input id="pinInput" class="pin-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" required>
+    <div id="authError" class="auth-error"></div>
+    <button id="authSubmit" class="primary" type="submit" style="width:100%;padding:10px 0;">连接</button>
+  </form>
+</div>
+
+<!-- Main app view -->
+<div id="appView" class="app hidden">
+  <header class="topbar">
+    <div class="topbar-row">
+      <span class="brand">飞记</span>
+      <div class="date-nav">
+        <button id="prevDayBtn" title="前一天">‹</button>
+        <input id="datePicker" class="date-picker" type="date">
+        <span id="weekdayLabel" class="weekday"></span>
+        <button id="nextDayBtn" title="后一天">›</button>
+        <button id="todayBtn">今天</button>
+      </div>
+      <div class="spacer"></div>
+      <span class="status-pill">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="statusText">已连接</span>
+      </span>
+      <button id="refreshBtn" class="ghost" title="刷新">刷新</button>
+      <button id="logoutBtn" class="ghost" title="断开">断开</button>
+    </div>
+    <div class="search-row">
+      <input id="searchInput" class="search-input" type="search" placeholder="搜索全部笔记（空格分隔多关键词）...">
+      <select id="bulletFilter" class="filter-select" title="按符号筛选">
+        <option value="">全部符号</option>
+        <option value="SQUARE">□ 方框</option>
+        <option value="BULLET_DOT">• 圆点</option>
+        <option value="STAR">★ 五角星</option>
+      </select>
+      <button id="clearSearchBtn" class="ghost hidden">退出搜索</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="notesCard" class="notes-card"></div>
+
+    <section id="composerSection" class="composer">
+      <textarea id="newNoteInput" placeholder="在此输入新笔记（换行自动转为 ★ 五角星，Ctrl+Enter 快速添加）..."></textarea>
+      <div class="editor-bar">
+        <span class="hint">单行默认 □，多行自动 ★；添加后手机端实时同步</span>
+        <div class="spacer"></div>
+        <button id="addNoteBtn" class="primary">添加笔记</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(function () {
+  const authView = document.getElementById('authView');
+  const appView = document.getElementById('appView');
+  const authForm = document.getElementById('authForm');
+  const pinInput = document.getElementById('pinInput');
+  const authError = document.getElementById('authError');
+  const authSubmit = document.getElementById('authSubmit');
+
+  const datePicker = document.getElementById('datePicker');
+  const weekdayLabel = document.getElementById('weekdayLabel');
+  const prevDayBtn = document.getElementById('prevDayBtn');
+  const nextDayBtn = document.getElementById('nextDayBtn');
+  const todayBtn = document.getElementById('todayBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+
+  const searchInput = document.getElementById('searchInput');
+  const bulletFilter = document.getElementById('bulletFilter');
+  const clearSearchBtn = document.getElementById('clearSearchBtn');
+
+  const notesCard = document.getElementById('notesCard');
+  const composerSection = document.getElementById('composerSection');
+  const newNoteInput = document.getElementById('newNoteInput');
+  const addNoteBtn = document.getElementById('addNoteBtn');
+  const toastEl = document.getElementById('toast');
+
+  const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
+
+  let csrfToken = '';
+  let selectedDate = formatLocalDate(new Date());
+  let notes = [];
+  let editingId = null;
+  let editingDraft = '';
+  let searchMode = false;
+  let searchTimer = null;
+  let pollTimer = null;
+  let toastTimer = null;
+
+  function formatLocalDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  function shiftDate(dateStr, deltaDays) {
+    const parts = dateStr.split('-').map(Number);
+    const d = new Date(parts[0], parts[1] - 1, parts[2] + deltaDays);
+    return formatLocalDate(d);
+  }
+
+  function updateDateHeader() {
+    datePicker.value = selectedDate;
+    const parts = selectedDate.split('-').map(Number);
+    const d = new Date(parts[0], parts[1] - 1, parts[2]);
+    weekdayLabel.textContent = '周' + WEEKDAYS[d.getDay()];
+  }
+
+  function showToast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
+  }
+
+  function setOnlineStatus(online, label) {
+    statusDot.classList.toggle('offline', !online);
+    statusText.textContent = label || (online ? '已连接' : '连接断开');
+  }
+
+  function bulletSvg(type) {
+    if (type === 'STAR') {
+      return '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.3l-5.9 3.2 1.2-6.5-4.8-4.6 6.6-.9z"/></svg>';
+    }
+    if (type === 'BULLET_DOT') {
+      return '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4.5"/></svg>';
+    }
+    if (type === 'CHECKED') {
+      return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 12 10 17 19 7"/></svg>';
+    }
+    return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2.5"/></svg>';
+  }
+
+  async function apiFetch(url, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    if (options.method && options.method !== 'GET') {
+      headers['Content-Type'] = 'application/json; charset=utf-8';
+      if (csrfToken) headers['X-FeiNote-Token'] = csrfToken;
+    }
+    const res = await fetch(url, Object.assign({}, options, {
+      headers,
+      credentials: 'same-origin'
+    }));
+    if (res.status === 401) {
+      showAuth('会话已失效，请重新输入配对码');
+      throw new Error('UNAUTHORIZED');
+    }
+    return res;
+  }
+
+  function showAuth(errorMsg) {
+    stopPolling();
+    csrfToken = '';
+    appView.classList.add('hidden');
+    authView.classList.remove('hidden');
+    authError.textContent = errorMsg || '';
+    pinInput.value = '';
+    pinInput.focus();
+  }
+
+  function showApp() {
+    authView.classList.add('hidden');
+    appView.classList.remove('hidden');
+    updateDateHeader();
+    loadNotes(false);
+    startPolling();
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(() => {
+      if (editingId === null && !document.hidden) {
+        loadNotes(true);
+      }
+    }, 4000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function checkSession() {
+    try {
+      const res = await fetch('/api/session', { credentials: 'same-origin' });
+      const data = await res.json();
+      if (data && data.authenticated && data.csrfToken) {
+        csrfToken = data.csrfToken;
+        showApp();
+      } else {
+        showAuth('');
+      }
+    } catch (_) {
+      showAuth('无法连接到手机服务');
+    }
+  }
+
+  async function loadNotes(isPoll) {
+    const q = searchInput.value.trim();
+    const bullet = bulletFilter.value;
+    searchMode = q.length > 0;
+    clearSearchBtn.classList.toggle('hidden', !searchMode);
+    composerSection.classList.toggle('hidden', searchMode);
+
+    let url = searchMode
+      ? `/api/search?q=${encodeURIComponent(q)}&bullet=${encodeURIComponent(bullet)}`
+      : `/api/notes?date=${encodeURIComponent(selectedDate)}`;
+    if (isPoll) url += '&poll=1';
+
+    try {
+      const res = await apiFetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      notes = Array.isArray(data.notes) ? data.notes : [];
+      setOnlineStatus(true, '已连接');
+      if (editingId === null) {
+        renderNotes();
+      }
+    } catch (e) {
+      if (e.message !== 'UNAUTHORIZED') {
+        setOnlineStatus(false, '连接中断');
+      }
+    }
+  }
+
+  function renderNotes() {
+    notesCard.innerHTML = '';
+    if (notes.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = searchMode ? '没有找到匹配的笔记' : '这一天还没有笔记，可以在下方直接输入';
+      notesCard.appendChild(empty);
+      return;
+    }
+
+    notes.forEach(note => {
+      const row = document.createElement('div');
+      row.className = 'note-row';
+
+      const bulletBtn = document.createElement('button');
+      bulletBtn.className = 'bullet-btn' + (note.bulletType === 'STAR' ? ' star' : '');
+      bulletBtn.innerHTML = bulletSvg(note.bulletType);
+      bulletBtn.title = note.bulletType === 'STAR' ? '多行笔记自动标记为五角星' : '点击切换方框/圆点';
+      bulletBtn.addEventListener('click', () => {
+        if (note.bulletType !== 'STAR') cycleBullet(note);
+      });
+
+      const main = document.createElement('div');
+      main.className = 'note-main';
+
+      if (searchMode) {
+        const meta = document.createElement('div');
+        meta.className = 'note-meta';
+        const dateLink = document.createElement('button');
+        dateLink.className = 'note-date-link';
+        dateLink.textContent = note.dateString;
+        dateLink.addEventListener('click', () => {
+          selectedDate = note.dateString;
+          searchInput.value = '';
+          bulletFilter.value = '';
+          editingId = null;
+          updateDateHeader();
+          loadNotes(false);
+        });
+        meta.appendChild(dateLink);
+        main.appendChild(meta);
+      }
+
+      if (editingId === note.id) {
+        const box = document.createElement('div');
+        box.className = 'editor-box';
+
+        const ta = document.createElement('textarea');
+        ta.className = 'editor-textarea';
+        ta.value = editingDraft;
+        ta.addEventListener('input', () => { editingDraft = ta.value; });
+        ta.addEventListener('keydown', (ev) => {
+          if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+            ev.preventDefault();
+            saveEdit(note, ta.value);
+          } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            editingId = null;
+            renderNotes();
+          }
+        });
+
+        const bar = document.createElement('div');
+        bar.className = 'editor-bar';
+
+        const hint = document.createElement('span');
+        hint.className = 'hint';
+        hint.textContent = 'Ctrl+Enter 保存，Esc 取消';
+
+        const sp = document.createElement('div');
+        sp.className = 'spacer';
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'danger';
+        delBtn.textContent = '移入回收站';
+        delBtn.addEventListener('click', () => deleteNote(note));
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', () => {
+          editingId = null;
+          renderNotes();
+        });
+
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'primary';
+        saveBtn.textContent = '保存';
+        saveBtn.addEventListener('click', () => saveEdit(note, ta.value));
+
+        bar.append(hint, sp, delBtn, cancelBtn, saveBtn);
+        box.append(ta, bar);
+        main.appendChild(box);
+        setTimeout(() => {
+          ta.focus();
+          ta.selectionStart = ta.selectionEnd = ta.value.length;
+        }, 0);
+      } else {
+        const content = document.createElement('div');
+        content.className = 'note-content';
+        content.textContent = note.content;
+        content.title = '点击编辑';
+        content.addEventListener('click', () => {
+          editingId = note.id;
+          editingDraft = note.content;
+          renderNotes();
+        });
+        main.appendChild(content);
+      }
+
+      row.append(bulletBtn, main);
+
+      if (editingId !== note.id) {
+        const actions = document.createElement('div');
+        actions.className = 'note-actions';
+
+        const editBtn = document.createElement('button');
+        editBtn.className = 'ghost icon-btn';
+        editBtn.textContent = '编辑';
+        editBtn.addEventListener('click', () => {
+          editingId = note.id;
+          editingDraft = note.content;
+          renderNotes();
+        });
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'danger icon-btn';
+        delBtn.textContent = '删除';
+        delBtn.addEventListener('click', () => deleteNote(note));
+
+        actions.append(editBtn, delBtn);
+        row.appendChild(actions);
+      }
+
+      notesCard.appendChild(row);
+    });
+  }
+
+  async function addNote() {
+    const content = newNoteInput.value;
+    if (!content.trim()) {
+      showToast('请输入笔记内容');
+      return;
+    }
+    addNoteBtn.disabled = true;
+    try {
+      const res = await apiFetch('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ dateString: selectedDate, content })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || '添加失败');
+        return;
+      }
+      newNoteInput.value = '';
+      showToast('已同步到手机');
+      await loadNotes(false);
+      newNoteInput.focus();
+    } catch (e) {
+      if (e.message !== 'UNAUTHORIZED') showToast('网络异常，添加失败');
+    } finally {
+      addNoteBtn.disabled = false;
+    }
+  }
+
+  async function saveEdit(note, newContent) {
+    if (!newContent.trim()) {
+      showToast('内容不能为空，如需移除请点「移入回收站」');
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/notes/${note.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          content: newContent,
+          expectedUpdatedAt: note.updatedAt
+        })
+      });
+      if (res.status === 409) {
+        showToast('手机端刚修改过此笔记，已为你刷新最新内容');
+        editingId = null;
+        await loadNotes(false);
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || '保存失败');
+        return;
+      }
+      editingId = null;
+      showToast('已保存');
+      await loadNotes(false);
+    } catch (e) {
+      if (e.message !== 'UNAUTHORIZED') showToast('网络异常，保存失败');
+    }
+  }
+
+  async function cycleBullet(note) {
+    try {
+      const res = await apiFetch(`/api/notes/${note.id}/cycle`, { method: 'POST', body: '{}' });
+      if (res.ok) await loadNotes(false);
+    } catch (e) {
+      if (e.message !== 'UNAUTHORIZED') showToast('切换失败');
+    }
+  }
+
+  async function deleteNote(note) {
+    if (!confirm('确定将这条笔记移入回收站吗？')) return;
+    try {
+      const res = await apiFetch(`/api/notes/${note.id}`, { method: 'DELETE' });
+      if (res.ok) {
+        if (editingId === note.id) editingId = null;
+        showToast('已移入回收站');
+        await loadNotes(false);
+      }
+    } catch (e) {
+      if (e.message !== 'UNAUTHORIZED') showToast('删除失败');
+    }
+  }
+
+  authForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const pin = pinInput.value.trim();
+    if (!pin) return;
+    authSubmit.disabled = true;
+    authError.textContent = '';
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ pin })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok && data.csrfToken) {
+        csrfToken = data.csrfToken;
+        showApp();
+      } else {
+        authError.textContent = data.error || '配对码错误';
+        pinInput.select();
+      }
+    } catch (_) {
+      authError.textContent = '无法连接到手机，请确认同一局域网';
+    } finally {
+      authSubmit.disabled = false;
+    }
+  });
+
+  prevDayBtn.addEventListener('click', () => {
+    editingId = null;
+    selectedDate = shiftDate(selectedDate, -1);
+    updateDateHeader();
+    loadNotes(false);
+  });
+
+  nextDayBtn.addEventListener('click', () => {
+    editingId = null;
+    selectedDate = shiftDate(selectedDate, 1);
+    updateDateHeader();
+    loadNotes(false);
+  });
+
+  todayBtn.addEventListener('click', () => {
+    editingId = null;
+    selectedDate = formatLocalDate(new Date());
+    updateDateHeader();
+    loadNotes(false);
+  });
+
+  datePicker.addEventListener('change', () => {
+    if (datePicker.value) {
+      editingId = null;
+      selectedDate = datePicker.value;
+      updateDateHeader();
+      loadNotes(false);
+    }
+  });
+
+  refreshBtn.addEventListener('click', () => {
+    editingId = null;
+    loadNotes(false);
+    showToast('已刷新');
+  });
+
+  logoutBtn.addEventListener('click', async () => {
+    try {
+      await apiFetch('/api/logout', { method: 'POST', body: '{}' });
+    } catch (_) {}
+    showAuth('');
+  });
+
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      editingId = null;
+      loadNotes(false);
+    }, 220);
+  });
+
+  bulletFilter.addEventListener('change', () => {
+    if (searchInput.value.trim()) {
+      editingId = null;
+      loadNotes(false);
+    }
+  });
+
+  clearSearchBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    bulletFilter.value = '';
+    editingId = null;
+    loadNotes(false);
+  });
+
+  addNoteBtn.addEventListener('click', addNote);
+  newNoteInput.addEventListener('keydown', (ev) => {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+      ev.preventDefault();
+      addNote();
+    }
+  });
+
+  checkSession();
+})();
+</script>
+</body>
+</html>
