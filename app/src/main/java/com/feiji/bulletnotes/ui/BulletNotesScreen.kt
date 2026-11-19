@@ -1063,11 +1063,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 viewModel.reviewStarNote(targetNote, familiarity)
                 noteToReview = null
             },
-            onPickCustomDate = {
-                noteToChangeDate = targetNote
-                noteToReview = null
-                showDatePicker = true
-            },
             onDismiss = {
                 noteToReview = null
             }
