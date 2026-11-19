@@ -1748,7 +1748,6 @@ fun BulletNoteRow(
 
     // 关键字即时提示卡片状态（仅绑定到当前笔记的本次编辑会话）
     var activeHintKeyword by remember(note.id, isEditing) { mutableStateOf<String?>(null) }
-    var activeHintDisplayKeyword by remember(note.id, isEditing) { mutableStateOf("") }
     var hintPageIndex by remember(note.id, isEditing) { mutableStateOf(0) }
     var expandedHintNoteId by remember(note.id, isEditing) { mutableStateOf<Long?>(null) }
     var editingHintNoteId by remember(note.id, isEditing) { mutableStateOf<Long?>(null) }
@@ -1803,7 +1802,6 @@ fun BulletNoteRow(
             if (activeHintKeyword != match.normalizedKeyword) {
                 finishHintCardEditing(restoreMainFocus = false)
                 activeHintKeyword = match.normalizedKeyword
-                activeHintDisplayKeyword = match.displayKeyword
                 hintPageIndex = 0
                 expandedHintNoteId = null
             }
@@ -2127,11 +2125,9 @@ fun BulletNoteRow(
         if (isEditing && activeHintKeyword != null && displayedHintNotes.isNotEmpty()) {
             val safePageIndex = hintPageIndex.coerceIn(0, displayedHintNotes.lastIndex)
             val currentHintNote = displayedHintNotes[safePageIndex]
-            val displayKeyword = liveHintEntry?.displayKeyword ?: activeHintDisplayKeyword
 
             Spacer(modifier = Modifier.height(4.dp))
             KeywordHintCard(
-                displayKeyword = displayKeyword,
                 hintNote = currentHintNote,
                 pageIndex = safePageIndex,
                 totalPages = displayedHintNotes.size,
@@ -2252,7 +2248,6 @@ private fun NoteBulletGlyph(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun KeywordHintCard(
-    displayKeyword: String,
     hintNote: NoteEntity,
     pageIndex: Int,
     totalPages: Int,
@@ -2376,21 +2371,25 @@ private fun KeywordHintCard(
                     Modifier
                 }
             )
-            .padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 8.dp)
+            .padding(top = 4.dp, bottom = 8.dp)
     ) {
-        // 卡片顶栏：关键字 + 笔记日期 + 多条翻页符号（仅 >1 条显示）+ 关闭按钮
+        // 卡片顶栏：“提示” + 淡化日期 + 多条翻页符号（仅 >1 条显示）+ 关闭按钮
+        // 右侧留 10.dp 内边距 + 28.dp 关闭热区，使 × 中心位于卡片右边距 24.dp 处，
+        // 与下方原地编辑栏（48.dp IconButton，中心距右边 24.dp）及上方主编辑栏收起符号完全垂直对齐。
+        val headerMutedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "提示 · $displayKeyword",
+                text = "提示",
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                softWrap = false,
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-                modifier = Modifier.weight(1f, fill = false)
+                color = headerMutedColor
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
@@ -2398,7 +2397,7 @@ private fun KeywordHintCard(
                 maxLines = 1,
                 softWrap = false,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = headerMutedColor
             )
             Spacer(modifier = Modifier.weight(1f))
 
@@ -2413,7 +2412,7 @@ private fun KeywordHintCard(
                     Text(
                         text = "‹",
                         style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                        color = headerMutedColor
                     )
                 }
                 Text(
@@ -2421,7 +2420,7 @@ private fun KeywordHintCard(
                     maxLines = 1,
                     softWrap = false,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = headerMutedColor
                 )
                 Box(
                     modifier = Modifier
@@ -2433,7 +2432,7 @@ private fun KeywordHintCard(
                     Text(
                         text = "›",
                         style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                        color = headerMutedColor
                     )
                 }
             }
@@ -2457,7 +2456,7 @@ private fun KeywordHintCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(end = 4.dp, bottom = 6.dp)
+                .padding(start = 10.dp, end = 10.dp, bottom = 6.dp)
                 .height(0.5.dp)
                 .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
         )
@@ -2466,7 +2465,7 @@ private fun KeywordHintCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(end = 4.dp),
+                .padding(start = 10.dp),
             verticalAlignment = Alignment.Top
         ) {
             Box(
@@ -2501,6 +2500,7 @@ private fun KeywordHintCard(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .padding(end = 10.dp)
                                 .heightIn(max = 220.dp)
                                 .verticalScroll(rememberScrollState())
                         ) {
@@ -2522,6 +2522,7 @@ private fun KeywordHintCard(
                             style = paragraphStyle,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(end = 10.dp),
                             onTextLayout = { layout ->
                                 if (layout.lineCount > 0) {
                                     firstLineHeightPx =
@@ -2567,6 +2568,7 @@ private fun KeywordHintCard(
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .padding(end = 10.dp)
                                         .heightIn(max = 200.dp)
                                         .verticalScroll(rememberScrollState())
                                 ) {
