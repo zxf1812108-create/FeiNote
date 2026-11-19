@@ -61,31 +61,31 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     private val _editingNoteId = MutableStateFlow<Long?>(null)
     val editingNoteId: StateFlow<Long?> = _editingNoteId.asStateFlow()
 
-    // 搜索结果：仅包含未删除、符合指定标识符且正文匹配关键词的笔记。
+    // 搜索结果：仅包含未删除、符合指定标识符集合且正文匹配关键词的笔记。
     private val _searchResults = MutableStateFlow<List<NoteEntity>>(emptyList())
     val searchResults: StateFlow<List<NoteEntity>> = _searchResults.asStateFlow()
     @Volatile private var activeSearchKeywords: List<String> = emptyList()
-    @Volatile private var activeSearchBulletType: BulletType? = null
+    @Volatile private var activeSearchBulletTypes: Set<BulletType>? = null
 
-    /** 按正文检索全部有效笔记；空格分隔多个词，要求每个词都出现在正文中，并可按标识符类型限定搜索范围。 */
-    fun searchNotes(keyword: String, bulletType: BulletType? = null) {
+    /** 按正文检索全部有效笔记；空格分隔多个词，要求每个词都出现在正文中，并可按标识符类型集合限定搜索范围。 */
+    fun searchNotes(keyword: String, bulletTypes: Set<BulletType>? = null) {
         val queryWords = keyword.trim()
             .split(Regex("\\s+"))
             .filter { it.isNotBlank() }
         activeSearchKeywords = queryWords
-        activeSearchBulletType = bulletType
+        activeSearchBulletTypes = bulletTypes
         if (queryWords.isEmpty()) {
             _searchResults.value = emptyList()
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
             val allNotes = noteDao.getAllNotesForBackup()
-            if (activeSearchKeywords == queryWords && activeSearchBulletType == bulletType) {
+            if (activeSearchKeywords == queryWords && activeSearchBulletTypes == bulletTypes) {
                 _searchResults.value = allNotes
                     .asSequence()
                     .filter { note ->
                         !note.isDeleted &&
-                            (bulletType == null || note.bulletType == bulletType) &&
+                            (bulletTypes == null || note.bulletType in bulletTypes) &&
                             queryWords.all { word ->
                                 note.content.contains(word, ignoreCase = true)
                             }
@@ -299,14 +299,14 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (notesChanged && activeSearchKeywords.isNotEmpty()) {
                 val keywords = activeSearchKeywords
-                val bulletType = activeSearchBulletType
+                val bulletTypes = activeSearchBulletTypes
                 val allNotes = noteDao.getAllNotesForBackup()
-                if (activeSearchKeywords == keywords && activeSearchBulletType == bulletType) {
+                if (activeSearchKeywords == keywords && activeSearchBulletTypes == bulletTypes) {
                     _searchResults.value = allNotes
                         .asSequence()
                         .filter { note ->
                             !note.isDeleted &&
-                                (bulletType == null || note.bulletType == bulletType) &&
+                                (bulletTypes == null || note.bulletType in bulletTypes) &&
                                 keywords.all { word -> note.content.contains(word, ignoreCase = true) }
                         }
                         .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
@@ -699,40 +699,15 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         if (previousId == id) return
         _editingNoteId.value = id
         if (previousId != null) {
-            // 退出编辑时先等待最后一次正文写入，再清理空笔记、自动调整符号，最后立即备份。
+            // 退出编辑时先等待最后一次正文写入，清理空笔记，最后立即备份。
             val pendingContentWrite = latestContentWriteJob
             viewModelScope.launch(Dispatchers.IO) {
                 pendingContentWrite?.join()
                 val app = getApplication<Application>()
                 contentWriteMutex.withLock {
                     val previous = noteDao.getNoteById(previousId)
-                    if (previous != null && !previous.isDeleted) {
-                        if (previous.content.isBlank()) {
-                            noteDao.deletePermanently(previousId)
-                        } else {
-                            val hasLineBreak = previous.content.contains('\n')
-                            val nextBulletType = when {
-                                hasLineBreak && previous.bulletType in setOf(
-                                    BulletType.SQUARE,
-                                    BulletType.CHECKED,
-                                    BulletType.BULLET_DOT
-                                ) -> BulletType.STAR
-
-                                !hasLineBreak && previous.bulletType == BulletType.STAR ->
-                                    BulletType.BULLET_DOT
-
-                                else -> previous.bulletType
-                            }
-
-                            if (nextBulletType != previous.bulletType) {
-                                noteDao.updateNote(
-                                    previous.copy(
-                                        bulletType = nextBulletType,
-                                        updatedAt = System.currentTimeMillis()
-                                    )
-                                )
-                            }
-                        }
+                    if (previous != null && !previous.isDeleted && previous.content.isBlank()) {
+                        noteDao.deletePermanently(previousId)
                     }
                     // 保持正文写入锁直到备份导出完成，避免备份到编辑过程中的半成品。
                     backupMutex.withLock {
@@ -745,14 +720,15 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 点击标识符：在 方框 (SQUARE) -> 对勾 (CHECKED) -> 实心圆点 (BULLET_DOT) 之间轮流切换
+     * 点击标识符：依次在 方框 (SQUARE) -> 实心圆点 (BULLET_DOT) -> 五角星 (STAR) -> 方框 之间循环切换
      */
     fun cycleBulletType(note: NoteEntity) {
-        // 五角星由笔记内容自动判定生成，点击时保持不变。
-        if (note.bulletType == BulletType.STAR) return
-
         viewModelScope.launch(Dispatchers.IO) {
-            val nextType = if (note.bulletType == BulletType.BULLET_DOT) BulletType.SQUARE else BulletType.BULLET_DOT
+            val nextType = when (note.bulletType) {
+                BulletType.SQUARE, BulletType.CHECKED -> BulletType.BULLET_DOT
+                BulletType.BULLET_DOT -> BulletType.STAR
+                BulletType.STAR -> BulletType.SQUARE
+            }
             val updated = note.copy(bulletType = nextType, updatedAt = System.currentTimeMillis())
             noteDao.updateNote(updated)
             _searchResults.value = _searchResults.value.map { if (it.id == updated.id) updated else it }
