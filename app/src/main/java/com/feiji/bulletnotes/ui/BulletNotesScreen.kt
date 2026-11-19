@@ -1973,15 +1973,6 @@ fun BulletNoteRow(
                     decorationBox = { innerTextField ->
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Box(modifier = Modifier.fillMaxWidth()) {
-                                if (editValue.text.isEmpty()) {
-                                    Text(
-                                        text = "输入笔记内容...",
-                                        style = MaterialTheme.typography.bodyLarge.copy(
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
-                                        )
-                                    )
-                                }
                                 innerTextField()
                             }
 
