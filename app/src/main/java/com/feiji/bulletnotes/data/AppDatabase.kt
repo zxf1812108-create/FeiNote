@@ -21,7 +21,11 @@ class Converters {
     }
 }
 
-@Database(entities = [NoteEntity::class], version = 2, exportSchema = false)
+@Database(
+    entities = [NoteEntity::class, DeletedNoteTombstone::class],
+    version = 3,
+    exportSchema = false
+)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun noteDao(): NoteDao
@@ -30,6 +34,21 @@ abstract class AppDatabase : RoomDatabase() {
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE notes ADD COLUMN deletedAt INTEGER")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE notes ADD COLUMN syncId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE notes SET syncId = 'legacy-' || createdAt || '-' || id WHERE syncId = ''")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS deleted_sync_tombstones (
+                        syncId TEXT NOT NULL PRIMARY KEY,
+                        deletedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
             }
         }
 
@@ -42,7 +61,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "feiji_bullet_notes.db"
-                ).addMigrations(MIGRATION_1_2).build()
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
                 INSTANCE = instance
                 instance
             }
