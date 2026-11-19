@@ -163,7 +163,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     }
     val starSearchFilter = remember { setOf(BulletType.STAR) }
     var searchBulletFilter by remember { mutableStateOf(squareOrDotSearchFilter) }
-    val visibleNotes = if (isSearchMode) searchResults else notes
+    // 今天日期浏览模式下默认只显示最前面的 1 条五角星笔记，其余折叠并提供极淡展开入口。
+    val maxCollapsedTodayStars = 1
+    var showAllTodayStars by remember { mutableStateOf(false) }
+    var sessionExemptStarIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val trashNotes by viewModel.trashNotes.collectAsState()
     val keywordHintIndex by viewModel.keywordHintIndex.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
@@ -198,9 +201,88 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     // 防止连续快速点击新增提示条时重复插入多条空白笔记。
     var isCreatingFromHint by remember { mutableStateOf(false) }
 
+    val todayStarProjection = remember(
+        isSearchMode,
+        isToday,
+        searchResults,
+        notes,
+        showAllTodayStars,
+        sessionExemptStarIds,
+        editingNoteId,
+        expandedNoteId
+    ) {
+        if (isSearchMode) {
+            TodayStarProjection(
+                visibleNotes = searchResults,
+                hiddenStarCount = 0,
+                totalStarCount = 0,
+                foldAnchorNoteId = null
+            )
+        } else if (!isToday) {
+            TodayStarProjection(
+                visibleNotes = notes,
+                hiddenStarCount = 0,
+                totalStarCount = 0,
+                foldAnchorNoteId = null
+            )
+        } else {
+            val totalStars = notes.count { it.bulletType == BulletType.STAR }
+            if (showAllTodayStars) {
+                TodayStarProjection(
+                    visibleNotes = notes,
+                    hiddenStarCount = 0,
+                    totalStarCount = totalStars,
+                    foldAnchorNoteId = notes.lastOrNull { it.bulletType == BulletType.STAR }?.id
+                )
+            } else {
+                var shownQuotaStars = 0
+                var hiddenStars = 0
+                var lastQuotaStarId: Long? = null
+                val filtered = ArrayList<NoteEntity>(notes.size)
+                for (item in notes) {
+                    if (item.bulletType != BulletType.STAR) {
+                        filtered.add(item)
+                    } else if (
+                        item.id in sessionExemptStarIds ||
+                        item.id == editingNoteId ||
+                        item.id == expandedNoteId
+                    ) {
+                        filtered.add(item)
+                    } else if (shownQuotaStars < maxCollapsedTodayStars) {
+                        shownQuotaStars++
+                        lastQuotaStarId = item.id
+                        filtered.add(item)
+                    } else {
+                        hiddenStars++
+                    }
+                }
+                TodayStarProjection(
+                    visibleNotes = filtered,
+                    hiddenStarCount = hiddenStars,
+                    totalStarCount = totalStars,
+                    foldAnchorNoteId = lastQuotaStarId ?: filtered.lastOrNull { it.bulletType == BulletType.STAR }?.id
+                )
+            }
+        }
+    }
+    val visibleNotes = todayStarProjection.visibleNotes
+    val hiddenTodayStarCount = todayStarProjection.hiddenStarCount
+    val showTodayStarFoldToggle = !isSearchMode && isToday && (
+        (!showAllTodayStars && hiddenTodayStarCount > 0) ||
+            (showAllTodayStars && todayStarProjection.totalStarCount > maxCollapsedTodayStars)
+        )
+
     LaunchedEffect(selectedDate, isSearchMode) {
         expandedNoteId = null
         isCreatingFromHint = false
+        showAllTodayStars = false
+        sessionExemptStarIds = emptySet()
+    }
+
+    LaunchedEffect(todayStarProjection.totalStarCount, isToday, isSearchMode) {
+        if (showAllTodayStars && (!isToday || isSearchMode || todayStarProjection.totalStarCount <= maxCollapsedTodayStars)) {
+            showAllTodayStars = false
+        }
     }
 
     LaunchedEffect(editingNoteId, notes.size) {
@@ -228,18 +310,18 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var dragStartIndex by remember { mutableStateOf(-1) }
 
     // 松手后等待数据库排序结果同步，避免旧 notes 顺序短暂覆盖拖动后的显示顺序。
-    var pendingReorderIds by remember { mutableStateOf<List<Long>?>(null) }
+    var pendingReorderPreDragIds by remember { mutableStateOf<List<Long>?>(null) }
 
     // 仅回车新增笔记时触发精准滚动，不影响点击其他笔记。
     var pendingNewNoteScrollFromId by remember { mutableStateOf<Long?>(null) }
 
-    LaunchedEffect(visibleNotes, draggingNoteId, pendingReorderIds, isSearchMode) {
+    LaunchedEffect(visibleNotes, draggingNoteId, pendingReorderPreDragIds, isSearchMode) {
         if (draggingNoteId == null) {
-            val expectedOrder = pendingReorderIds
+            val preDragOrder = pendingReorderPreDragIds
 
-            // reorderNotes 是异步写入数据库的；在 Flow 返回新顺序前，
-            // 不要用旧 notes 覆盖已经完成的本地拖动顺序。
-            if (expectedOrder != null && visibleNotes.map { it.id } != expectedOrder) {
+            // reorderNoteRelativeTo 是异步写入数据库的；在 Flow 发出新顺序前，
+            // 不要用拖动前的旧列表覆盖已经完成的本地拖动顺序。
+            if (preDragOrder != null && visibleNotes.map { it.id } == preDragOrder) {
                 return@LaunchedEffect
             }
 
@@ -254,8 +336,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 }
             }
 
-            if (expectedOrder != null) {
-                pendingReorderIds = null
+            if (preDragOrder != null) {
+                pendingReorderPreDragIds = null
             }
         }
     }
@@ -413,7 +495,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     closeEditor()
                                     focusManager.clearFocus()
                                     isSearchMode = false
-                                    pendingReorderIds = null
+                                    pendingReorderPreDragIds = null
                                     searchText = ""
                                     viewModel.searchNotes("", null)
                                     viewModel.returnToToday()
@@ -542,7 +624,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 .combinedClickable(
                                     onClick = {
                                         closeEditor()
-                                        pendingReorderIds = null
+                                        pendingReorderPreDragIds = null
                                         if (!isToday) {
                                             viewModel.returnToToday()
                                         } else {
@@ -555,7 +637,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     onLongClick = {
                                         if (isToday) {
                                             closeEditor()
-                                            pendingReorderIds = null
+                                            pendingReorderPreDragIds = null
                                             searchBulletFilter = starSearchFilter
                                             isSearchMode = true
                                             searchText = ""
@@ -601,7 +683,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     },
                                     onLongClick = {
                                         closeEditor()
-                                        pendingReorderIds = null
+                                        pendingReorderPreDragIds = null
                                         viewModel.jumpToEarliestStarNoteDate()
                                     }
                                 ),
@@ -775,227 +857,257 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         },
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    itemsIndexed(
-                        displayNotes,
-                        key = { _, note -> note.id }
-                    ) { index, note ->
-
-                        if (isSearchMode && (index == 0 || displayNotes[index - 1].dateString != note.dateString)) {
-                            val resultDate = runCatching { LocalDate.parse(note.dateString) }.getOrNull()
-                            if (resultDate != null) {
-                                Text(
-                                    text = resultDate.format(viewModel.displayDateFormatter) +
-                                        " " + "一二三四五六日"[resultDate.dayOfWeek.value - 1],
-                                    modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                    displayNotes.forEachIndexed { index, note ->
+                        item(key = note.id) {
+                            if (isSearchMode && (index == 0 || displayNotes[index - 1].dateString != note.dateString)) {
+                                val resultDate = runCatching { LocalDate.parse(note.dateString) }.getOrNull()
+                                if (resultDate != null) {
+                                    Text(
+                                        text = resultDate.format(viewModel.displayDateFormatter) +
+                                            " " + "一二三四五六日"[resultDate.dayOfWeek.value - 1],
+                                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
-                        }
 
-                        val isEditing = (editingNoteId == note.id)
-                        val isExpanded = (expandedNoteId == note.id && !isEditing)
+                            val isEditing = (editingNoteId == note.id)
+                            val isExpanded = (expandedNoteId == note.id && !isEditing)
 
-                        BulletNoteRow(
-                            modifier = Modifier
-                                .then(
-                                    if (draggingNoteId == note.id) {
-                                        Modifier
-                                    } else {
-                                        Modifier.animateItem(
-                                            fadeInSpec = null,
-                                            fadeOutSpec = null,
-                                            placementSpec = androidx.compose.animation.core.spring()
-                                        )
+                            BulletNoteRow(
+                                modifier = Modifier
+                                    .then(
+                                        if (draggingNoteId == note.id) {
+                                            Modifier
+                                        } else {
+                                            Modifier.animateItem(
+                                                fadeInSpec = null,
+                                                fadeOutSpec = null,
+                                                placementSpec = androidx.compose.animation.core.spring()
+                                            )
+                                        }
+                                    )
+                                    .zIndex(
+                                        if (draggingNoteId == note.id) 1f else 0f
+                                    )
+                                    .graphicsLayer {
+                                        if (draggingNoteId == note.id) {
+                                            val currentTop = listState.layoutInfo.visibleItemsInfo
+                                                .firstOrNull { it.key == note.id }
+                                                ?.offset?.toFloat()
+                                                ?: dragAnchorTop
+
+                                            translationY =
+                                                dragAnchorTop + draggingOffset - currentTop
+
+                                            shadowElevation = 12.dp.toPx()
+                                        }
+                                    },
+                                note = note,
+                                isEditing = isEditing,
+                                isExpanded = isExpanded,
+                                listState = listState,
+                                listViewportBounds = listViewportBounds,
+                                keywordHintIndex = keywordHintIndex,
+                                displayDateFormatter = viewModel.displayDateFormatter,
+                                onBulletClick = {
+                                    if (editingNoteId != note.id) {
+                                        if (editingNoteId != null) {
+                                            viewModel.setEditingNoteId(null)
+                                            focusManager.clearFocus()
+                                        }
+                                        if (expandedNoteId != note.id) {
+                                            expandedNoteId = null
+                                        }
                                     }
-                                )
-                                .zIndex(
-                                    if (draggingNoteId == note.id) 1f else 0f
-                                )
-                                .graphicsLayer {
-                                    if (draggingNoteId == note.id) {
-                                        val currentTop = listState.layoutInfo.visibleItemsInfo
-                                            .firstOrNull { it.key == note.id }
-                                            ?.offset?.toFloat()
-                                            ?: dragAnchorTop
-
-                                        translationY =
-                                            dragAnchorTop + draggingOffset - currentTop
-
-                                        shadowElevation = 12.dp.toPx()
+                                    if (!isSearchMode && isToday && note.bulletType == BulletType.BULLET_DOT) {
+                                        sessionExemptStarIds = sessionExemptStarIds + note.id
+                                    }
+                                    viewModel.cycleBulletType(note)
+                                },
+                                onBulletLongClick = {
+                                    closeEditor()
+                                    if (note.bulletType == BulletType.STAR) {
+                                        noteToReview = note
+                                    } else {
+                                        noteToChangeDate = note
+                                        showDatePicker = true
                                     }
                                 },
-                            note = note,
-                            isEditing = isEditing,
-                            isExpanded = isExpanded,
-                            listState = listState,
-                            listViewportBounds = listViewportBounds,
-                            keywordHintIndex = keywordHintIndex,
-                            displayDateFormatter = viewModel.displayDateFormatter,
-                            onBulletClick = {
-                                if (editingNoteId != note.id) {
-                                    if (editingNoteId != null) {
-                                        viewModel.setEditingNoteId(null)
+                                onContentClick = { isCollapsedMultiLine ->
+                                    if (editingNoteId == note.id) {
+                                        closeEditor()
+                                    } else if (isCollapsedMultiLine && expandedNoteId != note.id) {
+                                        closeEditor()
                                         focusManager.clearFocus()
-                                    }
-                                    if (expandedNoteId != note.id) {
+                                        expandedNoteId = note.id
+                                    } else {
                                         expandedNoteId = null
+                                        viewModel.setEditingNoteId(note.id)
                                     }
-                                }
-                                viewModel.cycleBulletType(note)
-                            },
-                            onBulletLongClick = {
-                                closeEditor()
-                                if (note.bulletType == BulletType.STAR) {
-                                    noteToReview = note
-                                } else {
-                                    noteToChangeDate = note
-                                    showDatePicker = true
-                                }
-                            },
-                            onContentClick = { isCollapsedMultiLine ->
-                                if (editingNoteId == note.id) {
-                                    closeEditor()
-                                } else if (isCollapsedMultiLine && expandedNoteId != note.id) {
-                                    closeEditor()
-                                    focusManager.clearFocus()
-                                    expandedNoteId = note.id
-                                } else {
-                                    expandedNoteId = null
-                                    viewModel.setEditingNoteId(note.id)
-                                }
-                            },
-                            onDragStart = {
-                                if (!isSearchMode) {
-                                    hoveringTrash = false
-                                    closeEditor()
+                                },
+                                onDragStart = {
+                                    if (!isSearchMode) {
+                                        hoveringTrash = false
+                                        closeEditor()
 
-                                    val info = listState.layoutInfo.visibleItemsInfo
-                                        .firstOrNull { it.key == note.id }
+                                        val info = listState.layoutInfo.visibleItemsInfo
+                                            .firstOrNull { it.key == note.id }
 
-                                    if (info != null) {
-                                        dragAnchorTop = info.offset.toFloat()
-                                        draggingOffset = 0f
-                                        dragStartIndex =
-                                            visibleNotes.indexOfFirst { it.id == note.id }
-                                        draggingNoteId = note.id
+                                        if (info != null) {
+                                            dragAnchorTop = info.offset.toFloat()
+                                            draggingOffset = 0f
+                                            dragStartIndex =
+                                                visibleNotes.indexOfFirst { it.id == note.id }
+                                            draggingNoteId = note.id
+                                        }
                                     }
-                                }
-                            },
-                            onDragDelta = dragDelta@{ delta, pointerRoot ->
-                                hoveringTrash =
-                                    trashBounds?.contains(pointerRoot) == true
+                                },
+                                onDragDelta = dragDelta@{ delta, pointerRoot ->
+                                    hoveringTrash =
+                                        trashBounds?.contains(pointerRoot) == true
 
-                                if (draggingNoteId == note.id) {
-                                    draggingOffset += delta
+                                    if (draggingNoteId == note.id) {
+                                        draggingOffset += delta
 
-                                    if (hoveringTrash) {
-                                        return@dragDelta
-                                    }
-
-                                    val current =
-                                        displayNotes.indexOfFirst { it.id == note.id }
-
-                                    val visible = listState.layoutInfo.visibleItemsInfo
-                                    val dragged =
-                                        visible.firstOrNull { it.key == note.id }
-
-                                    if (current >= 0 && dragged != null) {
-                                        val visualCenter =
-                                            dragAnchorTop + draggingOffset + dragged.size / 2f
-
-                                        val direction = when {
-                                            delta > 0f -> 1
-                                            delta < 0f -> -1
-                                            else -> 0
+                                        if (hoveringTrash) {
+                                            return@dragDelta
                                         }
 
-                                        val target = current + direction
+                                        val current =
+                                            displayNotes.indexOfFirst { it.id == note.id }
 
-                                        if (target in displayNotes.indices) {
-                                            val neighborId = displayNotes[target].id
-                                            val neighbor =
-                                                visible.firstOrNull { it.key == neighborId }
+                                        val visible = listState.layoutInfo.visibleItemsInfo
+                                        val dragged =
+                                            visible.firstOrNull { it.key == note.id }
 
-                                            if (neighbor != null) {
-                                                val neighborCenter =
-                                                    neighbor.offset + neighbor.size / 2f
+                                        if (current >= 0 && dragged != null) {
+                                            val visualCenter =
+                                                dragAnchorTop + draggingOffset + dragged.size / 2f
 
-                                                val crossed = if (direction > 0) {
-                                                    visualCenter > neighborCenter
-                                                } else {
-                                                    visualCenter < neighborCenter
-                                                }
+                                            val direction = when {
+                                                delta > 0f -> 1
+                                                delta < 0f -> -1
+                                                else -> 0
+                                            }
 
-                                                if (crossed) {
-                                                    val moved =
-                                                        displayNotes.removeAt(current)
-                                                    displayNotes.add(target, moved)
+                                            val target = current + direction
+
+                                            if (target in displayNotes.indices) {
+                                                val neighborId = displayNotes[target].id
+                                                val neighbor =
+                                                    visible.firstOrNull { it.key == neighborId }
+
+                                                if (neighbor != null) {
+                                                    val neighborCenter =
+                                                        neighbor.offset + neighbor.size / 2f
+
+                                                    val crossed = if (direction > 0) {
+                                                        visualCenter > neighborCenter
+                                                    } else {
+                                                        visualCenter < neighborCenter
+                                                    }
+
+                                                    if (crossed) {
+                                                        val moved =
+                                                            displayNotes.removeAt(current)
+                                                        displayNotes.add(target, moved)
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                            },
-                            onDragFinish = { pointerRoot ->
-                                val deleteOnDrop =
-                                    pointerRoot != null &&
-                                        trashBounds?.contains(pointerRoot) == true
+                                },
+                                onDragFinish = { pointerRoot ->
+                                    val deleteOnDrop =
+                                        pointerRoot != null &&
+                                            trashBounds?.contains(pointerRoot) == true
 
-                                if (draggingNoteId == note.id && deleteOnDrop) {
-                                    viewModel.moveToTrash(note.id)
-                                } else if (draggingNoteId == note.id && !isSearchMode) {
-                                    val endIndex =
-                                        displayNotes.indexOfFirst { it.id == note.id }
+                                    if (draggingNoteId == note.id && deleteOnDrop) {
+                                        viewModel.moveToTrash(note.id)
+                                    } else if (draggingNoteId == note.id && !isSearchMode) {
+                                        val endIndex =
+                                            displayNotes.indexOfFirst { it.id == note.id }
 
-                                    if (
-                                        dragStartIndex >= 0 &&
-                                        endIndex >= 0 &&
-                                        dragStartIndex != endIndex
-                                    ) {
-                                        pendingReorderIds =
-                                            displayNotes.map { it.id }
+                                        if (
+                                            dragStartIndex >= 0 &&
+                                            endIndex >= 0 &&
+                                            dragStartIndex != endIndex
+                                        ) {
+                                            pendingReorderPreDragIds =
+                                                visibleNotes.map { it.id }
 
-                                        viewModel.reorderNotes(
-                                            dragStartIndex,
-                                            endIndex
-                                        )
+                                            val anchorNoteId: Long?
+                                            val insertBeforeAnchor: Boolean
+                                            if (endIndex < dragStartIndex) {
+                                                anchorNoteId = displayNotes.getOrNull(endIndex + 1)?.id
+                                                insertBeforeAnchor = true
+                                            } else {
+                                                anchorNoteId = displayNotes.getOrNull(endIndex - 1)?.id
+                                                insertBeforeAnchor = false
+                                            }
+
+                                            viewModel.reorderNoteRelativeTo(
+                                                movedNoteId = note.id,
+                                                anchorNoteId = anchorNoteId,
+                                                insertBeforeAnchor = insertBeforeAnchor
+                                            )
+                                        }
                                     }
-                                }
 
-                                hoveringTrash = false
-                                draggingNoteId = null
-                                draggingOffset = 0f
-                                dragAnchorTop = 0f
-                                dragStartIndex = -1
-                            },
-                            onContentChange = { newText ->
-                                viewModel.updateNoteContent(note.id, newText)
-                            },
-                            onEnterPressed = {
-                                pendingNewNoteScrollFromId = note.id
-                                enterFocusBridge.requestFocus()
-                                viewModel.insertNoteAfter(note, "")
-                            },
-                            onHintBulletClick = { hintNote ->
-                                viewModel.cycleBulletType(hintNote)
-                            },
-                            onHintBulletLongClick = { hintNote ->
-                                if (hintNote.bulletType == BulletType.STAR) {
-                                    noteToReview = hintNote
-                                } else {
-                                    noteToChangeDate = hintNote
-                                    showDatePicker = true
+                                    hoveringTrash = false
+                                    draggingNoteId = null
+                                    draggingOffset = 0f
+                                    dragAnchorTop = 0f
+                                    dragStartIndex = -1
+                                },
+                                onContentChange = { newText ->
+                                    viewModel.updateNoteContent(note.id, newText)
+                                },
+                                onEnterPressed = {
+                                    pendingNewNoteScrollFromId = note.id
+                                    enterFocusBridge.requestFocus()
+                                    viewModel.insertNoteAfter(note, "")
+                                },
+                                onHintBulletClick = { hintNote ->
+                                    viewModel.cycleBulletType(hintNote)
+                                },
+                                onHintBulletLongClick = { hintNote ->
+                                    if (hintNote.bulletType == BulletType.STAR) {
+                                        noteToReview = hintNote
+                                    } else {
+                                        noteToChangeDate = hintNote
+                                        showDatePicker = true
+                                    }
+                                },
+                                onHintContentChange = { hintNoteId, newText ->
+                                    viewModel.updateNoteContent(hintNoteId, newText)
+                                },
+                                onHintEditFinished = { hintNoteId ->
+                                    viewModel.finishInlineNoteEdit(hintNoteId)
                                 }
-                            },
-                            onHintContentChange = { hintNoteId, newText ->
-                                viewModel.updateNoteContent(hintNoteId, newText)
-                            },
-                            onHintEditFinished = { hintNoteId ->
-                                viewModel.finishInlineNoteEdit(hintNoteId)
+                            )
+                        }
+
+                        if (showTodayStarFoldToggle && note.id == todayStarProjection.foldAnchorNoteId) {
+                            item(key = "today_star_fold_toggle") {
+                                TodayStarFoldToggleRow(
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = null,
+                                        fadeOutSpec = null,
+                                        placementSpec = androidx.compose.animation.core.spring()
+                                    ),
+                                    expanded = showAllTodayStars,
+                                    hiddenCount = hiddenTodayStarCount,
+                                    onClick = {
+                                        closeEditor()
+                                        showAllTodayStars = !showAllTodayStars
+                                    }
+                                )
                             }
-                        )
+                        }
                     }
 
                     // 日期浏览模式且所有笔记均未进入编辑状态时，在最后一条笔记下方显示新增笔记提示条。
@@ -2692,6 +2804,46 @@ private fun KeywordHintCard(
                 }
             }
         }
+    }
+}
+
+private data class TodayStarProjection(
+    val visibleNotes: List<NoteEntity>,
+    val hiddenStarCount: Int,
+    val totalStarCount: Int,
+    val foldAnchorNoteId: Long?
+)
+
+/**
+ * 今天待复习五角星笔记的极轻折叠提示行：
+ * 无边框无底色，左侧与笔记正文严格对齐，点击可临时展开或收起今天其余待复习星标。
+ */
+@Composable
+private fun TodayStarFoldToggleRow(
+    modifier: Modifier = Modifier,
+    expanded: Boolean,
+    hiddenCount: Int,
+    onClick: () -> Unit
+) {
+    val mutedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+    val label = if (expanded) "收起待复习" else "还有 $hiddenCount 条待复习"
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Spacer(modifier = Modifier.width(36.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = mutedColor,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 2.dp, vertical = 4.dp)
+        )
     }
 }
 
