@@ -242,15 +242,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                 for (item in notes) {
                     if (item.bulletType != BulletType.STAR) {
                         filtered.add(item)
-                    } else if (
-                        item.id in sessionExemptStarIds ||
-                        item.id == editingNoteId ||
-                        item.id == expandedNoteId
-                    ) {
+                    } else if (item.id in sessionExemptStarIds) {
                         filtered.add(item)
                     } else if (shownQuotaStars < maxCollapsedTodayStars) {
                         shownQuotaStars++
                         lastQuotaStarId = item.id
+                        filtered.add(item)
+                    } else if (item.id == editingNoteId || item.id == expandedNoteId) {
                         filtered.add(item)
                     } else {
                         hiddenStars++
