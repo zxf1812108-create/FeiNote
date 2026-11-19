@@ -148,8 +148,12 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val noteDates by viewModel.noteDates.collectAsState()
     var isSearchMode by remember { mutableStateOf(false) }
     var searchText by remember { mutableStateOf("") }
-    // 单击搜索图标限定搜索圆点笔记，长按搜索图标限定搜索五角星笔记。
-    var searchBulletFilter by remember { mutableStateOf(BulletType.BULLET_DOT) }
+    // 单击搜索图标限定搜索方框或圆点笔记，长按搜索图标限定搜索五角星笔记。
+    val squareOrDotSearchFilter = remember {
+        setOf(BulletType.SQUARE, BulletType.CHECKED, BulletType.BULLET_DOT)
+    }
+    val starSearchFilter = remember { setOf(BulletType.STAR) }
+    var searchBulletFilter by remember { mutableStateOf(squareOrDotSearchFilter) }
     val visibleNotes = if (isSearchMode) searchResults else notes
     val trashNotes by viewModel.trashNotes.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
@@ -420,7 +424,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             modifier = Modifier.size(28.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (searchBulletFilter == BulletType.STAR) {
+                            if (searchBulletFilter == starSearchFilter) {
                                 Canvas(modifier = Modifier.size(18.dp)) {
                                     val scale = size.width / 18f
                                     val starPath = Path().apply {
@@ -439,11 +443,23 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     drawPath(path = starPath, color = indicatorColor)
                                 }
                             } else {
+                                // 方框内套一个实心圆点，表示当前搜索范围为方框或圆点笔记。
                                 Box(
                                     modifier = Modifier
-                                        .size(8.dp)
-                                        .background(indicatorColor, CircleShape)
-                                )
+                                        .size(16.dp)
+                                        .border(
+                                            1.5.dp,
+                                            indicatorColor,
+                                            RoundedCornerShape(3.dp)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .background(indicatorColor, CircleShape)
+                                    )
+                                }
                             }
                         }
                     } else {
@@ -459,20 +475,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                         if (!isToday) {
                                             viewModel.returnToToday()
                                         } else {
-                                            searchBulletFilter = BulletType.BULLET_DOT
+                                            searchBulletFilter = squareOrDotSearchFilter
                                             isSearchMode = true
                                             searchText = ""
-                                            viewModel.searchNotes("", BulletType.BULLET_DOT)
+                                            viewModel.searchNotes("", squareOrDotSearchFilter)
                                         }
                                     },
                                     onLongClick = {
                                         if (isToday) {
                                             closeEditor()
                                             pendingReorderIds = null
-                                            searchBulletFilter = BulletType.STAR
+                                            searchBulletFilter = starSearchFilter
                                             isSearchMode = true
                                             searchText = ""
-                                            viewModel.searchNotes("", BulletType.STAR)
+                                            viewModel.searchNotes("", starSearchFilter)
                                         }
                                     }
                                 ),
@@ -1280,7 +1296,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "WebDAV上传备份：",
+                            text = "WebDAV同步备份：",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -1450,7 +1466,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 enabled = canEnableWifiSync
                             )
                             Text(
-                                text = "同一 Wi-Fi 同时打开时自动同步",
+                                text = "同一WiFi下同时打开时同步",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(
                                     alpha = if (canEnableWifiSync) 1f else 0.45f
@@ -1686,8 +1702,6 @@ fun BulletNoteRow(
     val redoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
 
-    var lastFinishEnterAt by remember(note.id, isEditing) { mutableStateOf(0L) }
-
     fun undoEdit() {
         if (undoHistory.isEmpty()) return
         redoHistory.add(editValue.text)
@@ -1702,14 +1716,6 @@ fun BulletNoteRow(
         val next = redoHistory.removeAt(redoHistory.lastIndex)
         editValue = TextFieldValue(next, selection = TextRange(next.length))
         onContentChange(next)
-    }
-
-    fun finishEditingFromEnter() {
-        // 少数输入法/设备可能同时派发 KeyEvent 与 IME Action，避免一次按键重复新建笔记。
-        val now = SystemClock.uptimeMillis()
-        if (now - lastFinishEnterAt < 300L) return
-        lastFinishEnterAt = now
-        onEnterPressed()
     }
 
     // 专用“换段”按钮：在当前选区/光标位置插入换行，并将光标移到新段落开头。
@@ -1992,22 +1998,6 @@ fun BulletNoteRow(
                         .focusRequester(focusRequester)
                         .onGloballyPositioned { coordinates ->
                             textFieldCoordinates = coordinates
-                        }
-                        .onKeyEvent { keyEvent ->
-                            if (keyEvent.key == Key.Enter) {
-                                // 外接实体键盘的 Enter 仍然结束当前笔记编辑；
-                                // 软键盘的 Enter 则由下面的 IME onNext 处理。
-                                if (
-                                    keyEvent.nativeKeyEvent.action ==
-                                    android.view.KeyEvent.ACTION_DOWN &&
-                                    keyEvent.nativeKeyEvent.repeatCount == 0
-                                ) {
-                                    finishEditingFromEnter()
-                                }
-                                true
-                            } else {
-                                false
-                            }
                         },
                     // 编辑时段内行高保持系统主题默认值，不整体放大行高。
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
@@ -2022,13 +2012,9 @@ fun BulletNoteRow(
                                 layout.getLineBottom(0) - layout.getLineTop(0)
                         }
                     },
-                    keyboardOptions = KeyboardOptions.Default.copy(
-                        imeAction = ImeAction.Next
-                    ),
-                    keyboardActions = KeyboardActions(
-                        // 手机软键盘自带的回车/Next 动作仍保持原来的行为：结束编辑。
-                        onNext = { finishEditingFromEnter() }
-                    ),
+                    // 回车键直接输入换行符，不再结束当前笔记编辑。
+                    keyboardOptions = KeyboardOptions.Default,
+                    keyboardActions = KeyboardActions.Default,
                     decorationBox = { innerTextField ->
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Box(modifier = Modifier.fillMaxWidth()) {
