@@ -74,6 +74,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1254,6 +1255,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         }
         var confirmEncryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
         var encryptionPasswordMismatchError by remember(showWebDavSettings) { mutableStateOf(false) }
+        var wifiAutoSyncInput by remember(showWebDavSettings) {
+            mutableStateOf(webDavConfig.wifiAutoSyncEnabled)
+        }
 
         val isEncryptionPasswordMismatch = encryptionPasswordInput.isNotEmpty() &&
             encryptionPasswordInput != confirmEncryptionPasswordInput
@@ -1349,6 +1353,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 encryptionPasswordInput = it
                                 if (it.isEmpty()) {
                                     confirmEncryptionPasswordInput = ""
+                                    wifiAutoSyncInput = false
                                 }
                                 encryptionPasswordMismatchError = false
                             },
@@ -1409,6 +1414,59 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             )
                         }
                     }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+                    )
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        val canEnableWifiSync = encryptionPasswordInput.isNotEmpty()
+                        val effectiveWifiSyncChecked = wifiAutoSyncInput && canEnableWifiSync
+                        Text(
+                            text = "局域网自动同步：",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = canEnableWifiSync) {
+                                    wifiAutoSyncInput = !effectiveWifiSyncChecked
+                                }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = effectiveWifiSyncChecked,
+                                onCheckedChange = { checked ->
+                                    wifiAutoSyncInput = checked
+                                },
+                                enabled = canEnableWifiSync
+                            )
+                            Text(
+                                text = "同一 Wi-Fi 同时打开时自动同步",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(
+                                    alpha = if (canEnableWifiSync) 1f else 0.45f
+                                )
+                            )
+                        }
+                        Text(
+                            text = if (canEnableWifiSync) {
+                                "复用上方加密密码，两台设备密码一致时自动加密同步笔记与设置"
+                            } else {
+                                "需先在上方设置加密密码，两台设备密码一致即可自动同步笔记与设置"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -1423,7 +1481,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             remoteFolder = remoteFolderInput,
                             username = usernameInput,
                             password = passwordInput,
-                            encryptionPassword = encryptionPasswordInput
+                            encryptionPassword = encryptionPasswordInput,
+                            wifiAutoSyncEnabled = wifiAutoSyncInput && encryptionPasswordInput.isNotEmpty()
                         )
                         showWebDavSettings = false
                     }
