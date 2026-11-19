@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
 import android.util.Xml
+import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
@@ -19,9 +20,12 @@ import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -31,10 +35,10 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
 /**
- * WebDAV 静默每日备份管理（默认坚果云，纯 Android 标准库实现，零额外第三方依赖）：
- * - 每天备份一次昨天的数据备份（飞记备份 yyMMdd.json）
- * - 备份全程静默无提示；仅当开启功能且 21:00 后仍未备份成功时显示顶栏感叹号
- * - 备份成功后删除云端前天及以前（<= today - 2 days）的飞记备份文件
+ * WebDAV 静默每日备份与多设备近实时同步管理（默认坚果云，纯 Android 标准库实现，零额外第三方依赖）：
+ * - 每日历史快照：每天备份一次昨天的数据备份（飞记备份 yyMMdd.json），成功后清理前天及以前文件
+ * - 多设备近实时同步：每台设备维护独立的加密同步文件（feiji_sync_<deviceId>.json），互不覆盖写入，
+ *   通过 PROPFIND ETag 缓存增量拉取，按 syncId + updatedAt（LWW）及永久删除墓碑双向无冲突合并
  */
 object WebDavBackupManager {
     private const val TAG = "FeiJiWebDav"
@@ -46,6 +50,9 @@ object WebDavBackupManager {
     private const val KEY_PASSWORD = "webdav_password_v1"
     private const val KEY_ENCRYPTION_PASSWORD = "webdav_encryption_password_v1"
     private const val KEY_LAST_SUCCESS_DATE = "webdav_last_success_date_v1"
+    private const val KEY_SYNC_DEVICE_ID = "webdav_sync_device_id_v1"
+    private const val KEY_WIFI_AUTO_SYNC_ENABLED = "wifi_auto_sync_enabled_v1"
+    private const val KEY_SETTINGS_UPDATED_AT = "settings_updated_at_v1"
 
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     private const val KEYSTORE_ALIAS = "feiji_backup_enc_pwd_key_v1"
@@ -61,15 +68,49 @@ object WebDavBackupManager {
     private const val READ_TIMEOUT_MS = 25_000
     private const val MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
+    private const val SYNC_FILE_PREFIX = "feiji_sync_"
+    private const val SYNC_FILE_SUFFIX = ".json"
+    private const val TOMBSTONE_RETENTION_MS = 90L * 24 * 60 * 60 * 1000
+    private const val RATE_LIMIT_BACKOFF_MS = 3L * 60 * 1000
+
+    private val gson = Gson()
     private val nameDate = DateTimeFormatter.ofPattern("yyMMdd")
     private val filePattern = Regex("""^飞记备份 (\d{6})(?:\.json)?$""")
+    private val syncFilePattern = Regex("""^feiji_sync_([a-zA-Z0-9_-]+)\.json$""")
+
+    private val peerFingerprints = ConcurrentHashMap<String, String>()
+    @Volatile private var lastUploadedStateKey: String? = null
+    @Volatile private var rateLimitBackoffUntilMs: Long = 0L
+
+    data class SyncResult(
+        val pulledChanges: Int = 0,
+        val settingsChanged: Boolean = false,
+        val uploaded: Boolean = false,
+        val skipped: Boolean = false
+    )
+
+    private data class SyncPayload(
+        val feiji_sync_version: Int = 2,
+        val deviceId: String = "",
+        val syncedAt: Long = 0L,
+        val notes: List<NoteEntity>? = null,
+        val tombstones: List<DeletedNoteTombstone>? = null,
+        val settings: SyncMergeEngine.SyncableSettings? = null
+    )
+
+    private data class PropfindEntry(
+        val href: String,
+        val etag: String,
+        val lastModified: String
+    )
 
     data class WebDavConfig(
         val serverUrl: String = DEFAULT_SERVER_URL,
         val remoteFolder: String = DEFAULT_REMOTE_FOLDER,
         val username: String = "",
         val password: String = "",
-        val encryptionPassword: String = ""
+        val encryptionPassword: String = "",
+        val wifiAutoSyncEnabled: Boolean = false
     ) {
         /** 当应用密码不为空时即启用 WebDAV 上传备份。 */
         val enabled: Boolean get() = password.isNotEmpty()
@@ -114,16 +155,22 @@ object WebDavBackupManager {
 
     fun getConfig(context: Context): WebDavConfig {
         val p = prefs(context)
+        val encPwd = readEncryptionPassword(context)
+        val autoSyncRaw = p.getBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, false)
         return WebDavConfig(
             serverUrl = p.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL,
             remoteFolder = p.getString(KEY_REMOTE_FOLDER, DEFAULT_REMOTE_FOLDER) ?: DEFAULT_REMOTE_FOLDER,
             username = p.getString(KEY_USERNAME, "") ?: "",
             password = p.getString(KEY_PASSWORD, "") ?: "",
-            encryptionPassword = readEncryptionPassword(context)
+            encryptionPassword = encPwd,
+            wifiAutoSyncEnabled = autoSyncRaw && encPwd.isNotEmpty()
         )
     }
 
     fun getEncryptionPassword(context: Context): String = readEncryptionPassword(context)
+
+    fun getSettingsUpdatedAt(context: Context): Long =
+        prefs(context).getLong(KEY_SETTINGS_UPDATED_AT, 0L)
 
     fun saveSettings(
         context: Context,
@@ -131,15 +178,20 @@ object WebDavBackupManager {
         remoteFolder: String,
         username: String,
         password: String,
-        encryptionPassword: String = ""
+        encryptionPassword: String = "",
+        wifiAutoSyncEnabled: Boolean = getConfig(context).wifiAutoSyncEnabled
     ): WebDavConfig {
         val normalizedUrl = serverUrl.trim().ifEmpty { DEFAULT_SERVER_URL }
         val normalizedFolder = remoteFolder.trim().trim('/')
+        val effectiveAutoSync = wifiAutoSyncEnabled && encryptionPassword.isNotEmpty()
+        val now = System.currentTimeMillis()
         val editor = prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
             .putString(KEY_REMOTE_FOLDER, normalizedFolder)
             .putString(KEY_USERNAME, username.trim())
             .putString(KEY_PASSWORD, password)
+            .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
+            .putLong(KEY_SETTINGS_UPDATED_AT, now)
 
         if (encryptionPassword.isEmpty()) {
             editor.remove(KEY_ENCRYPTION_PASSWORD)
@@ -150,10 +202,74 @@ object WebDavBackupManager {
             } else {
                 Log.e(TAG, "Keystore unavailable; refusing to store backup encryption password in plaintext")
                 editor.remove(KEY_ENCRYPTION_PASSWORD)
+                editor.putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, false)
             }
         }
         editor.commit()
+        resetSyncCaches()
         return getConfig(context)
+    }
+
+    /**
+     * 应用来自局域网同设备同步的设置（按 settingsUpdatedAt LWW 决策；加密密码两端已一致，保持本地不变）。
+     * 返回设置内容是否发生实质变化。
+     */
+    fun applySyncedSettings(
+        context: Context,
+        serverUrl: String,
+        remoteFolder: String,
+        username: String,
+        password: String,
+        wifiAutoSyncEnabled: Boolean,
+        remoteUpdatedAt: Long
+    ): Boolean {
+        val localUpdatedAt = getSettingsUpdatedAt(context)
+        if (remoteUpdatedAt <= localUpdatedAt) return false
+
+        val current = getConfig(context)
+        val normalizedUrl = serverUrl.trim().ifEmpty { DEFAULT_SERVER_URL }
+        val normalizedFolder = remoteFolder.trim().trim('/')
+        val normalizedUsername = username.trim()
+        val effectiveAutoSync = wifiAutoSyncEnabled && current.encryptionPassword.isNotEmpty()
+
+        val valueChanged = current.serverUrl != normalizedUrl ||
+            current.remoteFolder != normalizedFolder ||
+            current.username != normalizedUsername ||
+            current.password != password ||
+            current.wifiAutoSyncEnabled != effectiveAutoSync
+
+        prefs(context).edit()
+            .putString(KEY_SERVER_URL, normalizedUrl)
+            .putString(KEY_REMOTE_FOLDER, normalizedFolder)
+            .putString(KEY_USERNAME, normalizedUsername)
+            .putString(KEY_PASSWORD, password)
+            .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
+            .putLong(KEY_SETTINGS_UPDATED_AT, remoteUpdatedAt)
+            .commit()
+
+        if (valueChanged) {
+            resetSyncCaches()
+        }
+        return valueChanged
+    }
+
+    fun resetSyncCaches() {
+        peerFingerprints.clear()
+        lastUploadedStateKey = null
+        rateLimitBackoffUntilMs = 0L
+    }
+
+    fun getSyncDeviceId(context: Context): String = getOrCreateSyncDeviceId(context)
+
+    private fun getOrCreateSyncDeviceId(context: Context): String {
+        val p = prefs(context)
+        val existing = p.getString(KEY_SYNC_DEVICE_ID, null)?.trim()
+        if (!existing.isNullOrEmpty() && existing.all { it.isLetterOrDigit() || it == '_' || it == '-' }) {
+            return existing
+        }
+        val generated = UUID.randomUUID().toString().replace("-", "").take(12)
+        p.edit().putString(KEY_SYNC_DEVICE_ID, generated).commit()
+        return generated
     }
 
     fun restoreConfig(context: Context, config: WebDavConfig): WebDavConfig {
@@ -163,7 +279,8 @@ object WebDavBackupManager {
             remoteFolder = config.remoteFolder,
             username = config.username,
             password = config.password,
-            encryptionPassword = config.encryptionPassword
+            encryptionPassword = config.encryptionPassword,
+            wifiAutoSyncEnabled = config.wifiAutoSyncEnabled
         )
     }
 
@@ -289,33 +406,90 @@ object WebDavBackupManager {
             val yesterday = today.minusDays(1)
             val localYesterday = BackupManager.readBackupBytesForDate(context, yesterday)
             val fileName = localYesterday?.first ?: "飞记备份 ${yesterday.format(nameDate)}.json"
-            val rawPayloadBytes = localYesterday?.second
-                ?: BackupManager.snapshotJson(context, noteDao.getAllNotesForBackup()).toByteArray(Charsets.UTF_8)
+            val fileEndpoint = folderEndpoint.appendSegment(fileName, trailingSlash = false)
 
-            // 设置了加密密码时，上传前自动加密（若文件已加密则不重复加密），文件名沿用现有规则。
-            val payloadBytes = if (
-                config.encryptionPassword.isNotEmpty() &&
-                !BackupManager.isEncryptedBackupBytes(rawPayloadBytes)
-            ) {
-                BackupManager.encryptBackupBytes(rawPayloadBytes, config.encryptionPassword)
-            } else {
-                rawPayloadBytes
+            // 上传前先检查云端是否已有昨日备份，防止多设备场景下用旧快照覆盖较新的云端昨日备份。
+            var skipUploadBecauseRemoteUpToDate = false
+            var finalPlainOrEncryptedBytes: ByteArray? = null
+
+            val existingRes = executeRequest(
+                method = "GET",
+                endpoint = fileEndpoint,
+                authHeader = authHeader
+            )
+            if (isRateLimited(existingRes.code)) {
+                rateLimitBackoffUntilMs = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                return@withContext false
             }
 
-            val fileEndpoint = folderEndpoint.appendSegment(fileName, trailingSlash = false)
-            val putRes = executeRequest(
-                method = "PUT",
-                endpoint = fileEndpoint,
-                authHeader = authHeader,
-                contentType = "application/json; charset=utf-8",
-                body = payloadBytes
-            )
-            if (!putRes.isSuccessful) return@withContext false
+            if (existingRes.isSuccessful && existingRes.body.isNotEmpty()) {
+                val remotePlainJson = BackupManager.decryptBackupBytesIfNeeded(
+                    existingRes.body,
+                    config.encryptionPassword
+                )
+                if (remotePlainJson == null) {
+                    // 云端已存在无法用当前密码解密的同名备份，绝不盲目覆盖。
+                    Log.w(TAG, "Remote daily backup exists but cannot be decrypted; refusing to overwrite")
+                    return@withContext false
+                }
+                val remoteNotes = BackupManager.extractNotesFromPlainBackupJson(remotePlainJson)
+                if (remoteNotes != null) {
+                    val localNotes = localYesterday?.second
+                        ?.let { BackupManager.decryptBackupBytesIfNeeded(it, config.encryptionPassword) }
+                        ?.let { BackupManager.extractNotesFromPlainBackupJson(it) }
+                        ?: noteDao.getAllNotesForBackup()
+
+                    val merged = SyncMergeEngine.mergeForDailyBackup(
+                        rawRemoteNotes = remoteNotes,
+                        rawLocalNotes = localNotes
+                    )
+                    if (merged.remoteWasAlreadyUpToDate) {
+                        skipUploadBecauseRemoteUpToDate = true
+                    } else {
+                        val mergedPlain = BackupManager.snapshotJson(context, merged.mergedNotes)
+                            .toByteArray(Charsets.UTF_8)
+                        finalPlainOrEncryptedBytes = if (config.encryptionPassword.isNotEmpty()) {
+                            BackupManager.encryptBackupBytes(mergedPlain, config.encryptionPassword)
+                        } else {
+                            mergedPlain
+                        }
+                    }
+                }
+            }
+
+            if (!skipUploadBecauseRemoteUpToDate) {
+                val payloadBytes = finalPlainOrEncryptedBytes ?: run {
+                    val rawPayloadBytes = localYesterday?.second
+                        ?: BackupManager.snapshotJson(context, noteDao.getAllNotesForBackup())
+                            .toByteArray(Charsets.UTF_8)
+                    if (
+                        config.encryptionPassword.isNotEmpty() &&
+                        !BackupManager.isEncryptedBackupBytes(rawPayloadBytes)
+                    ) {
+                        BackupManager.encryptBackupBytes(rawPayloadBytes, config.encryptionPassword)
+                    } else {
+                        rawPayloadBytes
+                    }
+                }
+
+                val putRes = executeRequest(
+                    method = "PUT",
+                    endpoint = fileEndpoint,
+                    authHeader = authHeader,
+                    contentType = "application/json; charset=utf-8",
+                    body = payloadBytes
+                )
+                if (isRateLimited(putRes.code)) {
+                    rateLimitBackoffUntilMs = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                    return@withContext false
+                }
+                if (!putRes.isSuccessful) return@withContext false
+            }
 
             // 标记今日备份成功，立即消除 21:00 后的感叹号提示。
             prefs(context).edit().putString(KEY_LAST_SUCCESS_DATE, today.toString()).commit()
 
-            // 备份成功后，静默清理云端前天及以前（<= today - 2）的飞记备份。
+            // 备份成功后，静默清理云端前天及以前（<= today - 2）的飞记备份（不触碰 feiji_sync_* 同步文件）。
             runCatching {
                 deleteOldBackupsOnServer(folderEndpoint, authHeader, today.minusDays(2))
             }.onFailure { e ->
@@ -327,6 +501,264 @@ object WebDavBackupManager {
             Log.w(TAG, "Silent WebDAV backup failed", e)
             false
         }
+    }
+
+    /**
+     * 多设备静默近实时双向同步（基于每设备独立文件 feiji_sync_<deviceId>.json）：
+     * 1. 先用单次 PROPFIND 获取目录内其他设备的同步文件及其 ETag/LastModified，仅在变化时下载解密；
+     * 2. 持有数据库写锁并在非编辑态下，通过统一合并内核 SyncMergeEngine 执行无冲突合并；
+     * 3. 仅当本机状态摘要变化或云端尚无本机同步文件时，才上传更新自己的 feiji_sync_<myDeviceId>.json。
+     */
+    suspend fun syncWithServer(
+        context: Context,
+        noteDao: NoteDao,
+        withDbLock: suspend (suspend () -> Unit) -> Unit,
+        isEditingProvider: () -> Boolean = { false }
+    ): SyncResult = withContext(Dispatchers.IO) {
+        val config = getConfig(context)
+        if (!config.enabled || !config.isConfigured()) {
+            return@withContext SyncResult(skipped = true)
+        }
+        if (isEditingProvider()) {
+            return@withContext SyncResult(skipped = true)
+        }
+        val nowMs = System.currentTimeMillis()
+        if (nowMs < rateLimitBackoffUntilMs) {
+            return@withContext SyncResult(skipped = true)
+        }
+
+        val baseEndpoint = parseBaseEndpoint(config.serverUrl)
+            ?: return@withContext SyncResult(skipped = true)
+        val authHeader = buildBasicAuth(config.username.trim(), config.password)
+        val folderEndpoint = buildFolderEndpoint(baseEndpoint, config.remoteFolder)
+
+        try {
+            val propfindXml =
+                """<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getetag/><d:getlastmodified/></d:prop></d:propfind>"""
+            var propRes = executeRequest(
+                method = "PROPFIND",
+                endpoint = folderEndpoint,
+                authHeader = authHeader,
+                extraHeaders = mapOf("Depth" to "1"),
+                contentType = "application/xml; charset=utf-8",
+                body = propfindXml.toByteArray(Charsets.UTF_8)
+            )
+            if (isRateLimited(propRes.code)) {
+                rateLimitBackoffUntilMs = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                return@withContext SyncResult(skipped = true)
+            }
+            if (propRes.code == 404 || propRes.code == 409) {
+                ensureRemoteFolder(baseEndpoint, config.remoteFolder, authHeader)
+                    ?: return@withContext SyncResult(skipped = true)
+                propRes = executeRequest(
+                    method = "PROPFIND",
+                    endpoint = folderEndpoint,
+                    authHeader = authHeader,
+                    extraHeaders = mapOf("Depth" to "1"),
+                    contentType = "application/xml; charset=utf-8",
+                    body = propfindXml.toByteArray(Charsets.UTF_8)
+                )
+                if (isRateLimited(propRes.code)) {
+                    rateLimitBackoffUntilMs = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                    return@withContext SyncResult(skipped = true)
+                }
+            }
+            if (!(propRes.isSuccessful || propRes.code == 207)) {
+                return@withContext SyncResult(skipped = true)
+            }
+
+            val myDeviceId = getOrCreateSyncDeviceId(context)
+            val myFileName = "$SYNC_FILE_PREFIX$myDeviceId$SYNC_FILE_SUFFIX"
+            val encHash = sha256Hex(config.encryptionPassword.toByteArray(Charsets.UTF_8))
+            val remoteConfigKey =
+                "${config.serverUrl.trim()}|${config.remoteFolder.trim().trim('/')}|${config.username.trim()}|$encHash"
+
+            val entries = parseEntriesFromPropfind(String(propRes.body, Charsets.UTF_8))
+            val folderPath = folderEndpoint.encodedPath.trimEnd('/')
+            var myFileExistsOnServer = false
+
+            data class DownloadedPeer(
+                val cacheKey: String,
+                val fingerprint: String,
+                val notes: List<NoteEntity>,
+                val tombstones: List<DeletedNoteTombstone>,
+                val settings: SyncMergeEngine.SyncableSettings?
+            )
+
+            val downloadedPeers = mutableListOf<DownloadedPeer>()
+
+            for (entry in entries) {
+                val resolved = resolveEndpoint(folderEndpoint, entry.href.trim()) ?: continue
+                val resolvedPath = resolved.encodedPath.trimEnd('/')
+                if (resolvedPath == folderPath) continue
+
+                val lastSegment = resolvedPath.split('/').lastOrNull { it.isNotEmpty() } ?: continue
+                val fileName = decodeSegment(lastSegment)
+                if (!syncFilePattern.matches(fileName)) continue
+
+                if (fileName == myFileName) {
+                    myFileExistsOnServer = true
+                    continue
+                }
+
+                val fingerprint = listOf(entry.etag.trim(), entry.lastModified.trim())
+                    .filter { it.isNotEmpty() }
+                    .joinToString("|")
+                val cacheKey = "$remoteConfigKey|$fileName"
+                if (fingerprint.isNotEmpty() && peerFingerprints[cacheKey] == fingerprint) {
+                    continue
+                }
+
+                val getRes = executeRequest(
+                    method = "GET",
+                    endpoint = resolved,
+                    authHeader = authHeader
+                )
+                if (isRateLimited(getRes.code)) {
+                    rateLimitBackoffUntilMs = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                    return@withContext SyncResult(skipped = true)
+                }
+                if (!getRes.isSuccessful || getRes.body.isEmpty()) continue
+
+                // 解密失败（例如两端加密密码不一致）时不写入指纹缓存，待密码一致后自动重试。
+                val jsonText = BackupManager.decryptBackupBytesIfNeeded(getRes.body, config.encryptionPassword)
+                    ?: continue
+                val payload = runCatching { gson.fromJson(jsonText, SyncPayload::class.java) }.getOrNull()
+                    ?: continue
+
+                val sanitizedNotes = SyncMergeEngine.sanitizeRemoteNotes(payload.notes.orEmpty())
+                val sanitizedTombstones = SyncMergeEngine.sanitizeRemoteTombstones(payload.tombstones.orEmpty())
+                val sanitizedSettings = SyncMergeEngine.sanitizeRemoteSettings(payload.settings)
+                downloadedPeers.add(
+                    DownloadedPeer(
+                        cacheKey = cacheKey,
+                        fingerprint = fingerprint,
+                        notes = sanitizedNotes,
+                        tombstones = sanitizedTombstones,
+                        settings = sanitizedSettings
+                    )
+                )
+            }
+
+            var pulledChanges = 0
+            var settingsChanged = false
+            var skippedDueToEditing = false
+            var bytesToUpload: ByteArray? = null
+            var pendingUploadKey: String? = null
+
+            withDbLock {
+                // 若用户在网络拉取期间进入编辑态，立即暂缓写库且不更新指纹缓存，待退出编辑后自动补齐。
+                if (isEditingProvider()) {
+                    skippedDueToEditing = true
+                    return@withDbLock
+                }
+
+                val mergeNow = System.currentTimeMillis()
+                val tombstoneCutoff = mergeNow - TOMBSTONE_RETENTION_MS
+
+                if (downloadedPeers.isNotEmpty()) {
+                    val mergeRes = SyncMergeEngine.mergeIntoLocalDb(
+                        context = context,
+                        noteDao = noteDao,
+                        remoteNoteLists = downloadedPeers.map { it.notes },
+                        remoteTombstoneLists = downloadedPeers.map { it.tombstones },
+                        remoteSettingsList = downloadedPeers.mapNotNull { it.settings }
+                    )
+                    pulledChanges = mergeRes.changedNoteCount
+                    settingsChanged = mergeRes.settingsChanged
+
+                    for (peer in downloadedPeers) {
+                        if (peer.fingerprint.isNotEmpty()) {
+                            peerFingerprints[peer.cacheKey] = peer.fingerprint
+                        }
+                    }
+                }
+
+                val finalNotes = noteDao.getAllNotesForBackup()
+                val finalTombstones = noteDao.getAllTombstones().filter { it.deletedAt >= tombstoneCutoff }
+                val finalSettings = SyncMergeEngine.readLocalSyncableSettings(context)
+                val stateHash = SyncMergeEngine.computeFullStateHash(finalNotes, finalTombstones, finalSettings)
+                val uploadKey = "$remoteConfigKey|$stateHash"
+                val hasDataOrTombstones = finalNotes.isNotEmpty() || finalTombstones.isNotEmpty()
+                val needsUpload = (!myFileExistsOnServer && hasDataOrTombstones) ||
+                    (myFileExistsOnServer && lastUploadedStateKey != uploadKey) ||
+                    (lastUploadedStateKey != null && lastUploadedStateKey != uploadKey)
+
+                if (needsUpload) {
+                    val payload = SyncPayload(
+                        feiji_sync_version = 2,
+                        deviceId = myDeviceId,
+                        syncedAt = mergeNow,
+                        notes = finalNotes.sortedBy { SyncMergeEngine.normalizeSyncId(it) },
+                        tombstones = finalTombstones.sortedBy { it.syncId },
+                        settings = finalSettings
+                    )
+                    val rawBytes = gson.toJson(payload).toByteArray(Charsets.UTF_8)
+                    val latestEncPwd = getEncryptionPassword(context)
+                    bytesToUpload = if (latestEncPwd.isNotEmpty()) {
+                        BackupManager.encryptBackupBytes(rawBytes, latestEncPwd)
+                    } else {
+                        rawBytes
+                    }
+                    pendingUploadKey = uploadKey
+                }
+            }
+
+            if (skippedDueToEditing) {
+                return@withContext SyncResult(skipped = true)
+            }
+
+            var uploaded = false
+            val uploadBody = bytesToUpload
+            if (uploadBody != null) {
+                val myFileEndpoint = folderEndpoint.appendSegment(myFileName, trailingSlash = false)
+                val putRes = executeRequest(
+                    method = "PUT",
+                    endpoint = myFileEndpoint,
+                    authHeader = authHeader,
+                    contentType = "application/json; charset=utf-8",
+                    body = uploadBody
+                )
+                if (isRateLimited(putRes.code)) {
+                    rateLimitBackoffUntilMs = System.currentTimeMillis() + RATE_LIMIT_BACKOFF_MS
+                } else if (putRes.isSuccessful) {
+                    lastUploadedStateKey = pendingUploadKey
+                    uploaded = true
+                }
+            }
+
+            SyncResult(
+                pulledChanges = pulledChanges,
+                settingsChanged = settingsChanged,
+                uploaded = uploaded
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Silent WebDAV sync failed", e)
+            SyncResult(skipped = true)
+        }
+    }
+
+    private fun isRateLimited(statusCode: Int): Boolean = statusCode == 429 || statusCode == 503
+
+    private fun buildFolderEndpoint(baseEndpoint: DavEndpoint, remoteFolder: String): DavEndpoint {
+        val segments = remoteFolder.split('/').map { it.trim() }.filter { it.isNotEmpty() }
+        var current = baseEndpoint
+        for (segment in segments) {
+            current = current.appendSegment(segment, trailingSlash = true)
+        }
+        return current
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        val hexChars = "0123456789abcdef"
+        val sb = StringBuilder(digest.size * 2)
+        for (b in digest) {
+            val v = b.toInt() and 0xFF
+            sb.append(hexChars[v ushr 4])
+            sb.append(hexChars[v and 0x0F])
+        }
+        return sb.toString()
     }
 
     private fun buildBasicAuth(username: String, password: String): String {
@@ -689,18 +1121,64 @@ object WebDavBackupManager {
         return baos.toByteArray()
     }
 
-    private fun parseHrefsFromPropfind(xmlText: String): List<String> {
+    private fun parseHrefsFromPropfind(xmlText: String): List<String> =
+        parseEntriesFromPropfind(xmlText).map { it.href }
+
+    private fun parseEntriesFromPropfind(xmlText: String): List<PropfindEntry> {
         if (xmlText.isBlank()) return emptyList()
-        val result = mutableListOf<String>()
+        val result = mutableListOf<PropfindEntry>()
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
         parser.setInput(StringReader(xmlText))
+        var inResponse = false
+        var currentHref = ""
+        var currentEtag = ""
+        var currentLastModified = ""
         var eventType = parser.eventType
         while (eventType != XmlPullParser.END_DOCUMENT) {
-            if (eventType == XmlPullParser.START_TAG && parser.name.equals("href", ignoreCase = true)) {
-                val href = runCatching { parser.nextText() }.getOrNull()
-                if (!href.isNullOrBlank()) {
-                    result.add(href)
+            when (eventType) {
+                XmlPullParser.START_TAG -> {
+                    val tagName = parser.name ?: ""
+                    when {
+                        tagName.equals("response", ignoreCase = true) -> {
+                            inResponse = true
+                            currentHref = ""
+                            currentEtag = ""
+                            currentLastModified = ""
+                        }
+                        inResponse && tagName.equals("href", ignoreCase = true) -> {
+                            val href = runCatching { parser.nextText() }.getOrNull().orEmpty().trim()
+                            if (href.isNotEmpty() && currentHref.isEmpty()) {
+                                currentHref = href
+                            }
+                        }
+                        inResponse && tagName.equals("getetag", ignoreCase = true) -> {
+                            val etag = runCatching { parser.nextText() }.getOrNull().orEmpty().trim()
+                            if (etag.isNotEmpty()) {
+                                currentEtag = etag
+                            }
+                        }
+                        inResponse && tagName.equals("getlastmodified", ignoreCase = true) -> {
+                            val lm = runCatching { parser.nextText() }.getOrNull().orEmpty().trim()
+                            if (lm.isNotEmpty()) {
+                                currentLastModified = lm
+                            }
+                        }
+                    }
+                }
+                XmlPullParser.END_TAG -> {
+                    if (parser.name.equals("response", ignoreCase = true)) {
+                        if (currentHref.isNotEmpty()) {
+                            result.add(
+                                PropfindEntry(
+                                    href = currentHref,
+                                    etag = currentEtag,
+                                    lastModified = currentLastModified
+                                )
+                            )
+                        }
+                        inResponse = false
+                    }
                 }
             }
             eventType = parser.next()
