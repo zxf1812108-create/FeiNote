@@ -622,12 +622,13 @@ object LanWebServer {
                 )
                 .take(overflowCount)
                 .forEach { oldNote ->
-                    noteDao.deletePermanently(oldNote.id)
+                    noteDao.deletePermanentlyWithTombstone(oldNote.id)
                 }
         }
     }
 
     private fun scheduleLocalBackup(appContext: Context, noteDao: NoteDao) {
+        WifiAutoSyncManager.notifyLocalDataChanged()
         if (!BackupManager.hasBackupFolder(appContext)) return
         val serverScope = scope ?: return
         backupDebounceJob?.cancel()
