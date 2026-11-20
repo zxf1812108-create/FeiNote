@@ -487,7 +487,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (isSearchMode) {
-                        val indicatorColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        val indicatorColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
                         Surface(
                             modifier = Modifier
                                 .width(44.dp)
@@ -667,7 +667,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     Icon(
                                         Icons.Outlined.Search,
                                         contentDescription = "搜索笔记",
-                                        tint = MaterialTheme.colorScheme.onSurface
+                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
                                     )
                                 }
                             }
@@ -1945,7 +1945,7 @@ fun BulletNoteRow(
     }
 
     val density = LocalDensity.current
-    val bulletColor = MaterialTheme.colorScheme.onSurface
+    val bulletColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     val imeInsets = WindowInsets.ime
     val firstLineHeightDp = with(density) { firstLineHeightPx.toDp() }
     val bulletVerticalOffset = if (firstLineHeightPx > 0f) {
@@ -2500,7 +2500,7 @@ private fun KeywordHintCard(
     onCollapseHintEdit: () -> Unit
 ) {
     val density = LocalDensity.current
-    val bulletColor = MaterialTheme.colorScheme.onSurface
+    val bulletColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
     val hintFocusRequester = remember { FocusRequester() }
     val cardInteractionSource = remember { MutableInteractionSource() }
