@@ -53,6 +53,7 @@ object WebDavBackupManager {
     private const val KEY_SYNC_DEVICE_ID = "webdav_sync_device_id_v1"
     private const val KEY_WIFI_AUTO_SYNC_ENABLED = "wifi_auto_sync_enabled_v1"
     private const val KEY_SETTINGS_UPDATED_AT = "settings_updated_at_v1"
+    private const val KEY_FEINOTE_URL_MIGRATED = "webdav_feinote_url_migrated_v1"
 
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     private const val KEYSTORE_ALIAS = "feiji_backup_enc_pwd_key_v1"
@@ -63,6 +64,7 @@ object WebDavBackupManager {
     const val DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/FeiNote/"
     private const val LEGACY_DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/"
     private const val LEGACY_DEFAULT_REMOTE_FOLDER = "飞记"
+    private const val LEGACY_MERGED_DEFAULT_URL = "https://dav.jianguoyun.com/dav/飞记/"
     private val ALERT_TIME: LocalTime = LocalTime.of(21, 0)
 
     private const val CONNECT_TIMEOUT_MS = 15_000
@@ -168,13 +170,12 @@ object WebDavBackupManager {
 
     /**
      * 兼容旧版分离的 serverUrl + remoteFolder：
-     * - 未配置账号密码且仍停留在旧版默认地址与默认目录（飞记）时，自动切换到新版默认地址；
-     * - 已配置或自定义目录的旧配置自动合并为完整目录地址，保证存量数据不断联。
+     * - 仍为旧版默认坚果云地址 + 默认目录「飞记」时，统一升级为默认地址 https://dav.jianguoyun.com/dav/FeiNote/；
+     * - 自定义服务器地址或自定义目录则自动合并为完整目录地址。
      */
     fun mergeLegacyServerUrl(
         rawUrl: String?,
-        rawRemoteFolder: String?,
-        hasCredentials: Boolean
+        rawRemoteFolder: String?
     ): String {
         val url = rawUrl?.trim().orEmpty()
         val folder = rawRemoteFolder?.trim()?.trim('/').orEmpty()
@@ -183,7 +184,7 @@ object WebDavBackupManager {
 
         val isLegacyDefaultUrl = url.isEmpty() ||
             url.trimEnd('/').equals(LEGACY_DEFAULT_SERVER_URL.trimEnd('/'), ignoreCase = true)
-        if (!hasCredentials && isLegacyDefaultUrl && folder == LEGACY_DEFAULT_REMOTE_FOLDER) {
+        if (isLegacyDefaultUrl && folder == LEGACY_DEFAULT_REMOTE_FOLDER) {
             return DEFAULT_SERVER_URL
         }
 
@@ -204,11 +205,28 @@ object WebDavBackupManager {
         val password = p.getString(KEY_PASSWORD, "") ?: ""
         val storedUrl = p.getString(KEY_SERVER_URL, null)
         val storedFolder = p.getString(KEY_REMOTE_FOLDER, null)
-        val effectiveUrl = mergeLegacyServerUrl(
+        var effectiveUrl = mergeLegacyServerUrl(
             rawUrl = storedUrl,
-            rawRemoteFolder = storedFolder,
-            hasCredentials = username.trim().isNotEmpty() || password.isNotEmpty()
+            rawRemoteFolder = storedFolder
         )
+
+        if (!p.getBoolean(KEY_FEINOTE_URL_MIGRATED, false)) {
+            val migratedUrl = if (
+                effectiveUrl.trimEnd('/').equals(LEGACY_MERGED_DEFAULT_URL.trimEnd('/'), ignoreCase = true) ||
+                effectiveUrl.trimEnd('/').equals(LEGACY_DEFAULT_SERVER_URL.trimEnd('/'), ignoreCase = true)
+            ) {
+                DEFAULT_SERVER_URL
+            } else {
+                effectiveUrl
+            }
+            val editor = p.edit().putBoolean(KEY_FEINOTE_URL_MIGRATED, true)
+            if (storedUrl != null || storedFolder != null) {
+                editor.putString(KEY_SERVER_URL, migratedUrl).remove(KEY_REMOTE_FOLDER)
+            }
+            editor.apply()
+            effectiveUrl = migratedUrl
+        }
+
         return WebDavConfig(
             serverUrl = effectiveUrl,
             username = username,
@@ -237,6 +255,7 @@ object WebDavBackupManager {
         val editor = prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
             .remove(KEY_REMOTE_FOLDER)
+            .putBoolean(KEY_FEINOTE_URL_MIGRATED, true)
             .putString(KEY_USERNAME, username.trim())
             .putString(KEY_PASSWORD, password)
             .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
@@ -279,8 +298,7 @@ object WebDavBackupManager {
         val normalizedUsername = username.trim()
         val normalizedUrl = mergeLegacyServerUrl(
             rawUrl = serverUrl,
-            rawRemoteFolder = remoteFolder,
-            hasCredentials = normalizedUsername.isNotEmpty() || password.isNotEmpty()
+            rawRemoteFolder = remoteFolder
         )
         val effectiveAutoSync = wifiAutoSyncEnabled && current.encryptionPassword.isNotEmpty()
 
@@ -292,6 +310,7 @@ object WebDavBackupManager {
         prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
             .remove(KEY_REMOTE_FOLDER)
+            .putBoolean(KEY_FEINOTE_URL_MIGRATED, true)
             .putString(KEY_USERNAME, normalizedUsername)
             .putString(KEY_PASSWORD, password)
             .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
