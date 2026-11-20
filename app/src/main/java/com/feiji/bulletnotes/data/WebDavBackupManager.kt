@@ -60,8 +60,9 @@ object WebDavBackupManager {
     private const val KEYSTORE_GCM_TAG_BITS = 128
     private val keystoreLock = Any()
 
-    const val DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/"
-    const val DEFAULT_REMOTE_FOLDER = "飞记"
+    const val DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/FeiNote/"
+    private const val LEGACY_DEFAULT_SERVER_URL = "https://dav.jianguoyun.com/dav/"
+    private const val LEGACY_DEFAULT_REMOTE_FOLDER = "飞记"
     private val ALERT_TIME: LocalTime = LocalTime.of(21, 0)
 
     private const val CONNECT_TIMEOUT_MS = 15_000
@@ -106,7 +107,6 @@ object WebDavBackupManager {
 
     data class WebDavConfig(
         val serverUrl: String = DEFAULT_SERVER_URL,
-        val remoteFolder: String = DEFAULT_REMOTE_FOLDER,
         val username: String = "",
         val password: String = "",
         val encryptionPassword: String = "",
@@ -139,6 +139,13 @@ object WebDavBackupManager {
             return copy(encodedPath = nextPath)
         }
 
+        fun parentEndpoint(): DavEndpoint? {
+            val segments = encodedPath.split('/').filter { it.isNotEmpty() }
+            if (segments.size <= 1) return null
+            val parentPath = "/" + segments.dropLast(1).joinToString("/") + "/"
+            return copy(encodedPath = parentPath)
+        }
+
         fun toUrlString(): String = "$scheme://${hostHeader()}$encodedPath"
     }
 
@@ -153,15 +160,59 @@ object WebDavBackupManager {
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    fun normalizeServerUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return DEFAULT_SERVER_URL
+        return trimmed.trimEnd('/') + "/"
+    }
+
+    /**
+     * 兼容旧版分离的 serverUrl + remoteFolder：
+     * - 未配置账号密码且仍停留在旧版默认地址与默认目录（飞记）时，自动切换到新版默认地址；
+     * - 已配置或自定义目录的旧配置自动合并为完整目录地址，保证存量数据不断联。
+     */
+    fun mergeLegacyServerUrl(
+        rawUrl: String?,
+        rawRemoteFolder: String?,
+        hasCredentials: Boolean
+    ): String {
+        val url = rawUrl?.trim().orEmpty()
+        val folder = rawRemoteFolder?.trim()?.trim('/').orEmpty()
+        if (url.isEmpty() && folder.isEmpty()) return DEFAULT_SERVER_URL
+        if (folder.isEmpty()) return normalizeServerUrl(url)
+
+        val isLegacyDefaultUrl = url.isEmpty() ||
+            url.trimEnd('/').equals(LEGACY_DEFAULT_SERVER_URL.trimEnd('/'), ignoreCase = true)
+        if (!hasCredentials && isLegacyDefaultUrl && folder == LEGACY_DEFAULT_REMOTE_FOLDER) {
+            return DEFAULT_SERVER_URL
+        }
+
+        val base = url.ifEmpty { LEGACY_DEFAULT_SERVER_URL }.trimEnd('/')
+        val suffix = "/$folder"
+        return if (base.endsWith(suffix)) {
+            "$base/"
+        } else {
+            "$base$suffix/"
+        }
+    }
+
     fun getConfig(context: Context): WebDavConfig {
         val p = prefs(context)
         val encPwd = readEncryptionPassword(context)
         val autoSyncRaw = p.getBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, false)
+        val username = p.getString(KEY_USERNAME, "") ?: ""
+        val password = p.getString(KEY_PASSWORD, "") ?: ""
+        val storedUrl = p.getString(KEY_SERVER_URL, null)
+        val storedFolder = p.getString(KEY_REMOTE_FOLDER, null)
+        val effectiveUrl = mergeLegacyServerUrl(
+            rawUrl = storedUrl,
+            rawRemoteFolder = storedFolder,
+            hasCredentials = username.trim().isNotEmpty() || password.isNotEmpty()
+        )
         return WebDavConfig(
-            serverUrl = p.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL,
-            remoteFolder = p.getString(KEY_REMOTE_FOLDER, DEFAULT_REMOTE_FOLDER) ?: DEFAULT_REMOTE_FOLDER,
-            username = p.getString(KEY_USERNAME, "") ?: "",
-            password = p.getString(KEY_PASSWORD, "") ?: "",
+            serverUrl = effectiveUrl,
+            username = username,
+            password = password,
             encryptionPassword = encPwd,
             wifiAutoSyncEnabled = autoSyncRaw && encPwd.isNotEmpty()
         )
@@ -175,19 +226,17 @@ object WebDavBackupManager {
     fun saveSettings(
         context: Context,
         serverUrl: String,
-        remoteFolder: String,
         username: String,
         password: String,
         encryptionPassword: String = "",
         wifiAutoSyncEnabled: Boolean = getConfig(context).wifiAutoSyncEnabled
     ): WebDavConfig {
-        val normalizedUrl = serverUrl.trim().ifEmpty { DEFAULT_SERVER_URL }
-        val normalizedFolder = remoteFolder.trim().trim('/')
+        val normalizedUrl = normalizeServerUrl(serverUrl)
         val effectiveAutoSync = wifiAutoSyncEnabled && encryptionPassword.isNotEmpty()
         val now = System.currentTimeMillis()
         val editor = prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
-            .putString(KEY_REMOTE_FOLDER, normalizedFolder)
+            .remove(KEY_REMOTE_FOLDER)
             .putString(KEY_USERNAME, username.trim())
             .putString(KEY_PASSWORD, password)
             .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
@@ -217,7 +266,7 @@ object WebDavBackupManager {
     fun applySyncedSettings(
         context: Context,
         serverUrl: String,
-        remoteFolder: String,
+        remoteFolder: String = "",
         username: String,
         password: String,
         wifiAutoSyncEnabled: Boolean,
@@ -227,20 +276,22 @@ object WebDavBackupManager {
         if (remoteUpdatedAt <= localUpdatedAt) return false
 
         val current = getConfig(context)
-        val normalizedUrl = serverUrl.trim().ifEmpty { DEFAULT_SERVER_URL }
-        val normalizedFolder = remoteFolder.trim().trim('/')
         val normalizedUsername = username.trim()
+        val normalizedUrl = mergeLegacyServerUrl(
+            rawUrl = serverUrl,
+            rawRemoteFolder = remoteFolder,
+            hasCredentials = normalizedUsername.isNotEmpty() || password.isNotEmpty()
+        )
         val effectiveAutoSync = wifiAutoSyncEnabled && current.encryptionPassword.isNotEmpty()
 
         val valueChanged = current.serverUrl != normalizedUrl ||
-            current.remoteFolder != normalizedFolder ||
             current.username != normalizedUsername ||
             current.password != password ||
             current.wifiAutoSyncEnabled != effectiveAutoSync
 
         prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
-            .putString(KEY_REMOTE_FOLDER, normalizedFolder)
+            .remove(KEY_REMOTE_FOLDER)
             .putString(KEY_USERNAME, normalizedUsername)
             .putString(KEY_PASSWORD, password)
             .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
@@ -276,7 +327,6 @@ object WebDavBackupManager {
         return saveSettings(
             context = context,
             serverUrl = config.serverUrl,
-            remoteFolder = config.remoteFolder,
             username = config.username,
             password = config.password,
             encryptionPassword = config.encryptionPassword,
@@ -396,11 +446,11 @@ object WebDavBackupManager {
         if (isTodayBackupCompleted(context, today)) return@withContext true
         if (!config.isConfigured()) return@withContext false
 
-        val baseEndpoint = parseBaseEndpoint(config.serverUrl) ?: return@withContext false
+        val targetFolderEndpoint = parseBaseEndpoint(config.serverUrl) ?: return@withContext false
         val authHeader = buildBasicAuth(config.username.trim(), config.password)
 
         try {
-            val folderEndpoint = ensureRemoteFolder(baseEndpoint, config.remoteFolder, authHeader)
+            val folderEndpoint = ensureDirectoryEndpoint(targetFolderEndpoint, authHeader)
                 ?: return@withContext false
 
             val yesterday = today.minusDays(1)
@@ -527,10 +577,9 @@ object WebDavBackupManager {
             return@withContext SyncResult(skipped = true)
         }
 
-        val baseEndpoint = parseBaseEndpoint(config.serverUrl)
+        val folderEndpoint = parseBaseEndpoint(config.serverUrl)
             ?: return@withContext SyncResult(skipped = true)
         val authHeader = buildBasicAuth(config.username.trim(), config.password)
-        val folderEndpoint = buildFolderEndpoint(baseEndpoint, config.remoteFolder)
 
         try {
             val propfindXml =
@@ -548,7 +597,7 @@ object WebDavBackupManager {
                 return@withContext SyncResult(skipped = true)
             }
             if (propRes.code == 404 || propRes.code == 409) {
-                ensureRemoteFolder(baseEndpoint, config.remoteFolder, authHeader)
+                ensureDirectoryEndpoint(folderEndpoint, authHeader)
                     ?: return@withContext SyncResult(skipped = true)
                 propRes = executeRequest(
                     method = "PROPFIND",
@@ -571,7 +620,7 @@ object WebDavBackupManager {
             val myFileName = "$SYNC_FILE_PREFIX$myDeviceId$SYNC_FILE_SUFFIX"
             val encHash = sha256Hex(config.encryptionPassword.toByteArray(Charsets.UTF_8))
             val remoteConfigKey =
-                "${config.serverUrl.trim()}|${config.remoteFolder.trim().trim('/')}|${config.username.trim()}|$encHash"
+                "${normalizeServerUrl(config.serverUrl)}|${config.username.trim()}|$encHash"
 
             val entries = parseEntriesFromPropfind(String(propRes.body, Charsets.UTF_8))
             val folderPath = folderEndpoint.encodedPath.trimEnd('/')
@@ -740,15 +789,6 @@ object WebDavBackupManager {
 
     private fun isRateLimited(statusCode: Int): Boolean = statusCode == 429 || statusCode == 503
 
-    private fun buildFolderEndpoint(baseEndpoint: DavEndpoint, remoteFolder: String): DavEndpoint {
-        val segments = remoteFolder.split('/').map { it.trim() }.filter { it.isNotEmpty() }
-        var current = baseEndpoint
-        for (segment in segments) {
-            current = current.appendSegment(segment, trailingSlash = true)
-        }
-        return current
-    }
-
     private fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         val hexChars = "0123456789abcdef"
@@ -824,29 +864,57 @@ object WebDavBackupManager {
         }
     }
 
-    /** 逐级确保远程备份目录存在；目录已存在（405/301/302/2xx）视为成功。 */
-    private fun ensureRemoteFolder(
-        baseEndpoint: DavEndpoint,
-        remoteFolder: String,
-        authHeader: String
+    /**
+     * 确保目标远程目录存在（自底向上按需创建，避免对坚果云 /dav/ 等挂载根目录发起多余 MKCOL）：
+     * - 目录已存在（2xx / 405 / 301 / 302）直接视为成功；
+     * - 返回 409（父目录缺失）时先递归创建父目录再重试一次；
+     * - 返回 403 时用 PROPFIND(Depth:0) 校验目标目录是否本身已存在且可访问（兼容挂载根目录）。
+     */
+    private fun ensureDirectoryEndpoint(
+        targetEndpoint: DavEndpoint,
+        authHeader: String,
+        depthLimit: Int = 8
     ): DavEndpoint? {
-        val segments = remoteFolder.split('/').map { it.trim() }.filter { it.isNotEmpty() }
-        var current = baseEndpoint
-        for (segment in segments) {
-            val next = current.appendSegment(segment, trailingSlash = true)
-            val res = executeRequest(
+        if (targetEndpoint.encodedPath == "/") return targetEndpoint
+        val res = executeRequest(
+            method = "MKCOL",
+            endpoint = targetEndpoint,
+            authHeader = authHeader,
+            contentType = null,
+            body = ByteArray(0),
+            followRedirects = false
+        )
+        if (res.isSuccessful || res.code == 405 || res.code == 301 || res.code == 302) {
+            return targetEndpoint
+        }
+        if (res.code == 403) {
+            val probe = executeRequest(
+                method = "PROPFIND",
+                endpoint = targetEndpoint,
+                authHeader = authHeader,
+                extraHeaders = mapOf("Depth" to "0"),
+                contentType = "application/xml; charset=utf-8",
+                body = """<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"""
+                    .toByteArray(Charsets.UTF_8)
+            )
+            return if (probe.isSuccessful || probe.code == 207) targetEndpoint else null
+        }
+        if (res.code == 409 && depthLimit > 0) {
+            val parent = targetEndpoint.parentEndpoint() ?: return null
+            ensureDirectoryEndpoint(parent, authHeader, depthLimit - 1) ?: return null
+            val retry = executeRequest(
                 method = "MKCOL",
-                endpoint = next,
+                endpoint = targetEndpoint,
                 authHeader = authHeader,
                 contentType = null,
                 body = ByteArray(0),
                 followRedirects = false
             )
-            val ok = res.isSuccessful || res.code == 405 || res.code == 301 || res.code == 302
-            if (!ok) return null
-            current = next
+            if (retry.isSuccessful || retry.code == 405 || retry.code == 301 || retry.code == 302) {
+                return targetEndpoint
+            }
         }
-        return current
+        return null
     }
 
     private fun backupDate(name: String): LocalDate? {
