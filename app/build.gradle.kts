@@ -68,6 +68,19 @@ android {
         checkReleaseBuilds = false
         abortOnError = false
     }
+
+    applicationVariants.all {
+        if (buildType.name == "release") {
+            val normalizedVersion = (versionName ?: appVersionName)
+                .trim()
+                .removePrefix("v")
+                .removePrefix("V")
+            outputs.all {
+                val outputImpl = this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl
+                outputImpl?.outputFileName = "FeiNote-v${normalizedVersion}.apk"
+            }
+        }
+    }
 }
 
 dependencies {
