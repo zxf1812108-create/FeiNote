@@ -188,7 +188,7 @@ object BackupManager {
             settings = BackupSettings(
                 webDavEnabled = config.enabled,
                 webDavServerUrl = config.serverUrl,
-                webDavRemoteFolder = config.remoteFolder,
+                webDavRemoteFolder = "",
                 webDavUsername = config.username,
                 webDavPassword = config.password,
                 backupEncryptionPassword = config.encryptionPassword,
@@ -473,13 +473,19 @@ object BackupManager {
             val hasSettings = restoredSettings != null
             if (restoredSettings != null) {
                 val restoredEncPwd = restoredSettings.backupEncryptionPassword ?: ""
+                val restoredUsername = restoredSettings.webDavUsername ?: ""
+                val restoredPassword = restoredSettings.webDavPassword ?: ""
+                val mergedServerUrl = WebDavBackupManager.mergeLegacyServerUrl(
+                    rawUrl = restoredSettings.webDavServerUrl,
+                    rawRemoteFolder = restoredSettings.webDavRemoteFolder,
+                    hasCredentials = restoredUsername.trim().isNotEmpty() || restoredPassword.isNotEmpty()
+                )
                 WebDavBackupManager.restoreConfig(
                     context = context,
                     config = WebDavBackupManager.WebDavConfig(
-                        serverUrl = restoredSettings.webDavServerUrl ?: WebDavBackupManager.DEFAULT_SERVER_URL,
-                        remoteFolder = restoredSettings.webDavRemoteFolder ?: WebDavBackupManager.DEFAULT_REMOTE_FOLDER,
-                        username = restoredSettings.webDavUsername ?: "",
-                        password = restoredSettings.webDavPassword ?: "",
+                        serverUrl = mergedServerUrl,
+                        username = restoredUsername,
+                        password = restoredPassword,
                         encryptionPassword = restoredEncPwd,
                         wifiAutoSyncEnabled = (restoredSettings.wifiAutoSyncEnabled == true) && restoredEncPwd.isNotEmpty()
                     )
