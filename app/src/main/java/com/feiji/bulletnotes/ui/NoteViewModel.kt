@@ -361,7 +361,6 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveWebDavSettings(
         serverUrl: String,
-        remoteFolder: String,
         username: String,
         password: String,
         encryptionPassword: String = "",
@@ -372,7 +371,6 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         val updatedConfig = WebDavBackupManager.saveSettings(
             context = app,
             serverUrl = serverUrl,
-            remoteFolder = remoteFolder,
             username = username,
             password = password,
             encryptionPassword = encryptionPassword,
