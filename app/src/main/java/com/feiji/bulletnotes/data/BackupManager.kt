@@ -477,8 +477,7 @@ object BackupManager {
                 val restoredPassword = restoredSettings.webDavPassword ?: ""
                 val mergedServerUrl = WebDavBackupManager.mergeLegacyServerUrl(
                     rawUrl = restoredSettings.webDavServerUrl,
-                    rawRemoteFolder = restoredSettings.webDavRemoteFolder,
-                    hasCredentials = restoredUsername.trim().isNotEmpty() || restoredPassword.isNotEmpty()
+                    rawRemoteFolder = restoredSettings.webDavRemoteFolder
                 )
                 WebDavBackupManager.restoreConfig(
                     context = context,
