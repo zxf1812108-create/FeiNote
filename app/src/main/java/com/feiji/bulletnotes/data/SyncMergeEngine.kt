@@ -114,8 +114,7 @@ object SyncMergeEngine {
         }
         val mergedUrl = WebDavBackupManager.mergeLegacyServerUrl(
             rawUrl = rawServerUrl,
-            rawRemoteFolder = rawRemoteFolder,
-            hasCredentials = username.trim().isNotEmpty() || password.isNotEmpty()
+            rawRemoteFolder = rawRemoteFolder
         )
         if (mergedUrl.length > 768) return null
         return SyncableSettings(
