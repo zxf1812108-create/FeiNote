@@ -17,7 +17,7 @@ object SyncMergeEngine {
     data class SyncableSettings(
         val updatedAt: Long = 0L,
         val serverUrl: String = WebDavBackupManager.DEFAULT_SERVER_URL,
-        val remoteFolder: String = WebDavBackupManager.DEFAULT_REMOTE_FOLDER,
+        val remoteFolder: String = "",
         val username: String = "",
         val password: String = "",
         val wifiAutoSyncEnabled: Boolean = false
@@ -39,7 +39,7 @@ object SyncMergeEngine {
         return SyncableSettings(
             updatedAt = WebDavBackupManager.getSettingsUpdatedAt(context),
             serverUrl = cfg.serverUrl,
-            remoteFolder = cfg.remoteFolder,
+            remoteFolder = "",
             username = cfg.username,
             password = cfg.password,
             wifiAutoSyncEnabled = cfg.wifiAutoSyncEnabled
@@ -98,24 +98,30 @@ object SyncMergeEngine {
     fun sanitizeRemoteSettings(settings: SyncableSettings?): SyncableSettings? {
         if (settings == null || settings.updatedAt <= 0L) return null
         @Suppress("USELESS_ELVIS")
-        val serverUrl = settings.serverUrl ?: WebDavBackupManager.DEFAULT_SERVER_URL
+        val rawServerUrl = settings.serverUrl ?: WebDavBackupManager.DEFAULT_SERVER_URL
         @Suppress("USELESS_ELVIS")
-        val remoteFolder = settings.remoteFolder ?: WebDavBackupManager.DEFAULT_REMOTE_FOLDER
+        val rawRemoteFolder = settings.remoteFolder ?: ""
         @Suppress("USELESS_ELVIS")
         val username = settings.username ?: ""
         @Suppress("USELESS_ELVIS")
         val password = settings.password ?: ""
-        if (serverUrl.length > 512 ||
-            remoteFolder.length > 256 ||
+        if (rawServerUrl.length > 512 ||
+            rawRemoteFolder.length > 256 ||
             username.length > 256 ||
             password.length > 512
         ) {
             return null
         }
+        val mergedUrl = WebDavBackupManager.mergeLegacyServerUrl(
+            rawUrl = rawServerUrl,
+            rawRemoteFolder = rawRemoteFolder,
+            hasCredentials = username.trim().isNotEmpty() || password.isNotEmpty()
+        )
+        if (mergedUrl.length > 768) return null
         return SyncableSettings(
             updatedAt = settings.updatedAt,
-            serverUrl = serverUrl,
-            remoteFolder = remoteFolder,
+            serverUrl = mergedUrl,
+            remoteFolder = "",
             username = username,
             password = password,
             wifiAutoSyncEnabled = settings.wifiAutoSyncEnabled
