@@ -1,5 +1,5 @@
 package com.feiji.bulletnotes.ui
-
+ 
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
