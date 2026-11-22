@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,7 +65,6 @@ private val DIAL_OUTER_HOURS = listOf(12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 private val DIAL_INNER_HOURS = listOf(0, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)
 private val DIAL_MINUTES_STEP_5 = listOf(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
 
-private val DIALOG_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy年M月d日")
 private val DIALOG_HINT_FORMATTER = DateTimeFormatter.ofPattern("M月d日 HH:mm")
 
 /**
@@ -116,16 +116,19 @@ fun NoteAlarmDialog(
     val hourDisplay = selectedHour?.let { String.format(Locale.US, "%02d", it) } ?: "--"
     val minuteDisplay = selectedMinute?.let { String.format(Locale.US, "%02d", it) } ?: "--"
 
-    val dateSuffix = when (noteDate) {
-        today -> " · 今天"
-        today.plusDays(1) -> " · 明天"
-        else -> ""
+    val hintText = when {
+        isPastNoteDate -> "该笔记日期已过，调整笔记日期后可设闹钟"
+        selectedHour == null && selectedMinute == null -> "请点选表盘设置小时和分钟"
+        selectedHour == null -> "请点选表盘设置小时"
+        selectedMinute == null -> "请点选表盘设置分钟（5分钟步进）"
+        !isFutureTime -> "所选时间已过，请选择晚于当前的时间"
+        else -> "将在 ${candidateZdt!!.format(DIALOG_HINT_FORMATTER)} 响铃"
     }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            modifier = Modifier.width(324.dp),
-            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.width(336.dp),
+            shape = RoundedCornerShape(22.dp),
             color = bgColor,
             tonalElevation = 0.dp
         ) {
@@ -135,31 +138,27 @@ fun NoteAlarmDialog(
                     .border(
                         width = 1.dp,
                         color = contentColor.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(22.dp)
                     )
-                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                    .padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 14.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // 顶部标题与固定笔记日期
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "设置闹钟",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = contentColor
-                    )
-                    Text(
-                        text = "${noteDate.format(DIALOG_DATE_FORMATTER)}$dateSuffix",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = contentColor.copy(alpha = 0.52f)
-                    )
-                }
+                // 顶部居中淡化引导提示（替代原“设置闹钟”与日期标签）
+                Text(
+                    text = hintText,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
+                    letterSpacing = 0.3.sp,
+                    textAlign = TextAlign.Center,
+                    color = if (isPastNoteDate || (selectedHour != null && selectedMinute != null && !isFutureTime)) {
+                        contentColor.copy(alpha = 0.72f)
+                    } else {
+                        contentColor.copy(alpha = 0.45f)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
 
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(16.dp))
 
                 // 居中大号时间显示（可点击小时/分钟切换表盘）
                 Row(
@@ -174,7 +173,7 @@ fun NoteAlarmDialog(
                     )
                     Text(
                         text = ":",
-                        fontSize = 30.sp,
+                        fontSize = 32.sp,
                         fontWeight = FontWeight.Light,
                         color = contentColor.copy(alpha = 0.45f),
                         modifier = Modifier.padding(horizontal = 8.dp)
@@ -187,7 +186,7 @@ fun NoteAlarmDialog(
                     )
                 }
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(20.dp))
 
                 // 极简黑白模拟表盘
                 MinimalistClockDial(
@@ -199,28 +198,7 @@ fun NoteAlarmDialog(
                     onSelectMinute = { minute -> selectedMinute = minute }
                 )
 
-                Spacer(Modifier.height(14.dp))
-
-                // 轻量提示
-                val hintText = when {
-                    isPastNoteDate -> "该笔记日期已过，调整笔记日期后可设闹钟"
-                    selectedHour == null && selectedMinute == null -> "请点选表盘设置小时和分钟"
-                    selectedHour == null -> "请点选表盘设置小时"
-                    selectedMinute == null -> "请点选表盘设置分钟（5分钟步进）"
-                    !isFutureTime -> "所选时间已过，请选择晚于当前的时间"
-                    else -> "将在 ${candidateZdt!!.format(DIALOG_HINT_FORMATTER)} 响铃"
-                }
-                Text(
-                    text = hintText,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isPastNoteDate || (selectedHour != null && selectedMinute != null && !isFutureTime)) {
-                        contentColor.copy(alpha = 0.72f)
-                    } else {
-                        contentColor.copy(alpha = 0.45f)
-                    }
-                )
-
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(16.dp))
 
                 // 底部操作栏：左侧清除（仅已有闹钟时显示），右侧取消与确定
                 Row(
@@ -275,8 +253,8 @@ private fun TimeSegmentChip(
     val bgColor = MaterialTheme.colorScheme.background
     Box(
         modifier = Modifier
-            .width(72.dp)
-            .height(50.dp)
+            .width(78.dp)
+            .height(54.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(if (active) contentColor.copy(alpha = 0.08f) else bgColor)
             .border(
@@ -289,7 +267,7 @@ private fun TimeSegmentChip(
     ) {
         Text(
             text = text,
-            fontSize = 30.sp,
+            fontSize = 32.sp,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 1.sp,
             color = if (hasValue) contentColor else contentColor.copy(alpha = 0.32f)
@@ -306,10 +284,10 @@ private fun MinimalistClockDial(
     onHourSelectionFinished: () -> Unit,
     onSelectMinute: (Int) -> Unit
 ) {
-    val dialSize = 256.dp
-    val outerRadiusDp = 98.dp
-    val innerRadiusDp = 62.dp
-    val minuteRadiusDp = 96.dp
+    val dialSize = 264.dp
+    val outerRadiusDp = 102.dp
+    val innerRadiusDp = 64.dp
+    val minuteRadiusDp = 100.dp
     val density = LocalDensity.current
 
     val contentColor = MaterialTheme.colorScheme.onSurface
