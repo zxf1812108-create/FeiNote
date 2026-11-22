@@ -41,6 +41,9 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE isDeleted = 0")
     suspend fun getAllActiveNotes(): List<NoteEntity>
 
+    @Query("SELECT * FROM notes WHERE isDeleted = 0 AND alarmTimeMillis IS NOT NULL AND alarmTimeMillis > :nowMillis ORDER BY alarmTimeMillis ASC")
+    suspend fun getActiveNotesWithFutureAlarm(nowMillis: Long): List<NoteEntity>
+
     @Query("SELECT * FROM notes")
     suspend fun getAllNotesForBackup(): List<NoteEntity>
 
@@ -55,6 +58,12 @@ interface NoteDao {
 
     @Query("UPDATE notes SET content = :content, updatedAt = :updatedAt WHERE id = :id AND isDeleted = 0")
     suspend fun updateNoteContent(id: Long, content: String, updatedAt: Long)
+
+    @Query("UPDATE notes SET alarmTimeMillis = :alarmTimeMillis, updatedAt = :updatedAt WHERE id = :id AND isDeleted = 0")
+    suspend fun updateNoteAlarm(id: Long, alarmTimeMillis: Long?, updatedAt: Long = System.currentTimeMillis())
+
+    @Query("UPDATE notes SET alarmTimeMillis = NULL, updatedAt = :updatedAt WHERE id = :id AND alarmTimeMillis = :expectedAlarmTime")
+    suspend fun clearNoteAlarmIfMatches(id: Long, expectedAlarmTime: Long, updatedAt: Long = System.currentTimeMillis())
 
     @Update
     suspend fun updateNotes(notes: List<NoteEntity>)

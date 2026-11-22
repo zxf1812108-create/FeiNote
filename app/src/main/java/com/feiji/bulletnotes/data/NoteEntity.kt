@@ -20,6 +20,7 @@ import java.util.UUID
  * @property reviewIntervalDays 当前记忆曲线间隔天数
  * @property easeFactor 记忆熟练倍率（默认 2.5，范围 1.3~3.5）
  * @property lastReviewedAt 最近一次复习时间戳毫秒值
+ * @property alarmTimeMillis 笔记闹钟触发时间戳毫秒值（null 表示未设置闹钟）
  */
 @Entity(tableName = "notes")
 data class NoteEntity(
@@ -37,7 +38,8 @@ data class NoteEntity(
     val reviewCount: Int = 0,
     val reviewIntervalDays: Int = 0,
     val easeFactor: Float = SpacedRepetitionEngine.DEFAULT_EASE_FACTOR,
-    val lastReviewedAt: Long? = null
+    val lastReviewedAt: Long? = null,
+    val alarmTimeMillis: Long? = null
 )
 
 /**

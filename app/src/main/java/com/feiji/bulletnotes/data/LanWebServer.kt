@@ -534,6 +534,7 @@ object LanWebServer {
                     return
                 }
                 noteDao.softDeleteNote(noteId)
+                com.feiji.bulletnotes.alarm.NoteAlarmScheduler.cancelAlarm(appContext, noteId)
                 enforceTrashLimit(noteDao)
                 scheduleLocalBackup(appContext, noteDao)
                 writeJson(sock, 200, mapOf("ok" to true))

@@ -69,6 +69,7 @@ object SyncMergeEngine {
             @Suppress("USELESS_ELVIS")
             val bulletType = raw.bulletType ?: BulletType.SQUARE
             val normalizedSid = normalizeSyncId(raw.copy(dateString = dateString, content = content))
+            val safeAlarm = raw.alarmTimeMillis?.takeIf { it > 0L }
             result.add(
                 SpacedRepetitionEngine.sanitizeNoteReviewFields(
                     raw.copy(
@@ -76,7 +77,8 @@ object SyncMergeEngine {
                         syncId = normalizedSid,
                         content = content,
                         dateString = dateString,
-                        bulletType = bulletType
+                        bulletType = bulletType,
+                        alarmTimeMillis = safeAlarm
                     )
                 )
             )
@@ -483,6 +485,7 @@ object SyncMergeEngine {
                 append(n.reviewIntervalDays.coerceIn(0, SpacedRepetitionEngine.MAX_INTERVAL_DAYS)).append('|')
                 append(safeEaseInt).append('|')
                 append(n.lastReviewedAt ?: -1L).append('|')
+                append(n.alarmTimeMillis ?: -1L).append('|')
                 append(n.content.length).append(':').append(n.content)
                 append('\n')
             }
@@ -528,7 +531,8 @@ object SyncMergeEngine {
             local.reviewIntervalDays != merged.reviewIntervalDays ||
             SpacedRepetitionEngine.normalizeEaseFactor(local.easeFactor) !=
                 SpacedRepetitionEngine.normalizeEaseFactor(merged.easeFactor) ||
-            local.lastReviewedAt != merged.lastReviewedAt
+            local.lastReviewedAt != merged.lastReviewedAt ||
+            local.alarmTimeMillis != merged.alarmTimeMillis
     }
 
     private fun sha256Hex(bytes: ByteArray): String =

@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
 import com.feiji.bulletnotes.data.AppDatabase
 import com.feiji.bulletnotes.data.BackupManager
 import com.feiji.bulletnotes.data.BulletType
@@ -325,6 +326,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     startForegroundWebDavSyncLoop()
                 }
             }
+            if (notesChanged) {
+                NoteAlarmScheduler.rescheduleAllActiveAlarms(app)
+            }
             if (notesChanged && activeSearchKeywords.isNotEmpty()) {
                 val keywords = activeSearchKeywords
                 val bulletTypes = activeSearchBulletTypes
@@ -500,6 +504,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 val savedPassword = WebDavBackupManager.getConfig(app).encryptionPassword.takeIf { it.isNotEmpty() }
                 when (val result = BackupManager.restoreBackup(app, noteDao, backup.uri, savedPassword)) {
                     is BackupManager.RestoreResult.Success -> {
+                        NoteAlarmScheduler.rescheduleAllActiveAlarms(app)
                         refreshWebDavStateAfterRestore(app)
                         _userMessage.value = result.message
                         lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
@@ -557,6 +562,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 val savedPassword = WebDavBackupManager.getConfig(app).encryptionPassword.takeIf { it.isNotEmpty() }
                 when (val result = BackupManager.restoreBackup(app, noteDao, file.uri, savedPassword)) {
                     is BackupManager.RestoreResult.Success -> {
+                        NoteAlarmScheduler.rescheduleAllActiveAlarms(app)
                         refreshWebDavStateAfterRestore(app)
                         _userMessage.value = result.message
                         lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
@@ -588,6 +594,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 when (val result = BackupManager.restoreBackup(app, noteDao, pending.file.uri, password)) {
                     is BackupManager.RestoreResult.Success -> {
                         _pendingEncryptedRestore.value = null
+                        NoteAlarmScheduler.rescheduleAllActiveAlarms(app)
                         refreshWebDavStateAfterRestore(app)
                         _userMessage.value = result.message
                         lastSnapshot = BackupManager.snapshotJson(app, noteDao.getAllNotesForBackup())
@@ -667,6 +674,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         rolloverOverdueStarNotesIfFirstOpenToday()
+        viewModelScope.launch(Dispatchers.IO) {
+            NoteAlarmScheduler.rescheduleAllActiveAlarms(application)
+        }
         if (BackupManager.hasBackupFolder(application)) startBackupLoop()
         else _needsBackupSetup.value = true
         startWebDavLoop()
@@ -830,6 +840,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     val previous = noteDao.getNoteById(previousId)
                     if (previous != null && !previous.isDeleted && previous.content.isBlank()) {
                         noteDao.deletePermanently(previousId)
+                        NoteAlarmScheduler.cancelAlarm(app, previousId)
                     }
                     // 保持正文写入锁直到备份导出完成，避免备份到编辑过程中的半成品。
                     backupMutex.withLock {
@@ -854,6 +865,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 val edited = noteDao.getNoteById(noteId)
                 if (edited != null && !edited.isDeleted && edited.content.isBlank()) {
                     noteDao.deletePermanently(noteId)
+                    NoteAlarmScheduler.cancelAlarm(app, noteId)
                 }
                 backupMutex.withLock {
                     backupIfChangedLocked(app)
@@ -889,6 +901,16 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             val newDateStr = newDate.format(dateFormatter)
             val updated = note.copy(dateString = newDateStr, updatedAt = System.currentTimeMillis())
             noteDao.updateNote(updated)
+            val existingAlarm = updated.alarmTimeMillis
+            if (existingAlarm != null && existingAlarm > System.currentTimeMillis()) {
+                NoteAlarmScheduler.scheduleAlarm(
+                    context = getApplication(),
+                    noteId = updated.id,
+                    triggerAtMillis = existingAlarm,
+                    noteContent = updated.content,
+                    noteDateString = updated.dateString
+                )
+            }
             _searchResults.value = _searchResults.value
                 .map { if (it.id == updated.id) updated else it }
                 .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
@@ -896,6 +918,52 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 _userMessage.value = "笔记已移动至 $newDateStr"
             }
             notifyLocalDataChangedForSync()
+        }
+    }
+
+    /**
+     * 为指定笔记设置或清除精确闹钟。
+     * alarmTimeMillis 为 null 时清除闹钟。
+     */
+    fun setNoteAlarm(noteId: Long, alarmTimeMillis: Long?) {
+        val pendingContentWrite = latestContentWriteJob
+        viewModelScope.launch(Dispatchers.IO) {
+            pendingContentWrite?.join()
+            val app = getApplication<Application>()
+            var changed = false
+            contentWriteMutex.withLock {
+                val latest = noteDao.getNoteById(noteId) ?: return@withLock
+                if (latest.isDeleted) return@withLock
+                val now = System.currentTimeMillis()
+                noteDao.updateNoteAlarm(noteId, alarmTimeMillis, now)
+                _searchResults.value = _searchResults.value.map {
+                    if (it.id == noteId) it.copy(alarmTimeMillis = alarmTimeMillis, updatedAt = now) else it
+                }
+                if (alarmTimeMillis != null) {
+                    val scheduled = NoteAlarmScheduler.scheduleAlarm(
+                        context = app,
+                        noteId = noteId,
+                        triggerAtMillis = alarmTimeMillis,
+                        noteContent = latest.content,
+                        noteDateString = latest.dateString
+                    )
+                    _userMessage.value = if (scheduled) {
+                        "已设置闹钟：${NoteAlarmScheduler.formatReadableAlarmTime(alarmTimeMillis)}"
+                    } else {
+                        "闹钟时间已保存，请开启精确闹钟权限以确保准时响铃"
+                    }
+                } else {
+                    NoteAlarmScheduler.cancelAlarm(app, noteId)
+                    _userMessage.value = "已清除闹钟"
+                }
+                backupMutex.withLock {
+                    backupIfChangedLocked(app)
+                }
+                changed = true
+            }
+            if (changed) {
+                notifyLocalDataChangedForSync()
+            }
         }
     }
 
@@ -1122,7 +1190,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun moveToTrash(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
             noteDao.softDeleteNote(id)
+            NoteAlarmScheduler.cancelAlarm(app, id)
             val deletedNotes = noteDao.getDeletedNotes().first()
             if (deletedNotes.size > 30) {
                 val overflowCount = deletedNotes.size - 30
@@ -1135,6 +1205,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     .take(overflowCount)
                     .forEach { oldNote ->
                         noteDao.deletePermanentlyWithTombstone(oldNote.id)
+                        NoteAlarmScheduler.cancelAlarm(app, oldNote.id)
                     }
             }
             _searchResults.value = _searchResults.value.filterNot { it.id == id }
@@ -1150,7 +1221,19 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun restoreFromTrash(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
             noteDao.restoreNote(id)
+            val restored = noteDao.getNoteById(id)
+            val alarmMillis = restored?.alarmTimeMillis
+            if (restored != null && !restored.isDeleted && alarmMillis != null && alarmMillis > System.currentTimeMillis()) {
+                NoteAlarmScheduler.scheduleAlarm(
+                    context = app,
+                    noteId = restored.id,
+                    triggerAtMillis = alarmMillis,
+                    noteContent = restored.content,
+                    noteDateString = restored.dateString
+                )
+            }
             notifyLocalDataChangedForSync()
         }
     }
@@ -1161,6 +1244,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     fun permanentlyDelete(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             noteDao.deletePermanentlyWithTombstone(id)
+            NoteAlarmScheduler.cancelAlarm(getApplication(), id)
             notifyLocalDataChangedForSync()
         }
     }

@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "FeiJiBulletNotes"
+rootProject.name = "FeiNote"
 include(":app")

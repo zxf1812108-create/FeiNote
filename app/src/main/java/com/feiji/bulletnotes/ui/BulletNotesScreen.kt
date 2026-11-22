@@ -1,5 +1,5 @@
 package com.feiji.bulletnotes.ui
- 
+
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -131,6 +131,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
 import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.KeywordHintEngine
 import com.feiji.bulletnotes.data.KeywordHintIndex
@@ -195,9 +196,16 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         // 无论是否授予通知权限，都启动局域网直连服务（授予时通知栏会显示停止按钮）
         viewModel.startLanServer()
     }
+    val alarmNotificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // 通知权限弹窗返回后无需额外动作，闹钟已保存并由系统全屏闹钟兜底唤醒
+    }
     val starReviewUndoEvent by viewModel.starReviewUndoEvent.collectAsState()
     var noteToChangeDate by remember { mutableStateOf<NoteEntity?>(null) }
     var noteToReview by remember { mutableStateOf<NoteEntity?>(null) }
+    var noteForAlarm by remember { mutableStateOf<NoteEntity?>(null) }
+    var showExactAlarmPermissionDialog by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
     // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
     var expandedNoteId by remember { mutableStateOf<Long?>(null) }
@@ -1076,6 +1084,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 },
                                 onHintEditFinished = { hintNoteId ->
                                     viewModel.finishInlineNoteEdit(hintNoteId)
+                                },
+                                onAlarmClick = {
+                                    noteForAlarm = note
                                 }
                             )
                         }
@@ -1166,6 +1177,61 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             },
             onDismiss = {
                 noteToReview = null
+            }
+        )
+    }
+
+    // 笔记闹钟设置弹窗
+    noteForAlarm?.let { targetNote ->
+        NoteAlarmDialog(
+            note = targetNote,
+            noteDates = noteDates,
+            onConfirm = { triggerMillis ->
+                viewModel.setNoteAlarm(targetNote.id, triggerMillis)
+                noteForAlarm = null
+                if (!NoteAlarmScheduler.canScheduleExactAlarms(context)) {
+                    showExactAlarmPermissionDialog = true
+                } else if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    alarmNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+            onClear = {
+                viewModel.setNoteAlarm(targetNote.id, null)
+                noteForAlarm = null
+            },
+            onDismiss = {
+                noteForAlarm = null
+            }
+        )
+    }
+
+    if (showExactAlarmPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = { showExactAlarmPermissionDialog = false },
+            title = { Text("需要开启精确闹钟权限") },
+            text = { Text("为确保飞记在彻底关闭和手机锁屏待机时准时响铃，请在系统设置中允许飞记“闹钟和提醒”权限。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showExactAlarmPermissionDialog = false
+                        runCatching {
+                            context.startActivity(NoteAlarmScheduler.buildExactAlarmSettingsIntent(context))
+                        }
+                    }
+                ) {
+                    Text("去开启")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExactAlarmPermissionDialog = false }) {
+                    Text("稍后")
+                }
             }
         )
     }
@@ -1918,7 +1984,8 @@ fun BulletNoteRow(
     onHintBulletClick: (NoteEntity) -> Unit,
     onHintBulletLongClick: (NoteEntity) -> Unit,
     onHintContentChange: (Long, String) -> Unit,
-    onHintEditFinished: (Long) -> Unit
+    onHintEditFinished: (Long) -> Unit,
+    onAlarmClick: () -> Unit
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
@@ -2321,11 +2388,53 @@ fun BulletNoteRow(
 
                                 // 操作图标统一使用同一套矢量绘制与 IconButton 布局，
                                 // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
+                                // 方式 A：闹钟入口位于编辑工具栏最左侧，未设置时极淡显示，已设置时展示时间。
+                                val activeAlarmMillis = note.alarmTimeMillis?.takeIf {
+                                    it > System.currentTimeMillis()
+                                }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    Box(
+                                        modifier = Modifier.weight(1f),
+                                        contentAlignment = Alignment.CenterStart
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .height(48.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .focusProperties { canFocus = false }
+                                                .clickable(onClick = onAlarmClick)
+                                                .padding(horizontal = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            val alarmTint = if (activeAlarmMillis != null) {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                            }
+                                            AlarmClockIcon(
+                                                color = alarmTint,
+                                                strokeWidthDp = 1.8f,
+                                                modifier = Modifier.size(19.dp)
+                                            )
+                                            if (activeAlarmMillis != null) {
+                                                Spacer(modifier = Modifier.width(5.dp))
+                                                Text(
+                                                    text = NoteAlarmScheduler.formatCompactAlarmTime(
+                                                        activeAlarmMillis,
+                                                        note.dateString
+                                                    ),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = alarmTint,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+
                                     // 撤销、恢复靠右排布，与最右侧的收起按钮之间空出一个按钮宽度（48.dp）。
                                     EditorActionButton(
                                         symbol = EditorActionSymbol.Undo,
@@ -2355,6 +2464,42 @@ fun BulletNoteRow(
                             }
                         }
                     )
+                }
+            }
+
+            // 浏览状态下：仅当该条笔记存在未来闹钟时，在行末极淡显示闹钟图标与时间（点击可直接修改/清除）。
+            if (!isEditing) {
+                val activeAlarmMillis = note.alarmTimeMillis?.takeIf {
+                    it > System.currentTimeMillis()
+                }
+                if (activeAlarmMillis != null) {
+                    val mutedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                    Row(
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .offset(y = bulletVerticalOffset)
+                            .height(28.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable(onClick = onAlarmClick)
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        AlarmClockIcon(
+                            color = mutedColor,
+                            strokeWidthDp = 1.4f,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = NoteAlarmScheduler.formatCompactAlarmTime(
+                                activeAlarmMillis,
+                                note.dateString
+                            ),
+                            fontSize = 12.sp,
+                            color = mutedColor,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
         }
@@ -3030,3 +3175,53 @@ private fun EditorActionButton(
         }
     }
 }
+
+/** 极简线性闹钟图标，统一采用 24x24 坐标系与编辑区其他矢量按钮保持风格一致。 */
+@Composable
+private fun AlarmClockIcon(
+    color: Color,
+    strokeWidthDp: Float = 1.8f,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val scale = size.width / 24f
+        val sw = strokeWidthDp.dp.toPx()
+        val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val center = Offset(12f * scale, 13.5f * scale)
+        val radius = 7.5f * scale
+
+        // 表盘圆
+        drawCircle(color = color, radius = radius, center = center, style = stroke)
+        // 顶部左右小闹铃耳
+        drawLine(
+            color = color,
+            start = Offset(4.2f * scale, 6.2f * scale),
+            end = Offset(7.4f * scale, 3.6f * scale),
+            strokeWidth = sw,
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = color,
+            start = Offset(19.8f * scale, 6.2f * scale),
+            end = Offset(16.6f * scale, 3.6f * scale),
+            strokeWidth = sw,
+            cap = StrokeCap.Round
+        )
+        // 时针与分针
+        drawLine(
+            color = color,
+            start = center,
+            end = Offset(12f * scale, 9.2f * scale),
+            strokeWidth = sw * 0.9f,
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = color,
+            start = center,
+            end = Offset(15.2f * scale, 15.0f * scale),
+            strokeWidth = sw * 0.9f,
+            cap = StrokeCap.Round
+        )
+    }
+}
+

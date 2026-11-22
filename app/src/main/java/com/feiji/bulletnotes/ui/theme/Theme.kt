@@ -58,4 +58,3 @@ fun FeiJiTheme(
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }
-

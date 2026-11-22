@@ -18,14 +18,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
 import com.feiji.bulletnotes.ui.BulletNotesScreen
 import com.feiji.bulletnotes.ui.NoteViewModel
 import com.feiji.bulletnotes.ui.theme.FeiJiTheme
+import java.time.LocalDate
 
 class MainActivity : ComponentActivity() {
     private val viewModel: NoteViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleAlarmOpenIntent(intent)
         setContent {
             // Compose 专用函数必须在 Composable 上下文中先求值，再用于 rememberSaveable 初始化。
             val systemDarkTheme = isSystemInDarkTheme()
@@ -33,6 +36,22 @@ class MainActivity : ComponentActivity() {
             FeiJiTheme(darkTheme = darkTheme) {
                 BackupSetupPrompt(viewModel = viewModel, onToggleTheme = { darkTheme = !darkTheme })
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAlarmOpenIntent(intent)
+    }
+
+    private fun handleAlarmOpenIntent(intent: Intent?) {
+        val dateStr = intent?.getStringExtra(NoteAlarmScheduler.EXTRA_OPEN_DATE)
+        if (!dateStr.isNullOrBlank()) {
+            runCatching { LocalDate.parse(dateStr) }.getOrNull()?.let { targetDate ->
+                viewModel.selectDate(targetDate)
+            }
+            intent.removeExtra(NoteAlarmScheduler.EXTRA_OPEN_DATE)
         }
     }
 
