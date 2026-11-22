@@ -722,15 +722,23 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     val todayNotes = noteDao.getActiveNotesByDateOnce(todayStr)
                     val now = System.currentTimeMillis()
                     val updates = ArrayList<NoteEntity>(overdueStars.size + todayNotes.size)
+                    val alarmUpdatedNotes = ArrayList<NoteEntity>()
 
                     overdueStars.forEachIndexed { index, note ->
-                        updates.add(
-                            note.copy(
-                                dateString = todayStr,
-                                orderIndex = index,
-                                updatedAt = now
-                            )
+                        val shiftedAlarm = NoteAlarmScheduler.retargetAlarmToDate(
+                            note.alarmTimeMillis,
+                            today
+                        )?.takeIf { it > now }
+                        val movedNote = note.copy(
+                            dateString = todayStr,
+                            orderIndex = index,
+                            alarmTimeMillis = shiftedAlarm,
+                            updatedAt = now
                         )
+                        updates.add(movedNote)
+                        if (note.alarmTimeMillis != null || shiftedAlarm != null) {
+                            alarmUpdatedNotes.add(movedNote)
+                        }
                     }
 
                     val baseIndex = overdueStars.size
@@ -748,6 +756,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
                     if (updates.isNotEmpty()) {
                         noteDao.updateNotes(updates)
+                        alarmUpdatedNotes.forEach { movedNote ->
+                            NoteAlarmScheduler.syncNoteAlarm(app, movedNote)
+                        }
                         movedAny = true
                     }
                 }
@@ -898,26 +909,44 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun changeNoteDate(note: NoteEntity, newDate: LocalDate) {
         viewModelScope.launch(Dispatchers.IO) {
-            val newDateStr = newDate.format(dateFormatter)
-            val updated = note.copy(dateString = newDateStr, updatedAt = System.currentTimeMillis())
-            noteDao.updateNote(updated)
-            val existingAlarm = updated.alarmTimeMillis
-            if (existingAlarm != null && existingAlarm > System.currentTimeMillis()) {
-                NoteAlarmScheduler.scheduleAlarm(
-                    context = getApplication(),
-                    noteId = updated.id,
-                    triggerAtMillis = existingAlarm,
-                    noteContent = updated.content,
-                    noteDateString = updated.dateString
+            val pendingContentWrite = latestContentWriteJob
+            pendingContentWrite?.join()
+            val app = getApplication<Application>()
+            var movedNote: NoteEntity? = null
+            var hadActiveAlarm = false
+            contentWriteMutex.withLock {
+                val latest = noteDao.getNoteById(note.id) ?: note
+                if (latest.isDeleted) return@withLock
+                val now = System.currentTimeMillis()
+                val newDateStr = newDate.format(dateFormatter)
+                val shiftedAlarm = NoteAlarmScheduler.retargetAlarmToDate(
+                    latest.alarmTimeMillis,
+                    newDate
+                )?.takeIf { it > now }
+                hadActiveAlarm = shiftedAlarm != null
+                val updated = latest.copy(
+                    dateString = newDateStr,
+                    alarmTimeMillis = shiftedAlarm,
+                    updatedAt = now
                 )
+                noteDao.updateNote(updated)
+                NoteAlarmScheduler.syncNoteAlarm(app, updated)
+                _searchResults.value = _searchResults.value
+                    .map { if (it.id == updated.id) updated else it }
+                    .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
+                movedNote = updated
             }
-            _searchResults.value = _searchResults.value
-                .map { if (it.id == updated.id) updated else it }
-                .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
-            if (newDate != _selectedDate.value) {
-                _userMessage.value = "笔记已移动至 $newDateStr"
+            if (movedNote != null) {
+                if (newDate != _selectedDate.value) {
+                    val newDateStr = newDate.format(dateFormatter)
+                    _userMessage.value = if (hadActiveAlarm) {
+                        "笔记与闹钟已移动至 $newDateStr"
+                    } else {
+                        "笔记已移动至 $newDateStr"
+                    }
+                }
+                notifyLocalDataChangedForSync()
             }
-            notifyLocalDataChangedForSync()
         }
     }
 
@@ -989,9 +1018,14 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     latest.orderIndex
                 }
                 val now = System.currentTimeMillis()
+                val shiftedAlarm = NoteAlarmScheduler.retargetAlarmToDate(
+                    latest.alarmTimeMillis,
+                    schedule.nextDate
+                )?.takeIf { it > now }
                 val updated = latest.copy(
                     dateString = targetDateStr,
                     orderIndex = targetOrderIndex,
+                    alarmTimeMillis = shiftedAlarm,
                     reviewCount = schedule.nextReviewCount,
                     reviewIntervalDays = schedule.nextIntervalDays,
                     easeFactor = schedule.nextEaseFactor,
@@ -999,6 +1033,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                     updatedAt = now
                 )
                 noteDao.updateNote(updated)
+                NoteAlarmScheduler.syncNoteAlarm(getApplication(), updated)
                 _searchResults.value = _searchResults.value
                     .map { if (it.id == updated.id) updated else it }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
@@ -1024,16 +1059,20 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             contentWriteMutex.withLock {
                 val current = noteDao.getNoteById(previousNote.id) ?: return@withLock
                 if (current.isDeleted) return@withLock
+                val now = System.currentTimeMillis()
+                val restoredAlarm = previousNote.alarmTimeMillis?.takeIf { it > now }
                 val restored = current.copy(
                     dateString = previousNote.dateString,
                     orderIndex = previousNote.orderIndex,
+                    alarmTimeMillis = restoredAlarm,
                     reviewCount = previousNote.reviewCount,
                     reviewIntervalDays = previousNote.reviewIntervalDays,
                     easeFactor = previousNote.easeFactor,
                     lastReviewedAt = previousNote.lastReviewedAt,
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = now
                 )
                 noteDao.updateNote(restored)
+                NoteAlarmScheduler.syncNoteAlarm(getApplication(), restored)
                 _searchResults.value = _searchResults.value
                     .map { if (it.id == restored.id) restored else it }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })

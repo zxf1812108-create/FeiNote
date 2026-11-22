@@ -286,6 +286,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         isCreatingFromHint = false
         showAllTodayStars = false
         sessionExemptStarIds = emptySet()
+        if (isSearchMode) {
+            noteForAlarm = null
+        }
     }
 
     LaunchedEffect(todayStarProjection.totalStarCount, isToday, isSearchMode) {
@@ -1085,8 +1088,11 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 onHintEditFinished = { hintNoteId ->
                                     viewModel.finishInlineNoteEdit(hintNoteId)
                                 },
+                                allowAlarm = !isSearchMode,
                                 onAlarmClick = {
-                                    noteForAlarm = note
+                                    if (!isSearchMode) {
+                                        noteForAlarm = note
+                                    }
                                 }
                             )
                         }
@@ -1181,34 +1187,35 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         )
     }
 
-    // 笔记闹钟设置弹窗
-    noteForAlarm?.let { targetNote ->
-        NoteAlarmDialog(
-            note = targetNote,
-            noteDates = noteDates,
-            onConfirm = { triggerMillis ->
-                viewModel.setNoteAlarm(targetNote.id, triggerMillis)
-                noteForAlarm = null
-                if (!NoteAlarmScheduler.canScheduleExactAlarms(context)) {
-                    showExactAlarmPermissionDialog = true
-                } else if (
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                    ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.POST_NOTIFICATIONS
-                    ) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    alarmNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    // 笔记闹钟设置弹窗（仅日期浏览界面下可用）
+    if (!isSearchMode) {
+        noteForAlarm?.let { targetNote ->
+            NoteAlarmDialog(
+                note = targetNote,
+                onConfirm = { triggerMillis ->
+                    viewModel.setNoteAlarm(targetNote.id, triggerMillis)
+                    noteForAlarm = null
+                    if (!NoteAlarmScheduler.canScheduleExactAlarms(context)) {
+                        showExactAlarmPermissionDialog = true
+                    } else if (
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        alarmNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                },
+                onClear = {
+                    viewModel.setNoteAlarm(targetNote.id, null)
+                    noteForAlarm = null
+                },
+                onDismiss = {
+                    noteForAlarm = null
                 }
-            },
-            onClear = {
-                viewModel.setNoteAlarm(targetNote.id, null)
-                noteForAlarm = null
-            },
-            onDismiss = {
-                noteForAlarm = null
-            }
-        )
+            )
+        }
     }
 
     if (showExactAlarmPermissionDialog) {
@@ -1985,6 +1992,7 @@ fun BulletNoteRow(
     onHintBulletLongClick: (NoteEntity) -> Unit,
     onHintContentChange: (Long, String) -> Unit,
     onHintEditFinished: (Long) -> Unit,
+    allowAlarm: Boolean = true,
     onAlarmClick: () -> Unit
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -2388,49 +2396,52 @@ fun BulletNoteRow(
 
                                 // 操作图标统一使用同一套矢量绘制与 IconButton 布局，
                                 // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
-                                // 方式 A：闹钟入口位于编辑工具栏最左侧，未设置时极淡显示，已设置时展示时间。
+                                // 方式 A：仅日期浏览界面下在编辑工具栏最左侧显示闹钟入口，搜索界面不显示。
                                 val activeAlarmMillis = note.alarmTimeMillis?.takeIf {
                                     it > System.currentTimeMillis()
                                 }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = if (allowAlarm) Arrangement.Start else Arrangement.End,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Box(
-                                        modifier = Modifier.weight(1f),
-                                        contentAlignment = Alignment.CenterStart
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .height(48.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .focusProperties { canFocus = false }
-                                                .clickable(onClick = onAlarmClick)
-                                                .padding(horizontal = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically
+                                    if (allowAlarm) {
+                                        Box(
+                                            modifier = Modifier.weight(1f),
+                                            contentAlignment = Alignment.CenterStart
                                         ) {
-                                            val alarmTint = if (activeAlarmMillis != null) {
-                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                                            }
-                                            AlarmClockIcon(
-                                                color = alarmTint,
-                                                strokeWidthDp = 1.8f,
-                                                modifier = Modifier.size(19.dp)
-                                            )
-                                            if (activeAlarmMillis != null) {
-                                                Spacer(modifier = Modifier.width(5.dp))
-                                                Text(
-                                                    text = NoteAlarmScheduler.formatCompactAlarmTime(
-                                                        activeAlarmMillis,
-                                                        note.dateString
-                                                    ),
-                                                    style = MaterialTheme.typography.bodySmall,
+                                            Row(
+                                                modifier = Modifier
+                                                    .height(48.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .focusProperties { canFocus = false }
+                                                    .clickable(onClick = onAlarmClick)
+                                                    .padding(horizontal = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                val alarmTint = if (activeAlarmMillis != null) {
+                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                                }
+                                                AlarmClockIcon(
                                                     color = alarmTint,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    strokeWidthDp = 1.8f,
+                                                    modifier = Modifier.size(19.dp)
                                                 )
+                                                if (activeAlarmMillis != null) {
+                                                    Spacer(modifier = Modifier.width(5.dp))
+                                                    Text(
+                                                        text = NoteAlarmScheduler.formatCompactAlarmTime(
+                                                            activeAlarmMillis,
+                                                            note.dateString
+                                                        ),
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = alarmTint,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -2467,7 +2478,8 @@ fun BulletNoteRow(
                 }
             }
 
-            // 浏览状态下：仅当该条笔记存在未来闹钟时，在行末极淡显示闹钟图标与时间（点击可直接修改/清除）。
+            // 浏览状态下：仅当该条笔记存在未来闹钟时，在行末极淡显示闹钟图标与时间；
+            // 仅日期浏览界面可点击修改，搜索界面只读不可设置。
             if (!isEditing) {
                 val activeAlarmMillis = note.alarmTimeMillis?.takeIf {
                     it > System.currentTimeMillis()
@@ -2480,7 +2492,13 @@ fun BulletNoteRow(
                             .offset(y = bulletVerticalOffset)
                             .height(28.dp)
                             .clip(RoundedCornerShape(4.dp))
-                            .clickable(onClick = onAlarmClick)
+                            .then(
+                                if (allowAlarm) {
+                                    Modifier.clickable(onClick = onAlarmClick)
+                                } else {
+                                    Modifier
+                                }
+                            )
                             .padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {

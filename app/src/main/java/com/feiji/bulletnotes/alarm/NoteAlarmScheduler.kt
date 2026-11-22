@@ -9,9 +9,11 @@ import android.os.Build
 import android.provider.Settings
 import com.feiji.bulletnotes.MainActivity
 import com.feiji.bulletnotes.data.AppDatabase
+import com.feiji.bulletnotes.data.NoteEntity
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 /**
@@ -160,6 +162,34 @@ object NoteAlarmScheduler {
                     noteDateString = note.dateString
                 )
             }
+        }
+    }
+
+    /**
+     * 当笔记日期变更时，保留原有闹钟的“时:分”，将其日期同步平移至新的笔记日期。
+     */
+    fun retargetAlarmToDate(existingAlarmMillis: Long?, newDate: LocalDate): Long? {
+        if (existingAlarmMillis == null || existingAlarmMillis <= 0L) return null
+        val zone = ZoneId.systemDefault()
+        val localTime = Instant.ofEpochMilli(existingAlarmMillis).atZone(zone).toLocalTime()
+        return ZonedDateTime.of(newDate, localTime, zone).toInstant().toEpochMilli()
+    }
+
+    /**
+     * 按笔记最新状态同步系统闹钟：若未删除且存在未来闹钟则注册/更新，否则取消系统闹钟。
+     */
+    fun syncNoteAlarm(context: Context, note: NoteEntity) {
+        val trigger = note.alarmTimeMillis
+        if (!note.isDeleted && trigger != null && trigger > System.currentTimeMillis()) {
+            scheduleAlarm(
+                context = context,
+                noteId = note.id,
+                triggerAtMillis = trigger,
+                noteContent = note.content,
+                noteDateString = note.dateString
+            )
+        } else {
+            cancelAlarm(context, note.id)
         }
     }
 
