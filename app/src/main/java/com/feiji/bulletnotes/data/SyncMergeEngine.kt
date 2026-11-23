@@ -482,7 +482,7 @@ object SyncMergeEngine {
                 append(n.updatedAt).append('|')
                 append(n.deletedAt ?: -1L).append('|')
                 append(n.reviewCount.coerceAtLeast(0)).append('|')
-                append(n.reviewIntervalDays.coerceIn(0, SpacedRepetitionEngine.MAX_INTERVAL_DAYS)).append('|')
+                append(n.reviewIntervalDays.coerceIn(0, SpacedRepetitionEngine.HARD_MAX_INTERVAL_DAYS)).append('|')
                 append(safeEaseInt).append('|')
                 append(n.lastReviewedAt ?: -1L).append('|')
                 append(n.alarmTimeMillis ?: -1L).append('|')

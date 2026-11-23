@@ -13,6 +13,8 @@ import com.feiji.bulletnotes.data.KeywordHintEngine
 import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.LanServerService
 import com.feiji.bulletnotes.data.LanWebServer
+import com.feiji.bulletnotes.data.MemoryCurveConfig
+import com.feiji.bulletnotes.data.MemoryCurvePreferences
 import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.data.ReviewFamiliarity
 import com.feiji.bulletnotes.data.SpacedRepetitionEngine
@@ -72,6 +74,15 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     // 当前处于编辑状态的笔记 ID（null 表示无单项进入多行编辑）
     private val _editingNoteId = MutableStateFlow<Long?>(null)
     val editingNoteId: StateFlow<Long?> = _editingNoteId.asStateFlow()
+
+    // 用户自定义的五角星记忆曲线参数
+    private val _memoryCurveConfig = MutableStateFlow(MemoryCurvePreferences.load(application))
+    val memoryCurveConfig: StateFlow<MemoryCurveConfig> = _memoryCurveConfig.asStateFlow()
+
+    fun updateMemoryCurveConfig(config: MemoryCurveConfig) {
+        val saved = MemoryCurvePreferences.save(getApplication(), config)
+        _memoryCurveConfig.value = saved
+    }
 
     // 搜索结果：仅包含未删除、符合指定标识符集合且正文匹配关键词的笔记。
     private val _searchResults = MutableStateFlow<List<NoteEntity>>(emptyList())
@@ -1015,7 +1026,12 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 val latest = noteDao.getNoteById(note.id) ?: note
                 if (latest.isDeleted) return@withLock
                 val today = LocalDate.now()
-                val schedule = SpacedRepetitionEngine.computeNextReview(latest, familiarity, today)
+                val schedule = SpacedRepetitionEngine.computeNextReview(
+                    note = latest,
+                    familiarity = familiarity,
+                    today = today,
+                    config = _memoryCurveConfig.value
+                )
                 val targetDateStr = schedule.nextDate.format(dateFormatter)
                 val targetOrderIndex = if (targetDateStr != latest.dateString) {
                     val targetDayNotes = noteDao.getNotesByDate(targetDateStr).first()

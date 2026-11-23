@@ -179,6 +179,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val trashNotes by viewModel.trashNotes.collectAsState()
     val keywordHintIndex by viewModel.keywordHintIndex.collectAsState()
     val editingNoteId by viewModel.editingNoteId.collectAsState()
+    val memoryCurveConfig by viewModel.memoryCurveConfig.collectAsState()
     val userMessage by viewModel.userMessage.collectAsState()
 
     var showTrashDialog by remember { mutableStateOf(false) }
@@ -1188,6 +1189,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     noteToReview?.let { targetNote ->
         StarReviewDialog(
             note = targetNote,
+            memoryCurveConfig = memoryCurveConfig,
+            onSaveMemoryCurveConfig = { updated ->
+                viewModel.updateMemoryCurveConfig(updated)
+            },
             onSelectFamiliarity = { familiarity ->
                 viewModel.reviewStarNote(targetNote, familiarity)
                 noteToReview = null

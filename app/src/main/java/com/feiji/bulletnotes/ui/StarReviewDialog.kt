@@ -1,48 +1,94 @@
 package com.feiji.bulletnotes.ui
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.feiji.bulletnotes.data.MemoryCurveConfig
 import com.feiji.bulletnotes.data.NoteEntity
 import com.feiji.bulletnotes.data.ReviewFamiliarity
 import com.feiji.bulletnotes.data.SpacedRepetitionEngine
 import java.time.LocalDate
+import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
  * 长按五角星知识卡片时弹出的极简熟悉度选择窗：
  * - 展示当前复习进度摘要；
+ * - 右上角提供低存在感的设置入口，用于自定义记忆曲线参数；
  * - 提供“陌生 / 大概了解 / 很熟悉”三档选项并实时预览下次复习间隔天数，点选即刻生效。
  */
 @Composable
 fun StarReviewDialog(
     note: NoteEntity,
+    memoryCurveConfig: MemoryCurveConfig,
+    onSaveMemoryCurveConfig: (MemoryCurveConfig) -> Unit,
     onSelectFamiliarity: (ReviewFamiliarity) -> Unit,
     onDismiss: () -> Unit
 ) {
     val today = remember(note.id) { LocalDate.now() }
+    var showCurveSettings by remember { mutableStateOf(false) }
 
-    val options = remember(note.id, note.reviewCount, note.reviewIntervalDays, note.easeFactor, today) {
+    val options = remember(
+        note.id,
+        note.reviewCount,
+        note.reviewIntervalDays,
+        note.easeFactor,
+        note.lastReviewedAt,
+        today,
+        memoryCurveConfig
+    ) {
         ReviewFamiliarity.entries.map { familiarity ->
-            familiarity to SpacedRepetitionEngine.computeNextReview(note, familiarity, today)
+            familiarity to SpacedRepetitionEngine.computeNextReview(
+                note = note,
+                familiarity = familiarity,
+                today = today,
+                config = memoryCurveConfig
+            )
         }
     }
 
@@ -78,12 +124,32 @@ fun StarReviewDialog(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 16.dp)
             ) {
-                Text(
-                    text = "复习熟悉度",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "复习熟悉度",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 右上角低存在感记忆曲线参数设置图标
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { showCurveSettings = true }
+                            .semantics { contentDescription = "记忆曲线设置" },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        SubtleGearIcon(
+                            color = mutedTextColor.copy(alpha = 0.55f),
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = statusText,
@@ -132,4 +198,460 @@ fun StarReviewDialog(
             }
         }
     }
+
+    if (showCurveSettings) {
+        MemoryCurveSettingsDialog(
+            initialConfig = memoryCurveConfig,
+            onSave = { updated ->
+                onSaveMemoryCurveConfig(updated)
+                showCurveSettings = false
+            },
+            onDismiss = { showCurveSettings = false }
+        )
+    }
 }
+
+/**
+ * 极简细线齿轮图标（与飞记整体克制线条风格一致）。
+ */
+@Composable
+private fun SubtleGearIcon(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val strokeWidth = 1.35.dp.toPx()
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val innerR = size.minDimension * 0.16f
+        val bodyR = size.minDimension * 0.34f
+        val toothOuterR = size.minDimension * 0.48f
+
+        drawCircle(
+            color = color,
+            radius = innerR,
+            center = center,
+            style = Stroke(width = strokeWidth)
+        )
+        drawCircle(
+            color = color,
+            radius = bodyR,
+            center = center,
+            style = Stroke(width = strokeWidth)
+        )
+        for (i in 0 until 6) {
+            val rad = Math.toRadians(i * 60.0)
+            val cosA = cos(rad).toFloat()
+            val sinA = sin(rad).toFloat()
+            drawLine(
+                color = color,
+                start = Offset(center.x + bodyR * cosA, center.y + bodyR * sinA),
+                end = Offset(center.x + toothOuterR * cosA, center.y + toothOuterR * sinA),
+                strokeWidth = strokeWidth,
+                cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+/**
+ * 记忆曲线参数自定义弹窗：
+ * 支持调整初次/重学间隔、熟练倍率、大概了解系数与最大间隔上限，并实时预览曲线节奏。
+ */
+@Composable
+private fun MemoryCurveSettingsDialog(
+    initialConfig: MemoryCurveConfig,
+    onSave: (MemoryCurveConfig) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var unfamiliarText by remember(initialConfig) { mutableStateOf(initialConfig.unfamiliarDays.toString()) }
+    var initialSomewhatText by remember(initialConfig) { mutableStateOf(initialConfig.initialSomewhatDays.toString()) }
+    var initialVeryText by remember(initialConfig) { mutableStateOf(initialConfig.initialVeryDays.toString()) }
+    var easeFactorText by remember(initialConfig) { mutableStateOf(formatDecimal(initialConfig.initialEaseFactor, 2)) }
+    var somewhatMultText by remember(initialConfig) { mutableStateOf(formatDecimal(initialConfig.somewhatMultiplier, 2)) }
+    var maxIntervalText by remember(initialConfig) { mutableStateOf(initialConfig.maxIntervalDays.toString()) }
+
+    val draftConfig = remember(
+        unfamiliarText,
+        initialSomewhatText,
+        initialVeryText,
+        easeFactorText,
+        somewhatMultText,
+        maxIntervalText
+    ) {
+        MemoryCurveConfig(
+            unfamiliarDays = unfamiliarText.toIntOrNull() ?: initialConfig.unfamiliarDays,
+            initialSomewhatDays = initialSomewhatText.toIntOrNull() ?: initialConfig.initialSomewhatDays,
+            initialVeryDays = initialVeryText.toIntOrNull() ?: initialConfig.initialVeryDays,
+            initialEaseFactor = easeFactorText.toFloatOrNull() ?: initialConfig.initialEaseFactor,
+            somewhatMultiplier = somewhatMultText.toFloatOrNull() ?: initialConfig.somewhatMultiplier,
+            maxIntervalDays = maxIntervalText.toIntOrNull() ?: initialConfig.maxIntervalDays
+        ).normalized()
+    }
+
+    val veryPreview = remember(draftConfig) {
+        SpacedRepetitionEngine.simulateIntervals(draftConfig, ReviewFamiliarity.VERY_FAMILIAR, 4)
+            .joinToString(" → ") { "${it}天" }
+    }
+    val somewhatPreview = remember(draftConfig) {
+        SpacedRepetitionEngine.simulateIntervals(draftConfig, ReviewFamiliarity.SOMEWHAT_FAMILIAR, 4)
+            .joinToString(" → ") { "${it}天" }
+    }
+
+    val contentColor = MaterialTheme.colorScheme.onSurface
+    val mutedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val borderColor = MaterialTheme.colorScheme.outlineVariant
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .width(316.dp)
+                .border(
+                    width = 1.dp,
+                    color = borderColor,
+                    shape = RoundedCornerShape(16.dp)
+                ),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 0.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 18.dp, end = 18.dp, top = 16.dp, bottom = 10.dp)
+            ) {
+                Text(
+                    text = "记忆曲线参数",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = contentColor
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "自定义五角星知识卡片的间隔递增规则",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = mutedTextColor
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = borderColor)
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    IntParameterRow(
+                        label = "陌生重学间隔",
+                        unit = "天",
+                        text = unfamiliarText,
+                        min = 1,
+                        max = 30,
+                        step = 1,
+                        fallback = draftConfig.unfamiliarDays,
+                        onTextChange = { unfamiliarText = it }
+                    )
+                    IntParameterRow(
+                        label = "首次大概了解",
+                        unit = "天",
+                        text = initialSomewhatText,
+                        min = 1,
+                        max = 60,
+                        step = 1,
+                        fallback = draftConfig.initialSomewhatDays,
+                        onTextChange = { initialSomewhatText = it }
+                    )
+                    IntParameterRow(
+                        label = "首次很熟悉",
+                        unit = "天",
+                        text = initialVeryText,
+                        min = 1,
+                        max = 90,
+                        step = 1,
+                        fallback = draftConfig.initialVeryDays,
+                        onTextChange = { initialVeryText = it }
+                    )
+
+                    HorizontalDivider(color = borderColor.copy(alpha = 0.7f))
+
+                    FloatParameterRow(
+                        label = "初始熟练倍率",
+                        unit = "×",
+                        text = easeFactorText,
+                        min = SpacedRepetitionEngine.MIN_EASE_FACTOR,
+                        max = SpacedRepetitionEngine.MAX_EASE_FACTOR,
+                        step = 0.1f,
+                        fallback = draftConfig.initialEaseFactor,
+                        onTextChange = { easeFactorText = it }
+                    )
+                    FloatParameterRow(
+                        label = "大概了解系数",
+                        unit = "×",
+                        text = somewhatMultText,
+                        min = 0.30f,
+                        max = 1.00f,
+                        step = 0.05f,
+                        fallback = draftConfig.somewhatMultiplier,
+                        onTextChange = { somewhatMultText = it }
+                    )
+                    IntParameterRow(
+                        label = "最大间隔上限",
+                        unit = "天",
+                        text = maxIntervalText,
+                        min = SpacedRepetitionEngine.MIN_MAX_INTERVAL_DAYS,
+                        max = SpacedRepetitionEngine.HARD_MAX_INTERVAL_DAYS,
+                        step = 30,
+                        fallback = draftConfig.maxIntervalDays,
+                        onTextChange = { maxIntervalText = it }
+                    )
+
+                    // 实时间隔推演预览
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "新卡节奏预览",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = mutedTextColor
+                        )
+                        Text(
+                            text = "很熟悉：$veryPreview",
+                            fontSize = 12.sp,
+                            color = contentColor.copy(alpha = 0.88f)
+                        )
+                        Text(
+                            text = "大概了解：$somewhatPreview",
+                            fontSize = 12.sp,
+                            color = mutedTextColor
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(
+                        onClick = {
+                            val defaults = MemoryCurveConfig()
+                            unfamiliarText = defaults.unfamiliarDays.toString()
+                            initialSomewhatText = defaults.initialSomewhatDays.toString()
+                            initialVeryText = defaults.initialVeryDays.toString()
+                            easeFactorText = formatDecimal(defaults.initialEaseFactor, 2)
+                            somewhatMultText = formatDecimal(defaults.somewhatMultiplier, 2)
+                            maxIntervalText = defaults.maxIntervalDays.toString()
+                        }
+                    ) {
+                        Text(
+                            text = "恢复默认",
+                            color = mutedTextColor
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onDismiss) {
+                            Text(
+                                text = "取消",
+                                color = mutedTextColor
+                            )
+                        }
+                        TextButton(onClick = { onSave(draftConfig) }) {
+                            Text(
+                                text = "保存",
+                                fontWeight = FontWeight.Bold,
+                                color = contentColor
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IntParameterRow(
+    label: String,
+    unit: String,
+    text: String,
+    min: Int,
+    max: Int,
+    step: Int,
+    fallback: Int,
+    onTextChange: (String) -> Unit
+) {
+    ParameterStepperRow(
+        label = label,
+        unit = unit,
+        text = text,
+        keyboardType = KeyboardType.Number,
+        onTextChange = { raw ->
+            val filtered = raw.filter { it.isDigit() }.take(4)
+            onTextChange(filtered)
+        },
+        onDecrement = {
+            val current = text.toIntOrNull() ?: fallback
+            val next = (current - step).coerceIn(min, max)
+            onTextChange(next.toString())
+        },
+        onIncrement = {
+            val current = text.toIntOrNull() ?: fallback
+            val next = (current + step).coerceIn(min, max)
+            onTextChange(next.toString())
+        }
+    )
+}
+
+@Composable
+private fun FloatParameterRow(
+    label: String,
+    unit: String,
+    text: String,
+    min: Float,
+    max: Float,
+    step: Float,
+    fallback: Float,
+    onTextChange: (String) -> Unit
+) {
+    ParameterStepperRow(
+        label = label,
+        unit = unit,
+        text = text,
+        keyboardType = KeyboardType.Decimal,
+        onTextChange = { raw ->
+            var dotSeen = false
+            val filtered = buildString {
+                for (ch in raw) {
+                    if (ch.isDigit()) {
+                        append(ch)
+                    } else if (ch == '.' && !dotSeen) {
+                        dotSeen = true
+                        append(ch)
+                    }
+                }
+            }.take(5)
+            onTextChange(filtered)
+        },
+        onDecrement = {
+            val current = text.toFloatOrNull() ?: fallback
+            val next = (((current - step) * 100f).roundToInt() / 100f).coerceIn(min, max)
+            onTextChange(formatDecimal(next, 2))
+        },
+        onIncrement = {
+            val current = text.toFloatOrNull() ?: fallback
+            val next = (((current + step) * 100f).roundToInt() / 100f).coerceIn(min, max)
+            onTextChange(formatDecimal(next, 2))
+        }
+    )
+}
+
+@Composable
+private fun ParameterStepperRow(
+    label: String,
+    unit: String,
+    text: String,
+    keyboardType: KeyboardType,
+    onTextChange: (String) -> Unit,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit
+) {
+    val contentColor = MaterialTheme.colorScheme.onSurface
+    val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val borderColor = MaterialTheme.colorScheme.outlineVariant
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = contentColor,
+            modifier = Modifier.weight(1f)
+        )
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .border(1.dp, borderColor, RoundedCornerShape(7.dp))
+                    .clickable(onClick = onDecrement),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "−",
+                    fontSize = 15.sp,
+                    color = contentColor
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .width(56.dp)
+                    .height(28.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, borderColor, RoundedCornerShape(7.dp))
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                BasicTextField(
+                    value = text,
+                    onValueChange = onTextChange,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                        color = contentColor,
+                        textAlign = TextAlign.Center,
+                        fontWeight = FontWeight.Medium
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .border(1.dp, borderColor, RoundedCornerShape(7.dp))
+                    .clickable(onClick = onIncrement),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "+",
+                    fontSize = 15.sp,
+                    color = contentColor
+                )
+            }
+
+            Text(
+                text = unit,
+                fontSize = 12.sp,
+                color = mutedColor,
+                modifier = Modifier.width(16.dp),
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+private fun formatDecimal(value: Float, digits: Int): String =
+    String.format(Locale.US, "%.${digits}f", value).trimEnd('0').trimEnd('.')
