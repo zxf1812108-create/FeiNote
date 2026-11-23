@@ -57,14 +57,13 @@ private const val TRASH_RETENTION_DAYS_MS = 3L * 24L * 60L * 60L * 1000L
 /**
  * 极简编辑风（FeiArticle 样式）回收站弹窗：
  * - 顶部栏展示“回收站”、保留 3 天自动清理提示、以及一键“清空”与关闭按钮；
- * - 列表采用细线轻边框卡片，展示内容摘要、原日期与剩余保留时间，支持单条恢复或彻底删除。
+ * - 列表采用细线轻边框卡片，展示内容摘要、原日期与剩余保留时间，支持单条恢复。
  */
 @Composable
 fun TrashBinDialog(
     trashNotes: List<NoteEntity>,
     onDismiss: () -> Unit,
     onRestore: (Long) -> Unit,
-    onDeletePermanently: (Long) -> Unit,
     onEmptyTrash: () -> Unit
 ) {
     var showEmptyConfirm by remember { mutableStateOf(false) }
@@ -250,21 +249,6 @@ fun TrashBinDialog(
                                         }
                                         drawPath(path = arrow, color = restoreTint, style = stroke)
                                     }
-                                }
-
-                                // 单条彻底删除按钮
-                                IconButton(
-                                    onClick = { onDeletePermanently(note.id) },
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .semantics { contentDescription = "彻底删除" }
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "彻底删除",
-                                        tint = contentColor.copy(alpha = 0.42f),
-                                        modifier = Modifier.size(17.dp)
-                                    )
                                 }
                             }
                         }

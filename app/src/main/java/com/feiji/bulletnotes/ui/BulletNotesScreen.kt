@@ -1153,9 +1153,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             onRestore = { id ->
                 viewModel.restoreFromTrash(id)
             },
-            onDeletePermanently = { id ->
-                viewModel.permanentlyDelete(id)
-            },
             onEmptyTrash = {
                 viewModel.emptyTrash()
             }
