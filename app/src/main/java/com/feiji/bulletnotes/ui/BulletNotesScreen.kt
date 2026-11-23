@@ -138,6 +138,7 @@ import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.KeywordHintEngine
 import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.NoteEntity
+import com.feiji.bulletnotes.data.WebDavBackupManager
 import com.feiji.bulletnotes.ui.theme.DarkOnlineGreen
 import com.feiji.bulletnotes.ui.theme.LightOnlineGreen
 import com.feiji.bulletnotes.ui.theme.LocalIsDarkTheme
@@ -1567,10 +1568,14 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         }
         var confirmEncryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
         var encryptionPasswordMismatchError by remember(showWebDavSettings) { mutableStateOf(false) }
+        var serverUrlInvalidError by remember(showWebDavSettings) { mutableStateOf(false) }
         var wifiAutoSyncInput by remember(showWebDavSettings) {
             mutableStateOf(webDavConfig.wifiAutoSyncEnabled)
         }
 
+        val isServerUrlUnsafe = serverUrlInput.isNotBlank() &&
+            !WebDavBackupManager.isAllowedServerUrl(serverUrlInput)
+        val showServerUrlError = serverUrlInvalidError || isServerUrlUnsafe
         val isEncryptionPasswordMismatch = encryptionPasswordInput.isNotEmpty() &&
             encryptionPasswordInput != confirmEncryptionPasswordInput
         val showMismatchError = encryptionPasswordMismatchError ||
@@ -1623,13 +1628,24 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                             )
                             OutlinedTextField(
                                 value = serverUrlInput,
-                                onValueChange = { serverUrlInput = it },
+                                onValueChange = {
+                                    serverUrlInput = it
+                                    serverUrlInvalidError = false
+                                },
                                 label = { Text("地址", style = MaterialTheme.typography.labelMedium) },
                                 textStyle = fieldTextStyle,
                                 shape = fieldShape,
                                 singleLine = true,
+                                isError = showServerUrlError,
                                 modifier = Modifier.fillMaxWidth()
                             )
+                            if (showServerUrlError) {
+                                Text(
+                                    text = "公网 WebDAV 服务器必须使用 https:// 加密地址",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
                             OutlinedTextField(
                                 value = usernameInput,
                                 onValueChange = { usernameInput = it },
@@ -1838,6 +1854,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         Spacer(modifier = Modifier.width(4.dp))
                         TextButton(
                             onClick = {
+                                if (isServerUrlUnsafe) {
+                                    serverUrlInvalidError = true
+                                    return@TextButton
+                                }
                                 if (isEncryptionPasswordMismatch) {
                                     encryptionPasswordMismatchError = true
                                     return@TextButton

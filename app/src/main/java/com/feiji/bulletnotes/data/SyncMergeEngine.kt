@@ -34,14 +34,17 @@ object SyncMergeEngine {
         val remoteWasAlreadyUpToDate: Boolean
     )
 
-    fun readLocalSyncableSettings(context: Context): SyncableSettings {
+    fun readLocalSyncableSettings(
+        context: Context,
+        includeCredentials: Boolean = true
+    ): SyncableSettings {
         val cfg = WebDavBackupManager.getConfig(context)
         return SyncableSettings(
             updatedAt = WebDavBackupManager.getSettingsUpdatedAt(context),
             serverUrl = cfg.serverUrl,
             remoteFolder = "",
             username = cfg.username,
-            password = cfg.password,
+            password = if (includeCredentials) cfg.password else "",
             wifiAutoSyncEnabled = cfg.wifiAutoSyncEnabled
         )
     }
@@ -118,7 +121,7 @@ object SyncMergeEngine {
             rawUrl = rawServerUrl,
             rawRemoteFolder = rawRemoteFolder
         )
-        if (mergedUrl.length > 768) return null
+        if (mergedUrl.length > 768 || !WebDavBackupManager.isAllowedServerUrl(mergedUrl)) return null
         return SyncableSettings(
             updatedAt = settings.updatedAt,
             serverUrl = mergedUrl,

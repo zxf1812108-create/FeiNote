@@ -182,6 +182,7 @@ object BackupManager {
 
     fun snapshotJson(context: Context, notes: List<NoteEntity>): String {
         val config = WebDavBackupManager.getConfig(context)
+        val hasEncryption = config.encryptionPassword.isNotEmpty()
         val payload = BackupPayload(
             feiji_backup_version = BACKUP_SCHEMA_VERSION,
             notes = notes,
@@ -190,8 +191,10 @@ object BackupManager {
                 webDavServerUrl = config.serverUrl,
                 webDavRemoteFolder = "",
                 webDavUsername = config.username,
-                webDavPassword = config.password,
-                backupEncryptionPassword = config.encryptionPassword,
+                // 未启用加密备份时绝不将 WebDAV 应用密码以明文写入备份文件。
+                webDavPassword = if (hasEncryption) config.password else null,
+                // 永不将备份加密密码写入备份文件本身；恢复加密备份时直接复用用户输入的解密密码。
+                backupEncryptionPassword = null,
                 wifiAutoSyncEnabled = config.wifiAutoSyncEnabled
             )
         )
@@ -472,17 +475,31 @@ object BackupManager {
 
             val hasSettings = restoredSettings != null
             if (restoredSettings != null) {
-                val restoredEncPwd = restoredSettings.backupEncryptionPassword ?: ""
+                val currentCfg = WebDavBackupManager.getConfig(context)
+                val restoredEncPwd = when {
+                    isEncrypted -> password.orEmpty()
+                    !restoredSettings.backupEncryptionPassword.isNullOrEmpty() -> restoredSettings.backupEncryptionPassword
+                    else -> currentCfg.encryptionPassword
+                }
                 val restoredUsername = restoredSettings.webDavUsername ?: ""
-                val restoredPassword = restoredSettings.webDavPassword ?: ""
                 val mergedServerUrl = WebDavBackupManager.mergeLegacyServerUrl(
                     rawUrl = restoredSettings.webDavServerUrl,
                     rawRemoteFolder = restoredSettings.webDavRemoteFolder
                 )
+                val safeServerUrl = if (WebDavBackupManager.isAllowedServerUrl(mergedServerUrl)) {
+                    mergedServerUrl
+                } else {
+                    currentCfg.serverUrl
+                }
+                val restoredPassword = when {
+                    !restoredSettings.webDavPassword.isNullOrEmpty() -> restoredSettings.webDavPassword
+                    safeServerUrl == currentCfg.serverUrl && restoredUsername == currentCfg.username -> currentCfg.password
+                    else -> ""
+                }
                 WebDavBackupManager.restoreConfig(
                     context = context,
                     config = WebDavBackupManager.WebDavConfig(
-                        serverUrl = mergedServerUrl,
+                        serverUrl = safeServerUrl,
                         username = restoredUsername,
                         password = restoredPassword,
                         encryptionPassword = restoredEncPwd,

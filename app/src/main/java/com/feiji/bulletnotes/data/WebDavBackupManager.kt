@@ -199,10 +199,10 @@ object WebDavBackupManager {
 
     fun getConfig(context: Context): WebDavConfig {
         val p = prefs(context)
-        val encPwd = readEncryptionPassword(context)
+        val encPwd = readProtectedSecret(context, KEY_ENCRYPTION_PASSWORD)
         val autoSyncRaw = p.getBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, false)
         val username = p.getString(KEY_USERNAME, "") ?: ""
-        val password = p.getString(KEY_PASSWORD, "") ?: ""
+        val password = readProtectedSecret(context, KEY_PASSWORD)
         val storedUrl = p.getString(KEY_SERVER_URL, null)
         val storedFolder = p.getString(KEY_REMOTE_FOLDER, null)
         var effectiveUrl = mergeLegacyServerUrl(
@@ -236,7 +236,8 @@ object WebDavBackupManager {
         )
     }
 
-    fun getEncryptionPassword(context: Context): String = readEncryptionPassword(context)
+    fun getEncryptionPassword(context: Context): String =
+        readProtectedSecret(context, KEY_ENCRYPTION_PASSWORD)
 
     fun getSettingsUpdatedAt(context: Context): Long =
         prefs(context).getLong(KEY_SETTINGS_UPDATED_AT, 0L)
@@ -249,7 +250,9 @@ object WebDavBackupManager {
         encryptionPassword: String = "",
         wifiAutoSyncEnabled: Boolean = getConfig(context).wifiAutoSyncEnabled
     ): WebDavConfig {
-        val normalizedUrl = normalizeServerUrl(serverUrl)
+        val current = getConfig(context)
+        val candidateUrl = normalizeServerUrl(serverUrl)
+        val normalizedUrl = if (isAllowedServerUrl(candidateUrl)) candidateUrl else current.serverUrl
         val effectiveAutoSync = wifiAutoSyncEnabled && encryptionPassword.isNotEmpty()
         val now = System.currentTimeMillis()
         val editor = prefs(context).edit()
@@ -257,9 +260,20 @@ object WebDavBackupManager {
             .remove(KEY_REMOTE_FOLDER)
             .putBoolean(KEY_FEINOTE_URL_MIGRATED, true)
             .putString(KEY_USERNAME, username.trim())
-            .putString(KEY_PASSWORD, password)
             .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
             .putLong(KEY_SETTINGS_UPDATED_AT, now)
+
+        if (password.isEmpty()) {
+            editor.remove(KEY_PASSWORD)
+        } else {
+            val encryptedDavPwd = encryptPasswordWithKeystore(password)
+            if (encryptedDavPwd != null) {
+                editor.putString(KEY_PASSWORD, encryptedDavPwd)
+            } else {
+                Log.e(TAG, "Keystore unavailable; refusing to store WebDAV password in plaintext")
+                editor.remove(KEY_PASSWORD)
+            }
+        }
 
         if (encryptionPassword.isEmpty()) {
             editor.remove(KEY_ENCRYPTION_PASSWORD)
@@ -279,8 +293,8 @@ object WebDavBackupManager {
     }
 
     /**
-     * 应用来自局域网同设备同步的设置（按 settingsUpdatedAt LWW 决策；加密密码两端已一致，保持本地不变）。
-     * 返回设置内容是否发生实质变化。
+     * 应用来自远端设备的同步设置（按 settingsUpdatedAt LWW 决策；加密密码两端已一致，保持本地不变）。
+     * 若远端未携带 WebDAV 密码（例如未加密同步中已剥离凭证），同服务器同账号时保留本地密码。
      */
     fun applySyncedSettings(
         context: Context,
@@ -300,22 +314,45 @@ object WebDavBackupManager {
             rawUrl = serverUrl,
             rawRemoteFolder = remoteFolder
         )
+        if (!isAllowedServerUrl(normalizedUrl)) return false
+
+        val effectivePassword = if (
+            password.isEmpty() &&
+            current.password.isNotEmpty() &&
+            normalizedUrl == current.serverUrl &&
+            normalizedUsername == current.username
+        ) {
+            current.password
+        } else {
+            password
+        }
         val effectiveAutoSync = wifiAutoSyncEnabled && current.encryptionPassword.isNotEmpty()
 
         val valueChanged = current.serverUrl != normalizedUrl ||
             current.username != normalizedUsername ||
-            current.password != password ||
+            current.password != effectivePassword ||
             current.wifiAutoSyncEnabled != effectiveAutoSync
 
-        prefs(context).edit()
+        val editor = prefs(context).edit()
             .putString(KEY_SERVER_URL, normalizedUrl)
             .remove(KEY_REMOTE_FOLDER)
             .putBoolean(KEY_FEINOTE_URL_MIGRATED, true)
             .putString(KEY_USERNAME, normalizedUsername)
-            .putString(KEY_PASSWORD, password)
             .putBoolean(KEY_WIFI_AUTO_SYNC_ENABLED, effectiveAutoSync)
             .putLong(KEY_SETTINGS_UPDATED_AT, remoteUpdatedAt)
-            .commit()
+
+        if (effectivePassword.isEmpty()) {
+            editor.remove(KEY_PASSWORD)
+        } else {
+            val encryptedDavPwd = encryptPasswordWithKeystore(effectivePassword)
+            if (encryptedDavPwd != null) {
+                editor.putString(KEY_PASSWORD, encryptedDavPwd)
+            } else {
+                Log.e(TAG, "Keystore unavailable; refusing to store synced WebDAV password in plaintext")
+                editor.remove(KEY_PASSWORD)
+            }
+        }
+        editor.commit()
 
         if (valueChanged) {
             resetSyncCaches()
@@ -353,16 +390,16 @@ object WebDavBackupManager {
         )
     }
 
-    private fun readEncryptionPassword(context: Context): String {
+    private fun readProtectedSecret(context: Context, key: String): String {
         val p = prefs(context)
-        val raw = p.getString(KEY_ENCRYPTION_PASSWORD, "") ?: ""
+        val raw = p.getString(key, "") ?: ""
         if (raw.isEmpty()) return ""
         if (raw.startsWith(KEYSTORE_VALUE_PREFIX)) {
             return decryptPasswordWithKeystore(raw)
         }
         // 兼容旧版明文配置：读取后静默迁移到 AndroidKeyStore 加密存储。
         encryptPasswordWithKeystore(raw)?.let { migrated ->
-            p.edit().putString(KEY_ENCRYPTION_PASSWORD, migrated).apply()
+            p.edit().putString(key, migrated).apply()
         }
         return raw
     }
@@ -744,7 +781,12 @@ object WebDavBackupManager {
 
                 val finalNotes = noteDao.getAllNotesForBackup()
                 val finalTombstones = noteDao.getAllTombstones().filter { it.deletedAt >= tombstoneCutoff }
-                val finalSettings = SyncMergeEngine.readLocalSyncableSettings(context)
+                val latestEncPwd = getEncryptionPassword(context)
+                // 未启用加密密码时绝不将 WebDAV 应用密码以明文写入云端同步文件。
+                val finalSettings = SyncMergeEngine.readLocalSyncableSettings(
+                    context = context,
+                    includeCredentials = latestEncPwd.isNotEmpty()
+                )
                 val stateHash = SyncMergeEngine.computeFullStateHash(finalNotes, finalTombstones, finalSettings)
                 val uploadKey = "$remoteConfigKey|$stateHash"
                 val hasDataOrTombstones = finalNotes.isNotEmpty() || finalTombstones.isNotEmpty()
@@ -762,7 +804,6 @@ object WebDavBackupManager {
                         settings = finalSettings
                     )
                     val rawBytes = gson.toJson(payload).toByteArray(Charsets.UTF_8)
-                    val latestEncPwd = getEncryptionPassword(context)
                     bytesToUpload = if (latestEncPwd.isNotEmpty()) {
                         BackupManager.encryptBackupBytes(rawBytes, latestEncPwd)
                     } else {
@@ -826,15 +867,43 @@ object WebDavBackupManager {
         return "Basic $encoded"
     }
 
+    /**
+     * 校验 WebDAV 服务器地址是否符合传输安全要求：
+     * - 公网域名/IP 强制要求 https:// 加密传输，避免账号密码在明文 HTTP 中泄露；
+     * - 仅对本机或内网私有网段（如家庭 NAS）允许 http://。
+     */
+    fun isAllowedServerUrl(rawUrl: String): Boolean {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return true
+        return parseBaseEndpoint(trimmed) != null
+    }
+
+    private fun isLocalOrPrivateHost(rawHost: String): Boolean {
+        val host = rawHost.trim().lowercase().removePrefix("[").removeSuffix("]")
+        if (host == "localhost" || host == "::1" || host.endsWith(".local")) return true
+        val parts = host.split('.')
+        if (parts.size != 4) return false
+        val octets = parts.map { it.toIntOrNull() ?: return false }
+        if (octets.any { it !in 0..255 }) return false
+        val (a, b) = octets
+        return a == 127 ||
+            a == 10 ||
+            (a == 172 && b in 16..31) ||
+            (a == 192 && b == 168) ||
+            (a == 169 && b == 254)
+    }
+
     private fun parseBaseEndpoint(rawUrl: String): DavEndpoint? {
         val trimmed = rawUrl.trim()
         if (trimmed.isEmpty()) return null
         return try {
             val url = URL(if (trimmed.endsWith("/")) trimmed else "$trimmed/")
             val scheme = url.protocol.lowercase()
-            if (scheme != "https" && scheme != "http") return null
             val host = url.host
             if (host.isNullOrBlank()) return null
+            if (scheme != "https" && !(scheme == "http" && isLocalOrPrivateHost(host))) {
+                return null
+            }
             val port = if (url.port > 0) url.port else if (scheme == "https") 443 else 80
             val rawPath = url.path.ifEmpty { "/" }
             val normalizedPath = buildString {
@@ -997,8 +1066,9 @@ object WebDavBackupManager {
             val safeHref = rawHref.replace(" ", "%20")
             val resolvedUri = URI(base.toUrlString()).resolve(safeHref)
             val scheme = (resolvedUri.scheme ?: base.scheme).lowercase()
-            if (scheme != "https" && scheme != "http") return null
             val host = resolvedUri.host ?: base.host
+            if (base.scheme == "https" && scheme != "https") return null
+            if (scheme != "https" && !(scheme == "http" && isLocalOrPrivateHost(host))) return null
             val port = if (resolvedUri.port > 0) resolvedUri.port else if (scheme == "https") 443 else 80
             val rawPath = resolvedUri.rawPath?.takeIf { it.isNotEmpty() } ?: return null
             DavEndpoint(scheme, host, port, rawPath)
