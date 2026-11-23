@@ -35,8 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -146,7 +148,7 @@ fun StarReviewDialog(
                     ) {
                         SubtleGearIcon(
                             color = mutedTextColor.copy(alpha = 0.55f),
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -212,7 +214,7 @@ fun StarReviewDialog(
 }
 
 /**
- * 极简细线齿轮图标（与飞记整体克制线条风格一致）。
+ * 极简细线齿轮图标：外围为连续封闭的 6 齿梯形折线轮廓，中心为同心轴孔圆。
  */
 @Composable
 private fun SubtleGearIcon(
@@ -221,35 +223,59 @@ private fun SubtleGearIcon(
 ) {
     Canvas(modifier = modifier) {
         val strokeWidth = 1.35.dp.toPx()
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val innerR = size.minDimension * 0.16f
-        val bodyR = size.minDimension * 0.34f
-        val toothOuterR = size.minDimension * 0.48f
+        val stroke = Stroke(
+            width = strokeWidth,
+            cap = StrokeCap.Round,
+            join = StrokeJoin.Round
+        )
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val maxR = (size.minDimension - strokeWidth) / 2f
+        val outerR = maxR * 0.96f
+        val rootR = maxR * 0.69f
+        val holeR = maxR * 0.34f
 
-        drawCircle(
-            color = color,
-            radius = innerR,
-            center = center,
-            style = Stroke(width = strokeWidth)
-        )
-        drawCircle(
-            color = color,
-            radius = bodyR,
-            center = center,
-            style = Stroke(width = strokeWidth)
-        )
-        for (i in 0 until 6) {
-            val rad = Math.toRadians(i * 60.0)
-            val cosA = cos(rad).toFloat()
-            val sinA = sin(rad).toFloat()
-            drawLine(
-                color = color,
-                start = Offset(center.x + bodyR * cosA, center.y + bodyR * sinA),
-                end = Offset(center.x + toothOuterR * cosA, center.y + toothOuterR * sinA),
-                strokeWidth = strokeWidth,
-                cap = StrokeCap.Round
+        val teethCount = 6
+        val stepDeg = 360.0 / teethCount // 60°
+        val halfCrestDeg = 9.0
+        val flankEndDeg = 16.0
+        val nextFlankStartDeg = stepDeg - flankEndDeg // 44°
+        val valleyMidDeg = stepDeg / 2.0 // 30°
+
+        val gearPath = Path()
+        for (i in 0 until teethCount) {
+            val baseDeg = i * stepDeg - 90.0
+            val points = arrayOf(
+                Pair(baseDeg - halfCrestDeg, outerR),
+                Pair(baseDeg + halfCrestDeg, outerR),
+                Pair(baseDeg + flankEndDeg, rootR),
+                Pair(baseDeg + valleyMidDeg, rootR),
+                Pair(baseDeg + nextFlankStartDeg, rootR)
             )
+            points.forEachIndexed { idx, (deg, r) ->
+                val rad = Math.toRadians(deg)
+                val x = cx + r * cos(rad).toFloat()
+                val y = cy + r * sin(rad).toFloat()
+                if (i == 0 && idx == 0) {
+                    gearPath.moveTo(x, y)
+                } else {
+                    gearPath.lineTo(x, y)
+                }
+            }
         }
+        gearPath.close()
+
+        drawPath(
+            path = gearPath,
+            color = color,
+            style = stroke
+        )
+        drawCircle(
+            color = color,
+            radius = holeR,
+            center = Offset(cx, cy),
+            style = stroke
+        )
     }
 }
 
