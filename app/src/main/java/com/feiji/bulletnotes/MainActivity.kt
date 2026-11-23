@@ -22,6 +22,7 @@ import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
 import com.feiji.bulletnotes.ui.BulletNotesScreen
 import com.feiji.bulletnotes.ui.NoteViewModel
 import com.feiji.bulletnotes.ui.theme.FeiJiTheme
+import com.feiji.bulletnotes.ui.theme.ThemePreferences
 import java.time.LocalDate
 
 class MainActivity : ComponentActivity() {
@@ -32,9 +33,17 @@ class MainActivity : ComponentActivity() {
         setContent {
             // Compose 专用函数必须在 Composable 上下文中先求值，再用于 rememberSaveable 初始化。
             val systemDarkTheme = isSystemInDarkTheme()
-            var darkTheme by rememberSaveable { mutableStateOf(systemDarkTheme) }
+            var darkTheme by rememberSaveable {
+                mutableStateOf(ThemePreferences.resolveDarkTheme(this@MainActivity, systemDarkTheme))
+            }
             FeiJiTheme(darkTheme = darkTheme) {
-                BackupSetupPrompt(viewModel = viewModel, onToggleTheme = { darkTheme = !darkTheme })
+                BackupSetupPrompt(
+                    viewModel = viewModel,
+                    onToggleTheme = {
+                        darkTheme = !darkTheme
+                        ThemePreferences.saveDarkTheme(this@MainActivity, darkTheme)
+                    }
+                )
             }
         }
     }

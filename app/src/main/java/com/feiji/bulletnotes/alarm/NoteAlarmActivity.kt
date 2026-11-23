@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.feiji.bulletnotes.MainActivity
 import com.feiji.bulletnotes.ui.theme.FeiJiTheme
+import com.feiji.bulletnotes.ui.theme.ThemePreferences
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -70,6 +71,9 @@ class NoteAlarmActivity : ComponentActivity() {
 
         setContent {
             val systemDark = isSystemInDarkTheme()
+            val darkTheme = remember(systemDark) {
+                ThemePreferences.resolveDarkTheme(this@NoteAlarmActivity, systemDark)
+            }
             val liveInfo by NoteAlarmService.ringingAlarm.collectAsState()
             var seenActiveService by remember { mutableStateOf(liveInfo != null) }
 
@@ -82,7 +86,7 @@ class NoteAlarmActivity : ComponentActivity() {
             }
 
             val displayInfo = liveInfo ?: initialInfoState.value
-            FeiJiTheme(darkTheme = systemDark) {
+            FeiJiTheme(darkTheme = darkTheme) {
                 NoteAlarmRingingScreen(
                     info = displayInfo,
                     onDismissAlarm = {
@@ -269,9 +273,11 @@ private fun NoteAlarmRingingScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 120.dp, max = 300.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surface)
                     .border(
                         width = 1.dp,
-                        color = contentColor.copy(alpha = 0.22f),
+                        color = MaterialTheme.colorScheme.outlineVariant,
                         shape = RoundedCornerShape(16.dp)
                     )
                     .padding(horizontal = 20.dp, vertical = 18.dp),
@@ -299,7 +305,7 @@ private fun NoteAlarmRingingScreen(
                         .fillMaxWidth()
                         .height(54.dp)
                         .clip(RoundedCornerShape(14.dp))
-                        .background(contentColor)
+                        .background(MaterialTheme.colorScheme.primary)
                         .clickable(onClick = onDismissAlarm),
                     contentAlignment = Alignment.Center
                 ) {
@@ -307,7 +313,7 @@ private fun NoteAlarmRingingScreen(
                         text = "关闭闹钟",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
-                        color = bgColor
+                        color = MaterialTheme.colorScheme.onPrimary
                     )
                 }
 
@@ -317,7 +323,7 @@ private fun NoteAlarmRingingScreen(
                         Text(
                             text = "查看笔记",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = contentColor.copy(alpha = 0.65f)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

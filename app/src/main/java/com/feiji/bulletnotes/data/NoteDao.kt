@@ -80,6 +80,12 @@ interface NoteDao {
     @Query("DELETE FROM notes WHERE isDeleted = 1 AND deletedAt IS NOT NULL AND deletedAt <= :cutoff")
     suspend fun deleteTrashOlderThan(cutoff: Long): Int
 
+    @Query("SELECT * FROM notes WHERE isDeleted = 1 AND COALESCE(deletedAt, updatedAt) <= :cutoff")
+    suspend fun getTrashNotesOlderThan(cutoff: Long): List<NoteEntity>
+
+    @Query("SELECT * FROM notes WHERE isDeleted = 1")
+    suspend fun getAllDeletedNotesOnce(): List<NoteEntity>
+
     @Query("DELETE FROM notes")
     suspend fun deleteAll()
 
@@ -104,11 +110,51 @@ interface NoteDao {
         deletedAt: Long = System.currentTimeMillis()
     ) {
         val existing = getNoteById(id)
-        if (existing != null && existing.syncId.isNotBlank()) {
-            val effectiveDeletedAt = maxOf(deletedAt, existing.updatedAt + 1L)
-            insertTombstone(DeletedNoteTombstone(syncId = existing.syncId, deletedAt = effectiveDeletedAt))
+        if (existing != null) {
+            val sid = existing.syncId.ifBlank { SyncMergeEngine.normalizeSyncId(existing) }
+            if (sid.isNotBlank()) {
+                val effectiveDeletedAt = maxOf(deletedAt, existing.updatedAt + 1L)
+                insertTombstone(DeletedNoteTombstone(syncId = sid, deletedAt = effectiveDeletedAt))
+            }
         }
         deletePermanently(id)
+    }
+
+    @Transaction
+    suspend fun deleteTrashOlderThanWithTombstones(
+        cutoff: Long,
+        now: Long = System.currentTimeMillis()
+    ): List<Long> {
+        val expired = getTrashNotesOlderThan(cutoff)
+        if (expired.isEmpty()) return emptyList()
+        val tombstones = expired.mapNotNull { note ->
+            val sid = note.syncId.ifBlank { SyncMergeEngine.normalizeSyncId(note) }
+            if (sid.isBlank()) null
+            else DeletedNoteTombstone(syncId = sid, deletedAt = maxOf(now, note.updatedAt + 1L))
+        }
+        if (tombstones.isNotEmpty()) {
+            insertTombstones(tombstones)
+        }
+        expired.forEach { deletePermanently(it.id) }
+        return expired.map { it.id }
+    }
+
+    @Transaction
+    suspend fun emptyTrashWithTombstones(
+        now: Long = System.currentTimeMillis()
+    ): List<Long> {
+        val deleted = getAllDeletedNotesOnce()
+        if (deleted.isEmpty()) return emptyList()
+        val tombstones = deleted.mapNotNull { note ->
+            val sid = note.syncId.ifBlank { SyncMergeEngine.normalizeSyncId(note) }
+            if (sid.isBlank()) null
+            else DeletedNoteTombstone(syncId = sid, deletedAt = maxOf(now, note.updatedAt + 1L))
+        }
+        if (tombstones.isNotEmpty()) {
+            insertTombstones(tombstones)
+        }
+        deleted.forEach { deletePermanently(it.id) }
+        return deleted.map { it.id }
     }
 
     @Transaction

@@ -101,7 +101,8 @@ fun NoteAlarmDialog(
     var dialMode by remember(note.id) { mutableStateOf(AlarmDialMode.Hour) }
 
     val contentColor = MaterialTheme.colorScheme.onSurface
-    val bgColor = MaterialTheme.colorScheme.background
+    val dialogSurfaceColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    val borderColor = MaterialTheme.colorScheme.outlineVariant
 
     val candidateZdt: ZonedDateTime? = if (selectedHour != null && selectedMinute != null) {
         ZonedDateTime.of(noteDate, LocalTime.of(selectedHour!!, selectedMinute!!), zone)
@@ -129,7 +130,7 @@ fun NoteAlarmDialog(
         Surface(
             modifier = Modifier.width(336.dp),
             shape = RoundedCornerShape(22.dp),
-            color = bgColor,
+            color = dialogSurfaceColor,
             tonalElevation = 0.dp
         ) {
             Column(
@@ -137,7 +138,7 @@ fun NoteAlarmDialog(
                     .fillMaxWidth()
                     .border(
                         width = 1.dp,
-                        color = contentColor.copy(alpha = 0.14f),
+                        color = borderColor,
                         shape = RoundedCornerShape(22.dp)
                     )
                     .padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 14.dp),
@@ -250,16 +251,16 @@ private fun TimeSegmentChip(
     onClick: () -> Unit
 ) {
     val contentColor = MaterialTheme.colorScheme.onSurface
-    val bgColor = MaterialTheme.colorScheme.background
+    val chipSurface = MaterialTheme.colorScheme.surface
     Box(
         modifier = Modifier
             .width(78.dp)
             .height(54.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(if (active) contentColor.copy(alpha = 0.08f) else bgColor)
+            .background(if (active) contentColor.copy(alpha = 0.08f) else chipSurface)
             .border(
                 width = if (active) 1.5.dp else 1.dp,
-                color = if (active) contentColor.copy(alpha = 0.75f) else contentColor.copy(alpha = 0.16f),
+                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
                 shape = RoundedCornerShape(12.dp)
             )
             .clickable(onClick = onClick),
@@ -291,7 +292,8 @@ private fun MinimalistClockDial(
     val density = LocalDensity.current
 
     val contentColor = MaterialTheme.colorScheme.onSurface
-    val bgColor = MaterialTheme.colorScheme.background
+    val accentFill = MaterialTheme.colorScheme.primary
+    val accentOnFill = MaterialTheme.colorScheme.onPrimary
 
     val dialSizePx = with(density) { dialSize.toPx() }
     val centerPx = dialSizePx / 2f
@@ -419,14 +421,14 @@ private fun MinimalistClockDial(
                     y = center.y + radius * sin(rad).toFloat()
                 )
                 drawLine(
-                    color = contentColor,
+                    color = accentFill,
                     start = center,
                     end = tip,
                     strokeWidth = 1.8.dp.toPx(),
                     cap = StrokeCap.Round
                 )
                 drawCircle(
-                    color = contentColor,
+                    color = accentFill,
                     radius = selectorRadiusPx,
                     center = tip
                 )
@@ -434,7 +436,7 @@ private fun MinimalistClockDial(
 
             // 表盘中心轴点
             drawCircle(
-                color = contentColor.copy(alpha = if (handTarget != null) 1f else 0.35f),
+                color = if (handTarget != null) accentFill else contentColor.copy(alpha = 0.35f),
                 radius = 3.5.dp.toPx(),
                 center = center
             )
@@ -458,7 +460,7 @@ private fun MinimalistClockDial(
                         text = hour.toString(),
                         fontSize = 15.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (selected) bgColor else contentColor.copy(alpha = 0.88f)
+                        color = if (selected) accentOnFill else contentColor.copy(alpha = 0.88f)
                     )
                 }
             }
@@ -479,7 +481,7 @@ private fun MinimalistClockDial(
                         text = String.format(Locale.US, "%02d", hour),
                         fontSize = 12.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        color = if (selected) bgColor else contentColor.copy(alpha = 0.56f)
+                        color = if (selected) accentOnFill else contentColor.copy(alpha = 0.56f)
                     )
                 }
             }
@@ -500,7 +502,7 @@ private fun MinimalistClockDial(
                         text = String.format(Locale.US, "%02d", minute),
                         fontSize = 14.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (selected) bgColor else contentColor.copy(alpha = 0.86f)
+                        color = if (selected) accentOnFill else contentColor.copy(alpha = 0.86f)
                     )
                 }
             }

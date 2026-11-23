@@ -57,8 +57,8 @@ fun StarReviewDialog(
         }
     }
 
-    val mutedTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.56f)
-    val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)
+    val mutedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val borderColor = MaterialTheme.colorScheme.outlineVariant
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -70,7 +70,7 @@ fun StarReviewDialog(
                     shape = RoundedCornerShape(16.dp)
                 ),
             shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.background,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 0.dp
         ) {
             Column(

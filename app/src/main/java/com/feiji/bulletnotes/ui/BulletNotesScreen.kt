@@ -57,6 +57,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -99,6 +100,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -136,6 +138,9 @@ import com.feiji.bulletnotes.data.BulletType
 import com.feiji.bulletnotes.data.KeywordHintEngine
 import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.NoteEntity
+import com.feiji.bulletnotes.ui.theme.DarkOnlineGreen
+import com.feiji.bulletnotes.ui.theme.LightOnlineGreen
+import com.feiji.bulletnotes.ui.theme.LocalIsDarkTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -446,11 +451,11 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         .fillMaxWidth()
                         .border(
                             width = 1.dp,
-                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                            color = MaterialTheme.colorScheme.outlineVariant,
                             shape = RoundedCornerShape(12.dp)
                         ),
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.background,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     shadowElevation = 2.dp,
                     tonalElevation = 0.dp
                 ) {
@@ -546,7 +551,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 .focusRequester(searchFocusRequester)
                                 .border(
                                     1.dp,
-                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                    MaterialTheme.colorScheme.outline,
                                     RoundedCornerShape(8.dp)
                                 )
                                 .padding(start = 10.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
@@ -1137,6 +1142,9 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 
     // 回收站弹窗
     if (showTrashDialog) {
+        LaunchedEffect(Unit) {
+            viewModel.purgeExpiredTrash()
+        }
         TrashBinDialog(
             trashNotes = trashNotes,
             onDismiss = {
@@ -1144,6 +1152,12 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
             },
             onRestore = { id ->
                 viewModel.restoreFromTrash(id)
+            },
+            onDeletePermanently = { id ->
+                viewModel.permanentlyDelete(id)
+            },
+            onEmptyTrash = {
+                viewModel.emptyTrash()
             }
         )
     }
@@ -1293,7 +1307,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     modifier = Modifier
                                         .size(6.dp)
                                         .clip(CircleShape)
-                                        .background(Color(0xFF2E7D32))
+                                        .background(if (LocalIsDarkTheme.current) DarkOnlineGreen else LightOnlineGreen)
                                 )
                             }
                             Text(
@@ -1562,8 +1576,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 
         val fieldTextStyle = MaterialTheme.typography.bodyMedium
         val fieldShape = RoundedCornerShape(8.dp)
-        val dividerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-        val dialogBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)
+        val dividerColor = MaterialTheme.colorScheme.outlineVariant
+        val dialogBorderColor = MaterialTheme.colorScheme.outlineVariant
 
         Dialog(
             onDismissRequest = { showWebDavSettings = false },
@@ -1580,7 +1594,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         shape = RoundedCornerShape(16.dp)
                     ),
                 shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.background,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 0.dp
             ) {
                 Column(
@@ -2029,13 +2043,30 @@ fun BulletNoteRow(
         0.dp
     }
 
+    // 浏览态排版结果与点击定位光标偏移量，确保点击进入编辑时把光标精确插在点击位置。
+    var browseTextLayout by remember(note.id, isExpanded) { mutableStateOf<TextLayoutResult?>(null) }
+    var pendingTapCursorOffset by remember(note.id) { mutableStateOf<Int?>(null) }
+    val latestIsCollapsedMultiLine = rememberUpdatedState(isCollapsedMultiLine)
+    val latestNoteContent = rememberUpdatedState(note.content)
+    val latestOnContentClick = rememberUpdatedState(onContentClick)
+
     var editValue by remember(note.id, isEditing) {
+        val initialCursor = if (isEditing) {
+            (pendingTapCursorOffset ?: note.content.length).coerceIn(0, note.content.length)
+        } else {
+            note.content.length
+        }
         mutableStateOf(
             TextFieldValue(
                 note.content,
-                selection = TextRange(note.content.length)
+                selection = TextRange(initialCursor)
             )
         )
+    }
+    LaunchedEffect(isEditing) {
+        if (!isEditing) {
+            pendingTapCursorOffset = null
+        }
     }
     // 编辑历史仅保存在当前编辑会话中，避免撤销操作影响其他笔记。
     val undoHistory = remember(note.id, isEditing) { mutableStateListOf<String>() }
@@ -2304,21 +2335,40 @@ fun BulletNoteRow(
                             Modifier
                         }
                     )
-                    .clickable(enabled = !isEditing) {
-                        onContentClick(isCollapsedMultiLine)
-                    }
             ) {
                 if (!isEditing) {
                     val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
                     )
+                    val tapToEditModifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(note.id, isExpanded) {
+                            detectTapGestures(
+                                onTap = { tapOffset ->
+                                    val collapsed = latestIsCollapsedMultiLine.value
+                                    if (!collapsed) {
+                                        val contentLen = latestNoteContent.value.length
+                                        val cursor = browseTextLayout
+                                            ?.getOffsetForPosition(tapOffset)
+                                            ?.coerceIn(0, contentLen)
+                                            ?: contentLen
+                                        pendingTapCursorOffset = cursor
+                                    } else {
+                                        pendingTapCursorOffset = null
+                                    }
+                                    latestOnContentClick.value(collapsed)
+                                }
+                            )
+                        }
                     if (isExpanded) {
-                        // 展开浏览模式：完整显示多行笔记内容，不进入编辑状态。
+                        // 展开浏览模式：完整显示多行笔记内容，再次点击时按点击位置定位光标进入编辑。
                         Text(
                             text = note.content.ifEmpty { " " },
                             style = paragraphStyle,
+                            modifier = tapToEditModifier,
                             onTextLayout = { layout ->
+                                browseTextLayout = layout
                                 if (layout.lineCount > 0) {
                                     firstLineHeightPx =
                                         layout.getLineBottom(0) - layout.getLineTop(0)
@@ -2335,7 +2385,9 @@ fun BulletNoteRow(
                             style = paragraphStyle,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = tapToEditModifier,
                             onTextLayout = { layout ->
+                                browseTextLayout = layout
                                 if (layout.lineCount > 0) {
                                     firstLineHeightPx =
                                         layout.getLineBottom(0) - layout.getLineTop(0)
@@ -2689,13 +2741,31 @@ private fun KeywordHintCard(
         0.dp
     }
 
+    var hintBrowseTextLayout by remember(hintNote.id, isExpanded) {
+        mutableStateOf<TextLayoutResult?>(null)
+    }
+    var pendingHintTapCursorOffset by remember(hintNote.id) { mutableStateOf<Int?>(null) }
+    val latestHintTruncated = rememberUpdatedState(isTruncatedPreview)
+    val latestHintContent = rememberUpdatedState(hintNote.content)
+    val latestHintOnContentClick = rememberUpdatedState(onContentClick)
+
     var hintEditValue by remember(hintNote.id, isEditingHint) {
+        val initialCursor = if (isEditingHint) {
+            (pendingHintTapCursorOffset ?: hintNote.content.length).coerceIn(0, hintNote.content.length)
+        } else {
+            hintNote.content.length
+        }
         mutableStateOf(
             TextFieldValue(
                 hintNote.content,
-                selection = TextRange(hintNote.content.length)
+                selection = TextRange(initialCursor)
             )
         )
+    }
+    LaunchedEffect(isEditingHint) {
+        if (!isEditingHint) {
+            pendingHintTapCursorOffset = null
+        }
     }
     val hintUndoHistory = remember(hintNote.id, isEditingHint) { mutableStateListOf<String>() }
     val hintRedoHistory = remember(hintNote.id, isEditingHint) { mutableStateListOf<String>() }
@@ -2733,10 +2803,10 @@ private fun KeywordHintCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.background)
+            .background(MaterialTheme.colorScheme.surface)
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                color = MaterialTheme.colorScheme.outlineVariant,
                 shape = RoundedCornerShape(8.dp)
             )
             // 吸收卡片空白区域点击，防止误触外层关闭主编辑器的逻辑。
@@ -2885,17 +2955,33 @@ private fun KeywordHintCard(
             Spacer(modifier = Modifier.width(8.dp))
 
             Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable(enabled = !isEditingHint) {
-                        onContentClick(isTruncatedPreview)
-                    }
+                modifier = Modifier.weight(1f)
             ) {
                 if (!isEditingHint) {
                     val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
                     )
+                    val hintTapModifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(hintNote.id, isExpanded) {
+                            detectTapGestures(
+                                onTap = { tapOffset ->
+                                    val truncated = latestHintTruncated.value
+                                    if (!truncated) {
+                                        val contentLen = latestHintContent.value.length
+                                        val cursor = hintBrowseTextLayout
+                                            ?.getOffsetForPosition(tapOffset)
+                                            ?.coerceIn(0, contentLen)
+                                            ?: contentLen
+                                        pendingHintTapCursorOffset = cursor
+                                    } else {
+                                        pendingHintTapCursorOffset = null
+                                    }
+                                    latestHintOnContentClick.value(truncated)
+                                }
+                            )
+                        }
                     if (isExpanded) {
                         Box(
                             modifier = Modifier
@@ -2907,7 +2993,9 @@ private fun KeywordHintCard(
                             Text(
                                 text = hintNote.content.ifEmpty { " " },
                                 style = paragraphStyle,
+                                modifier = hintTapModifier,
                                 onTextLayout = { layout ->
+                                    hintBrowseTextLayout = layout
                                     if (layout.lineCount > 0) {
                                         firstLineHeightPx =
                                             layout.getLineBottom(0) - layout.getLineTop(0)
@@ -2922,8 +3010,9 @@ private fun KeywordHintCard(
                             style = paragraphStyle,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(end = 10.dp),
+                            modifier = hintTapModifier.padding(end = 10.dp),
                             onTextLayout = { layout ->
+                                hintBrowseTextLayout = layout
                                 if (layout.lineCount > 0) {
                                     firstLineHeightPx =
                                         layout.getLineBottom(0) - layout.getLineTop(0)

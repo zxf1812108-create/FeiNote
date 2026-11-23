@@ -597,20 +597,9 @@ object LanWebServer {
     }
 
     private suspend fun enforceTrashLimit(noteDao: NoteDao) {
-        val deletedNotes = noteDao.getDeletedNotes().first()
-        if (deletedNotes.size > 30) {
-            val overflowCount = deletedNotes.size - 30
-            deletedNotes
-                .sortedWith(
-                    compareBy<NoteEntity> { it.deletedAt ?: it.updatedAt }
-                        .thenBy { it.updatedAt }
-                        .thenBy { it.id }
-                )
-                .take(overflowCount)
-                .forEach { oldNote ->
-                    noteDao.deletePermanentlyWithTombstone(oldNote.id)
-                }
-        }
+        val now = System.currentTimeMillis()
+        val cutoff = now - 3L * 24L * 60L * 60L * 1000L
+        noteDao.deleteTrashOlderThanWithTombstones(cutoff = cutoff, now = now)
     }
 
     private fun scheduleLocalBackup(appContext: Context, noteDao: NoteDao) {

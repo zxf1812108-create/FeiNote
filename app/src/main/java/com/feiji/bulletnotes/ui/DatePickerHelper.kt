@@ -58,9 +58,15 @@ fun DatePickerHelper(
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            modifier = Modifier.width(320.dp),
+            modifier = Modifier
+                .width(320.dp)
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    shape = RoundedCornerShape(18.dp)
+                ),
             shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.background,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
             tonalElevation = 0.dp
         ) {
             Column(
@@ -161,11 +167,11 @@ fun DatePickerHelper(
                                                 .then(
                                                     if (isSelected) Modifier
                                                         .clip(CircleShape)
-                                                        .background(MaterialTheme.colorScheme.primaryContainer)
+                                                        .background(MaterialTheme.colorScheme.primary)
                                                     else Modifier
                                                 )
                                                 .then(
-                                                    if (isToday) Modifier.border(
+                                                    if (isToday && !isSelected) Modifier.border(
                                                         width = 1.dp,
                                                         color = MaterialTheme.colorScheme.primary,
                                                         shape = CircleShape
@@ -177,7 +183,7 @@ fun DatePickerHelper(
                                                 text = date.dayOfMonth.toString(),
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                color = if (isSelected) MaterialTheme.colorScheme.onPrimary
                                                 else MaterialTheme.colorScheme.onSurface
                                             )
                                         }
@@ -230,9 +236,15 @@ fun DatePickerHelper(
 
         Dialog(onDismissRequest = { showYearPicker = false }) {
             Surface(
-                modifier = Modifier.width(280.dp),
+                modifier = Modifier
+                    .width(280.dp)
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        shape = RoundedCornerShape(18.dp)
+                    ),
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.background,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 0.dp
             ) {
                 Column(
@@ -334,9 +346,15 @@ fun DatePickerHelper(
 
         Dialog(onDismissRequest = { showMonthPicker = false }) {
             Surface(
-                modifier = Modifier.width(280.dp),
+                modifier = Modifier
+                    .width(280.dp)
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        shape = RoundedCornerShape(18.dp)
+                    ),
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.background,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 0.dp
             ) {
                 Column(

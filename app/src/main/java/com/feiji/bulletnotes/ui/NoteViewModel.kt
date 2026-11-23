@@ -42,6 +42,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val PREFS_NAME = "feiji_bullet_notes_prefs"
         private const val KEY_LAST_STAR_ROLLOVER_DATE = "star_rollover_date_v1"
+        private const val TRASH_RETENTION_MS = 3L * 24L * 60L * 60L * 1000L
     }
 
     private val db = AppDatabase.getInstance(application)
@@ -208,6 +209,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         if (isForeground) {
             refreshTodayOnForegroundIfNeeded()
             rolloverOverdueStarNotesIfFirstOpenToday()
+            purgeExpiredTrash()
             startForegroundWebDavSyncLoop()
         } else {
             webDavForegroundSyncLoop?.cancel()
@@ -674,6 +676,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         rolloverOverdueStarNotesIfFirstOpenToday()
+        purgeExpiredTrash()
         viewModelScope.launch(Dispatchers.IO) {
             NoteAlarmScheduler.rescheduleAllActiveAlarms(application)
         }
@@ -850,8 +853,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 contentWriteMutex.withLock {
                     val previous = noteDao.getNoteById(previousId)
                     if (previous != null && !previous.isDeleted && previous.content.isBlank()) {
-                        noteDao.deletePermanently(previousId)
+                        // 写入同步墓碑后再彻底删除，避免下次 WebDAV / 局域网自动同步时将已清空笔记重新拉回。
+                        noteDao.deletePermanentlyWithTombstone(previousId)
                         NoteAlarmScheduler.cancelAlarm(app, previousId)
+                        _searchResults.value = _searchResults.value.filterNot { it.id == previousId }
                     }
                     // 保持正文写入锁直到备份导出完成，避免备份到编辑过程中的半成品。
                     backupMutex.withLock {
@@ -875,8 +880,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             contentWriteMutex.withLock {
                 val edited = noteDao.getNoteById(noteId)
                 if (edited != null && !edited.isDeleted && edited.content.isBlank()) {
-                    noteDao.deletePermanently(noteId)
+                    noteDao.deletePermanentlyWithTombstone(noteId)
                     NoteAlarmScheduler.cancelAlarm(app, noteId)
+                    _searchResults.value = _searchResults.value.filterNot { it.id == noteId }
                 }
                 backupMutex.withLock {
                     backupIfChangedLocked(app)
@@ -1225,27 +1231,46 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 删除笔记放入回收站 (软删除)，并静默限制回收站最多保留 30 条笔记（超出则自动永久删除最早的笔记）。
+     * 自动清理进入回收站超过 3 天的笔记（同步写入墓碑，避免多设备同步时复活）。
+     */
+    fun purgeExpiredTrash() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            var purgedIds: List<Long> = emptyList()
+            contentWriteMutex.withLock {
+                val now = System.currentTimeMillis()
+                purgedIds = noteDao.deleteTrashOlderThanWithTombstones(
+                    cutoff = now - TRASH_RETENTION_MS,
+                    now = now
+                )
+                if (purgedIds.isNotEmpty()) {
+                    purgedIds.forEach { NoteAlarmScheduler.cancelAlarm(app, it) }
+                    backupMutex.withLock {
+                        backupIfChangedLocked(app)
+                    }
+                }
+            }
+            if (purgedIds.isNotEmpty()) {
+                notifyLocalDataChangedForSync()
+            }
+        }
+    }
+
+    /**
+     * 删除笔记放入回收站 (软删除)，并顺带自动清理进入回收站超过 3 天的旧笔记。
      */
     fun moveToTrash(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             val app = getApplication<Application>()
-            noteDao.softDeleteNote(id)
-            NoteAlarmScheduler.cancelAlarm(app, id)
-            val deletedNotes = noteDao.getDeletedNotes().first()
-            if (deletedNotes.size > 30) {
-                val overflowCount = deletedNotes.size - 30
-                deletedNotes
-                    .sortedWith(
-                        compareBy<NoteEntity> { it.deletedAt ?: it.updatedAt }
-                            .thenBy { it.updatedAt }
-                            .thenBy { it.id }
-                    )
-                    .take(overflowCount)
-                    .forEach { oldNote ->
-                        noteDao.deletePermanentlyWithTombstone(oldNote.id)
-                        NoteAlarmScheduler.cancelAlarm(app, oldNote.id)
-                    }
+            contentWriteMutex.withLock {
+                val now = System.currentTimeMillis()
+                noteDao.softDeleteNote(id, now)
+                NoteAlarmScheduler.cancelAlarm(app, id)
+                val purgedIds = noteDao.deleteTrashOlderThanWithTombstones(
+                    cutoff = now - TRASH_RETENTION_MS,
+                    now = now
+                )
+                purgedIds.forEach { NoteAlarmScheduler.cancelAlarm(app, it) }
             }
             _searchResults.value = _searchResults.value.filterNot { it.id == id }
             if (_editingNoteId.value == id) {
@@ -1282,9 +1307,38 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun permanentlyDelete(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
-            noteDao.deletePermanentlyWithTombstone(id)
-            NoteAlarmScheduler.cancelAlarm(getApplication(), id)
+            val app = getApplication<Application>()
+            contentWriteMutex.withLock {
+                noteDao.deletePermanentlyWithTombstone(id)
+                NoteAlarmScheduler.cancelAlarm(app, id)
+                backupMutex.withLock {
+                    backupIfChangedLocked(app)
+                }
+            }
             notifyLocalDataChangedForSync()
+        }
+    }
+
+    /**
+     * 一键清空回收站（为所有清空项写入同步墓碑，避免多设备同步时复活）。
+     */
+    fun emptyTrash() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            var deletedIds: List<Long> = emptyList()
+            contentWriteMutex.withLock {
+                deletedIds = noteDao.emptyTrashWithTombstones(System.currentTimeMillis())
+                deletedIds.forEach { NoteAlarmScheduler.cancelAlarm(app, it) }
+                if (deletedIds.isNotEmpty()) {
+                    backupMutex.withLock {
+                        backupIfChangedLocked(app)
+                    }
+                }
+            }
+            if (deletedIds.isNotEmpty()) {
+                _userMessage.value = "回收站已清空"
+                notifyLocalDataChangedForSync()
+            }
         }
     }
 

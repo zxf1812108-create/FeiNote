@@ -2,6 +2,6 @@
 <resources>
     <color name="light_background">#FFF5F5F5</color>
     <color name="light_content">#FF333333</color>
-    <color name="dark_background">#FF1A1A1A</color>
-    <color name="dark_content">#FFD0D0D0</color>
+    <color name="dark_background">#FF161615</color>
+    <color name="dark_content">#FFC8C8C3</color>
 </resources>
