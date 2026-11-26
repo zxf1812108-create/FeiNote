@@ -1071,6 +1071,10 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 onContentChange = { newText ->
                                     viewModel.updateNoteContent(note.id, newText)
                                 },
+                                onTaskToggle = { newText ->
+                                    viewModel.updateNoteContent(note.id, newText)
+                                    viewModel.finishInlineNoteEdit(note.id)
+                                },
                                 onEnterPressed = {
                                     pendingNewNoteScrollFromId = note.id
                                     enterFocusBridge.requestFocus()
@@ -1440,6 +1444,7 @@ fun BulletNoteRow(
     onBulletLongClick: () -> Unit,
     onContentClick: (Boolean) -> Unit,
     onContentChange: (String) -> Unit,
+    onTaskToggle: (String) -> Unit,
     onEnterPressed: () -> Unit,
     onDragStart: () -> Unit,
     onDragDelta: (Float, Offset) -> Unit,
@@ -1783,58 +1788,36 @@ fun BulletNoteRow(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
                     )
-                    val tapToEditModifier = Modifier
-                        .fillMaxWidth()
-                        .pointerInput(note.id, isExpanded) {
-                            detectTapGestures(
-                                onTap = { tapOffset ->
-                                    val collapsed = latestIsCollapsedMultiLine.value
-                                    if (!collapsed) {
-                                        val contentLen = latestNoteContent.value.length
-                                        val cursor = browseTextLayout
-                                            ?.getOffsetForPosition(tapOffset)
-                                            ?.coerceIn(0, contentLen)
-                                            ?: contentLen
-                                        pendingTapCursorOffset = cursor
-                                    } else {
-                                        pendingTapCursorOffset = null
-                                    }
-                                    latestOnContentClick.value(collapsed)
-                                }
-                            )
-                        }
                     if (isExpanded) {
-                        // 展开浏览模式：完整显示多行笔记内容，再次点击时按点击位置定位光标进入编辑。
-                        Text(
-                            text = note.content.ifEmpty { " " },
-                            style = paragraphStyle,
-                            modifier = tapToEditModifier,
-                            onTextLayout = { layout ->
-                                browseTextLayout = layout
-                                if (layout.lineCount > 0) {
-                                    firstLineHeightPx =
-                                        layout.getLineBottom(0) - layout.getLineTop(0)
-                                }
-                            }
+                        // 展开浏览模式：完整 Markdown 块级渲染，点击链接打开网页、点击任务框切换状态、点击文字按映射光标进入编辑。
+                        MarkdownExpandedContent(
+                            noteId = note.id,
+                            content = note.content,
+                            baseTextStyle = paragraphStyle,
+                            onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
+                            onTapToEdit = { rawOffset ->
+                                pendingTapCursorOffset = rawOffset.coerceIn(0, latestNoteContent.value.length)
+                                latestOnContentClick.value(false)
+                            },
+                            onToggleTask = onTaskToggle
                         )
                     } else {
-                        // 收起浏览模式只显示第一行；换行符前的第一行能完整显示时不添加省略号，
-                        // 仅当第一行内容超出显示宽度时由 Ellipsis 自动在行末显示省略号。
-                        val firstLine = note.content.substringBefore('\n')
-                        val previewText = firstLine.ifEmpty { " " }
-                        Text(
-                            text = previewText,
-                            style = paragraphStyle,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = tapToEditModifier,
-                            onTextLayout = { layout ->
-                                browseTextLayout = layout
-                                if (layout.lineCount > 0) {
-                                    firstLineHeightPx =
-                                        layout.getLineBottom(0) - layout.getLineTop(0)
+                        // 收起浏览模式：单行行内 Markdown 渲染（保持正文正常字号、无序列表保留圆点），防止行高与符号对齐跳动。
+                        MarkdownCollapsedLine(
+                            noteId = note.id,
+                            content = note.content,
+                            textStyle = paragraphStyle,
+                            isCollapsedMultiLine = isCollapsedMultiLine,
+                            onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
+                            onEllipsizedChanged = { ellipsized -> isFirstLineEllipsized = ellipsized },
+                            onTap = { rawOffset ->
+                                val collapsed = latestIsCollapsedMultiLine.value
+                                pendingTapCursorOffset = if (!collapsed && rawOffset != null) {
+                                    rawOffset.coerceIn(0, latestNoteContent.value.length)
+                                } else {
+                                    null
                                 }
-                                isFirstLineEllipsized = layout.hasVisualOverflow
+                                latestOnContentClick.value(collapsed)
                             }
                         )
                     }
@@ -2077,6 +2060,13 @@ fun BulletNoteRow(
                     }
                     onHintContentChange(currentHintNote.id, newText)
                 },
+                onTaskToggle = { newText ->
+                    if (pinnedEditingHintNote?.id == currentHintNote.id) {
+                        pinnedEditingHintNote = pinnedEditingHintNote?.copy(content = newText)
+                    }
+                    onHintContentChange(currentHintNote.id, newText)
+                    onHintEditFinished(currentHintNote.id)
+                },
                 onCollapseHintEdit = {
                     finishHintCardEditing(restoreMainFocus = true)
                 }
@@ -2154,6 +2144,7 @@ private fun KeywordHintCard(
     onBulletLongClick: () -> Unit,
     onContentClick: (Boolean) -> Unit,
     onContentChange: (String) -> Unit,
+    onTaskToggle: (String) -> Unit,
     onCollapseHintEdit: () -> Unit
 ) {
     val density = LocalDensity.current
@@ -2404,26 +2395,6 @@ private fun KeywordHintCard(
                         color = MaterialTheme.colorScheme.onSurface,
                         lineHeight = bodyLineHeight
                     )
-                    val hintTapModifier = Modifier
-                        .fillMaxWidth()
-                        .pointerInput(hintNote.id, isExpanded) {
-                            detectTapGestures(
-                                onTap = { tapOffset ->
-                                    val truncated = latestHintTruncated.value
-                                    if (!truncated) {
-                                        val contentLen = latestHintContent.value.length
-                                        val cursor = hintBrowseTextLayout
-                                            ?.getOffsetForPosition(tapOffset)
-                                            ?.coerceIn(0, contentLen)
-                                            ?: contentLen
-                                        pendingHintTapCursorOffset = cursor
-                                    } else {
-                                        pendingHintTapCursorOffset = null
-                                    }
-                                    latestHintOnContentClick.value(truncated)
-                                }
-                            )
-                        }
                     if (isExpanded) {
                         Box(
                             modifier = Modifier
@@ -2432,34 +2403,36 @@ private fun KeywordHintCard(
                                 .heightIn(max = 220.dp)
                                 .verticalScroll(rememberScrollState())
                         ) {
-                            Text(
-                                text = hintNote.content.ifEmpty { " " },
-                                style = paragraphStyle,
-                                modifier = hintTapModifier,
-                                onTextLayout = { layout ->
-                                    hintBrowseTextLayout = layout
-                                    if (layout.lineCount > 0) {
-                                        firstLineHeightPx =
-                                            layout.getLineBottom(0) - layout.getLineTop(0)
-                                    }
-                                }
+                            MarkdownExpandedContent(
+                                noteId = hintNote.id,
+                                content = hintNote.content,
+                                baseTextStyle = paragraphStyle,
+                                onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
+                                onTapToEdit = { rawOffset ->
+                                    pendingHintTapCursorOffset = rawOffset.coerceIn(0, latestHintContent.value.length)
+                                    latestHintOnContentClick.value(false)
+                                },
+                                onToggleTask = onTaskToggle
                             )
                         }
                     } else {
-                        // 默认最多展开 3 行；超出 3 行时在末尾显示省略号。
-                        Text(
-                            text = previewText,
-                            style = paragraphStyle,
+                        // 默认最多展开 3 行；渲染行内 Markdown 并保留无序列表圆点。
+                        MarkdownPreviewText(
+                            content = hintNote.content,
                             maxLines = 3,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = hintTapModifier.padding(end = 10.dp),
-                            onTextLayout = { layout ->
-                                hintBrowseTextLayout = layout
-                                if (layout.lineCount > 0) {
-                                    firstLineHeightPx =
-                                        layout.getLineBottom(0) - layout.getLineTop(0)
+                            textStyle = paragraphStyle,
+                            isTruncated = isTruncatedPreview,
+                            modifier = Modifier.padding(end = 10.dp),
+                            onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
+                            onOverflowChanged = { overflow -> isPreviewOverflow = overflow },
+                            onTap = { rawOffset ->
+                                val truncated = latestHintTruncated.value
+                                pendingHintTapCursorOffset = if (!truncated && rawOffset != null) {
+                                    rawOffset.coerceIn(0, latestHintContent.value.length)
+                                } else {
+                                    null
                                 }
-                                isPreviewOverflow = layout.hasVisualOverflow
+                                latestHintOnContentClick.value(truncated)
                             }
                         )
                     }

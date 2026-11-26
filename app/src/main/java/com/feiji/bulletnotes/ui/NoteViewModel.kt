@@ -13,6 +13,7 @@ import com.feiji.bulletnotes.data.KeywordHintEngine
 import com.feiji.bulletnotes.data.KeywordHintIndex
 import com.feiji.bulletnotes.data.LanServerService
 import com.feiji.bulletnotes.data.LanWebServer
+import com.feiji.bulletnotes.data.MarkdownParser
 import com.feiji.bulletnotes.data.MemoryCurveConfig
 import com.feiji.bulletnotes.data.MemoryCurvePreferences
 import com.feiji.bulletnotes.data.NoteEntity
@@ -107,11 +108,14 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 _searchResults.value = allNotes
                     .asSequence()
                     .filter { note ->
-                        !note.isDeleted &&
-                            (bulletTypes == null || note.bulletType in bulletTypes) &&
+                        if (note.isDeleted || (bulletTypes != null && note.bulletType !in bulletTypes)) {
+                            false
+                        } else {
+                            val searchable = MarkdownParser.stripMarkdownForSearch(note.content)
                             queryWords.all { word ->
-                                note.content.contains(word, ignoreCase = true)
+                                searchable.contains(word, ignoreCase = true)
                             }
+                        }
                     }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
                     .toList()
@@ -1148,8 +1152,13 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
                 _searchResults.value = _searchResults.value.map {
                     if (it.id == id) it.copy(content = newContent, updatedAt = System.currentTimeMillis()) else it
                 }.filter { note ->
-                    note.content.isNotBlank() && activeSearchKeywords.all { word ->
-                        note.content.contains(word, ignoreCase = true)
+                    if (note.content.isBlank()) {
+                        false
+                    } else {
+                        val searchable = MarkdownParser.stripMarkdownForSearch(note.content)
+                        activeSearchKeywords.all { word ->
+                            searchable.contains(word, ignoreCase = true)
+                        }
                     }
                 }
             }

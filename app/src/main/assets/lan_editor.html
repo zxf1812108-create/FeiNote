@@ -559,6 +559,155 @@
     text-decoration: line-through;
   }
 
+  /* ===== Markdown Browse Styles ===== */
+  .note-text-display.md-root {
+    white-space: normal;
+  }
+
+  .md-p {
+    margin: 0;
+    white-space: pre-wrap;
+  }
+
+  .md-p + .md-p,
+  .md-block + .md-block {
+    margin-top: 3px;
+  }
+
+  .md-blank {
+    height: 8px;
+  }
+
+  .md-h1, .md-h2, .md-h3 {
+    margin: 4px 0 2px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+
+  .md-block:first-child.md-h1,
+  .md-block:first-child.md-h2,
+  .md-block:first-child.md-h3 {
+    margin-top: 0;
+  }
+
+  .md-h1 { font-size: 1.24em; line-height: 1.4; }
+  .md-h2 { font-size: 1.14em; line-height: 1.45; font-weight: 600; }
+  .md-h3 { font-size: 1.07em; line-height: 1.5; font-weight: 600; }
+
+  .md-inline-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.14);
+  }
+
+  .md-code-block {
+    margin: 4px 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface-variant);
+    overflow-x: auto;
+  }
+
+  .md-code-lang {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .md-code-pre {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.52;
+    white-space: pre;
+    color: var(--text);
+  }
+
+  .md-quote {
+    margin: 3px 0;
+    padding: 1px 0 1px 10px;
+    border-left: 3px solid var(--border-strong, rgba(128, 128, 128, 0.35));
+    color: var(--text-secondary);
+  }
+
+  .md-hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 7px 0;
+  }
+
+  .md-list-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .md-list-bullet {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-weight: 700;
+    user-select: none;
+  }
+
+  .md-list-num {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+
+  .md-list-content {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+  }
+
+  .md-task-box {
+    flex: 0 0 auto;
+    width: 15px;
+    height: 15px;
+    margin-top: 5px;
+    border-radius: 3px;
+    border: 1.5px solid var(--text-secondary);
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-secondary);
+  }
+
+  .md-task-box:hover {
+    border-color: var(--text);
+    color: var(--text);
+  }
+
+  .md-task-done {
+    color: var(--text-secondary);
+    text-decoration: line-through;
+  }
+
+  .md-link {
+    color: #1F5FAD;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+
+  [data-theme="dark"] .md-link {
+    color: #8AB4F8;
+  }
+
+  .md-img-tag {
+    color: var(--text-secondary);
+  }
+
   .note-meta-inline {
     display: inline-flex;
     align-items: center;
@@ -2433,9 +2582,18 @@
         body.appendChild(toolbar);
       } else {
         const textDiv = document.createElement('div');
-        textDiv.className = 'note-text-display' + (note.bulletType === 'CHECKED' ? ' is-checked' : '');
-        textDiv.textContent = note.content;
+        textDiv.className = 'note-text-display md-root' + (note.bulletType === 'CHECKED' ? ' is-checked' : '');
+        renderMarkdownInto(textDiv, note.content || '', {
+          onToggleTask: async (checkboxCharIdx) => {
+            const updated = toggleMarkdownTaskCheckbox(note.content || '', checkboxCharIdx);
+            if (updated === (note.content || '')) return;
+            await updateNoteContentDirectly(note, updated);
+          }
+        });
         textDiv.addEventListener('click', (e) => {
+          if (e.target && e.target.closest && (e.target.closest('a.md-link') || e.target.closest('button.md-task-box'))) {
+            return;
+          }
           e.stopPropagation();
           const clickOffset = getClickCharOffset(e, textDiv);
           enterEditMode(note, clickOffset);
@@ -2560,6 +2718,622 @@
     ta.style.height = Math.max(26, ta.scrollHeight) + 'px';
   }
 
+  const mdRawOffsetMap = new WeakMap();
+
+  /* ===== Safe Zero-Dependency Markdown Parser & DOM Renderer (100% XSS-safe) ===== */
+  function isSafeMdUrl(rawUrl) {
+    if (!rawUrl) return false;
+    const lower = rawUrl.trim().toLowerCase();
+    return lower.startsWith('https://') || lower.startsWith('http://') || lower.startsWith('mailto:');
+  }
+
+  function isMdAsciiWord(ch) {
+    if (!ch) return false;
+    const c = ch.charCodeAt(0);
+    return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95;
+  }
+
+  function isMdDigit(ch) {
+    if (!ch) return false;
+    const c = ch.charCodeAt(0);
+    return c >= 48 && c <= 57;
+  }
+
+  function isMdEscapable(ch) {
+    return ch && '\\`*_{}[]()#+-.!~'.indexOf(ch) >= 0;
+  }
+
+  function matchMdLink(source, openBracket, limit) {
+    let i = openBracket + 1;
+    let closeBracket = -1;
+    while (i < limit) {
+      if (source[i] === '\\' && i + 1 < limit) { i += 2; continue; }
+      if (source[i] === ']') { closeBracket = i; break; }
+      i++;
+    }
+    if (closeBracket === -1 || closeBracket + 1 >= limit || source[closeBracket + 1] !== '(') return null;
+    const urlStart = closeBracket + 2;
+    let depth = 1;
+    let j = urlStart;
+    while (j < limit && depth > 0) {
+      if (source[j] === '(') depth++;
+      else if (source[j] === ')') depth--;
+      if (depth === 0) break;
+      j++;
+    }
+    if (depth !== 0) return null;
+    const url = source.slice(urlStart, j).trim();
+    if (!url) return null;
+    return { labelStart: openBracket + 1, labelEnd: closeBracket, url, rawEnd: j + 1 };
+  }
+
+  function findMdClosingMarker(source, marker, from, limit, requireWordBoundary) {
+    const mLen = marker.length;
+    if (from >= limit || /\s/.test(source[from])) return -1;
+    let i = from;
+    while (i + mLen <= limit) {
+      if (source[i] === '\\' && i + 1 < limit) { i += 2; continue; }
+      if (source[i] === '`') {
+        const endCode = source.indexOf('`', i + 1);
+        if (endCode > i && endCode < limit) { i = endCode + 1; continue; }
+      }
+      if (source.startsWith(marker, i)) {
+        const nonEmpty = i > from;
+        const prevNotSpace = nonEmpty && !/\s/.test(source[i - 1]);
+        const boundaryOk = !requireWordBoundary || (i + mLen >= limit || !isMdAsciiWord(source[i + mLen]));
+        if (nonEmpty && prevNotSpace && boundaryOk) return i;
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  function findMdClosingSingleAsterisk(source, from, limit) {
+    let i = from;
+    while (i < limit) {
+      if (source[i] === '\\' && i + 1 < limit) { i += 2; continue; }
+      if (source[i] === '`') {
+        const endCode = source.indexOf('`', i + 1);
+        if (endCode > i && endCode < limit) { i = endCode + 1; continue; }
+      }
+      if (source[i] === '*') {
+        const prevIsStar = i > from && source[i - 1] === '*';
+        const nextIsStar = i + 1 < limit && source[i + 1] === '*';
+        const prev = source[i - 1];
+        const nextIsDig = i + 1 < limit && isMdDigit(source[i + 1]);
+        if (!prevIsStar && !nextIsStar && i > from && !/\s/.test(prev) && !(isMdDigit(prev) && nextIsDig)) {
+          return i;
+        }
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  function parseMdInline(source, startIndex, endIndex) {
+    const safeStart = Math.max(0, Math.min(startIndex, source.length));
+    const safeEnd = Math.max(safeStart, Math.min(endIndex, source.length));
+    const chars = [];
+    const rawOffsets = [];
+    const segments = [];
+
+    function pushSegment(text, offsets, style) {
+      if (!text) return;
+      for (let k = 0; k < text.length; k++) {
+        chars.push(text[k]);
+        rawOffsets.push(offsets[k]);
+      }
+      const prev = segments[segments.length - 1];
+      if (
+        prev &&
+        prev.bold === style.bold &&
+        prev.italic === style.italic &&
+        prev.strike === style.strike &&
+        prev.code === style.code &&
+        prev.linkUrl === style.linkUrl &&
+        prev.isImageLink === style.isImageLink
+      ) {
+        prev.text += text;
+      } else {
+        segments.push({ text, ...style });
+      }
+    }
+
+    function emitRange(from, to, bold, italic, strike, linkUrl) {
+      let i = from;
+      while (i < to) {
+        const ch = source[i];
+        if (ch === '\\' && i + 1 < to && isMdEscapable(source[i + 1])) {
+          pushSegment(source[i + 1], [i + 1], { bold, italic, strike, code: false, linkUrl, isImageLink: false });
+          i += 2;
+          continue;
+        }
+        if (ch === '`') {
+          const close = source.indexOf('`', i + 1);
+          if (close > i + 1 && close < to) {
+            const codeText = source.slice(i + 1, close);
+            const offs = [];
+            for (let k = i + 1; k < close; k++) offs.push(k);
+            pushSegment(codeText, offs, { bold, italic, strike, code: true, linkUrl, isImageLink: false });
+            i = close + 1;
+            continue;
+          }
+        }
+        if (ch === '!' && i + 1 < to && source[i + 1] === '[' && !linkUrl) {
+          const lm = matchMdLink(source, i + 1, to);
+          if (lm) {
+            const alt = source.slice(lm.labelStart, lm.labelEnd).trim();
+            const shown = alt ? ('[图片: ' + alt + ']') : '[图片]';
+            const safeUrl = isSafeMdUrl(lm.url) ? lm.url.trim() : null;
+            const offs = [];
+            for (let cIdx = 0; cIdx < shown.length; cIdx++) {
+              offs.push(Math.min(lm.labelStart + cIdx, lm.rawEnd - 1));
+            }
+            pushSegment(shown, offs, { bold, italic, strike, code: false, linkUrl: safeUrl, isImageLink: true });
+            i = lm.rawEnd;
+            continue;
+          }
+        }
+        if (ch === '[' && !linkUrl) {
+          const lm = matchMdLink(source, i, to);
+          if (lm) {
+            const safeUrl = isSafeMdUrl(lm.url) ? lm.url.trim() : null;
+            emitRange(lm.labelStart, lm.labelEnd, bold, italic, strike, safeUrl);
+            i = lm.rawEnd;
+            continue;
+          }
+        }
+        if (ch === '*' && source.startsWith('***', i)) {
+          const close = findMdClosingMarker(source, '***', i + 3, to, false);
+          if (close !== -1) {
+            emitRange(i + 3, close, true, true, strike, linkUrl);
+            i = close + 3;
+            continue;
+          }
+        }
+        if (ch === '*' && source.startsWith('**', i)) {
+          const close = findMdClosingMarker(source, '**', i + 2, to, false);
+          if (close !== -1) {
+            emitRange(i + 2, close, true, italic, strike, linkUrl);
+            i = close + 2;
+            continue;
+          }
+        }
+        if (ch === '_' && source.startsWith('__', i) && (i <= from || !isMdAsciiWord(source[i - 1]))) {
+          const close = findMdClosingMarker(source, '__', i + 2, to, true);
+          if (close !== -1) {
+            emitRange(i + 2, close, true, italic, strike, linkUrl);
+            i = close + 2;
+            continue;
+          }
+        }
+        if (ch === '~' && source.startsWith('~~', i)) {
+          const close = findMdClosingMarker(source, '~~', i + 2, to, false);
+          if (close !== -1) {
+            emitRange(i + 2, close, bold, italic, true, linkUrl);
+            i = close + 2;
+            continue;
+          }
+        }
+        if (
+          ch === '*' &&
+          i + 1 < to &&
+          !/\s/.test(source[i + 1]) &&
+          source[i + 1] !== '*' &&
+          !(i > from && isMdDigit(source[i - 1]) && isMdDigit(source[i + 1]))
+        ) {
+          const close = findMdClosingSingleAsterisk(source, i + 1, to);
+          if (close !== -1) {
+            emitRange(i + 1, close, bold, true, strike, linkUrl);
+            i = close + 1;
+            continue;
+          }
+        }
+        if (
+          ch === '_' &&
+          (i <= from || !isMdAsciiWord(source[i - 1])) &&
+          i + 1 < to &&
+          !/\s/.test(source[i + 1])
+        ) {
+          const close = findMdClosingMarker(source, '_', i + 1, to, true);
+          if (close !== -1) {
+            emitRange(i + 1, close, bold, true, strike, linkUrl);
+            i = close + 1;
+            continue;
+          }
+        }
+        pushSegment(ch, [i], { bold, italic, strike, code: false, linkUrl, isImageLink: false });
+        i++;
+      }
+    }
+
+    emitRange(safeStart, safeEnd, false, false, false, null);
+    return {
+      displayText: chars.join(''),
+      rawOffsets,
+      segments,
+      rawStart: safeStart,
+      rawEnd: safeEnd
+    };
+  }
+
+  function splitMdRawLines(source) {
+    if (!source) return [];
+    const res = [];
+    let lineStart = 0;
+    for (let i = 0; i < source.length; i++) {
+      if (source[i] === '\n') {
+        res.push({ text: source.slice(lineStart, i), start: lineStart, end: i });
+        lineStart = i + 1;
+      }
+    }
+    res.push({ text: source.slice(lineStart), start: lineStart, end: source.length });
+    return res;
+  }
+
+  function mdIndentLevel(ws) {
+    let spaces = 0;
+    for (let i = 0; i < ws.length; i++) spaces += (ws[i] === '\t' ? 4 : 1);
+    return Math.min(4, Math.floor(spaces / 2));
+  }
+
+  function parseMdBlocks(source) {
+    const lines = splitMdRawLines(source);
+    const blocks = [];
+    const headingRe = /^(#{1,3})[ \t]+(.*)$/;
+    const hrRe = /^[ \t]*(?:-[ \t]*-[ \t]*-[- \t]*|\*[ \t]*\*[ \t]*\*[\* \t]*|_[ \t]*_[ \t]*_[_ \t]*)$/;
+    const fenceRe = /^[ \t]*(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+#.-]*)[ \t]*$/;
+    const taskRe = /^([ \t]*)[-*+][ \t]+\[([ xX])\](?:[ \t]+(.*)|)$/;
+    const ulRe = /^([ \t]*)[-*+][ \t]+(.*)$/;
+    const olRe = /^([ \t]*)(\d+\.)[ \t]+(.*)$/;
+    const quoteRe = /^[ \t]*>[ \t]?(.*)$/;
+
+    let idx = 0;
+    while (idx < lines.length) {
+      const line = lines[idx];
+      const text = line.text;
+      if (!text.trim()) {
+        blocks.push({ type: 'blank', rawStart: line.start, rawEnd: line.end });
+        idx++;
+        continue;
+      }
+      const fenceM = fenceRe.exec(text);
+      if (fenceM) {
+        const markerChar = fenceM[1][0];
+        const markerLen = fenceM[1].length;
+        const lang = fenceM[2] || '';
+        let closeIdx = idx + 1;
+        while (closeIdx < lines.length) {
+          const tr = lines[closeIdx].text.trim();
+          if (tr.length >= markerLen && [...tr].every((c) => c === markerChar)) break;
+          closeIdx++;
+        }
+        const codeLines = lines.slice(idx + 1, closeIdx);
+        const code = codeLines.map((l) => l.text).join('\n');
+        const codeRawStart = codeLines.length ? codeLines[0].start : line.end;
+        const rawEnd = closeIdx < lines.length ? lines[closeIdx].end : lines[lines.length - 1].end;
+        blocks.push({ type: 'code', lang, code, codeRawStart, rawStart: line.start, rawEnd });
+        idx = closeIdx < lines.length ? closeIdx + 1 : lines.length;
+        continue;
+      }
+      if (hrRe.test(text)) {
+        blocks.push({ type: 'hr', rawStart: line.start, rawEnd: line.end });
+        idx++;
+        continue;
+      }
+      const hM = headingRe.exec(text);
+      if (hM) {
+        const prefixLen = text.length - hM[2].length;
+        const inline = parseMdInline(source, line.start + prefixLen, line.end);
+        blocks.push({ type: 'heading', level: hM[1].length, inline, rawStart: line.start, rawEnd: line.end });
+        idx++;
+        continue;
+      }
+      if (quoteRe.test(text)) {
+        const qLines = [];
+        const bStart = line.start;
+        let bEnd = line.end;
+        while (idx < lines.length) {
+          const cur = lines[idx];
+          const qM = quoteRe.exec(cur.text);
+          if (!qM) break;
+          const prefixLen = cur.text.length - qM[1].length;
+          qLines.push(parseMdInline(source, cur.start + prefixLen, cur.end));
+          bEnd = cur.end;
+          idx++;
+        }
+        blocks.push({ type: 'quote', lines: qLines, rawStart: bStart, rawEnd: bEnd });
+        continue;
+      }
+      const tM = taskRe.exec(text);
+      if (tM) {
+        const bracketIdx = text.indexOf('[');
+        const checkCharIdx = line.start + bracketIdx + 1;
+        const checked = tM[2].toLowerCase() === 'x';
+        const contentStr = tM[3] || '';
+        const contentStart = contentStr ? (line.end - contentStr.length) : line.end;
+        const inline = parseMdInline(source, contentStart, line.end);
+        blocks.push({
+          type: 'task',
+          indent: mdIndentLevel(tM[1]),
+          checked,
+          checkboxCharRawIndex: checkCharIdx,
+          inline,
+          rawStart: line.start,
+          rawEnd: line.end
+        });
+        idx++;
+        continue;
+      }
+      const uM = ulRe.exec(text);
+      if (uM) {
+        const prefixLen = text.length - uM[2].length;
+        const inline = parseMdInline(source, line.start + prefixLen, line.end);
+        blocks.push({ type: 'ul', indent: mdIndentLevel(uM[1]), inline, rawStart: line.start, rawEnd: line.end });
+        idx++;
+        continue;
+      }
+      const oM = olRe.exec(text);
+      if (oM) {
+        const prefixLen = text.length - oM[3].length;
+        const inline = parseMdInline(source, line.start + prefixLen, line.end);
+        blocks.push({ type: 'ol', indent: mdIndentLevel(oM[1]), marker: oM[2], inline, rawStart: line.start, rawEnd: line.end });
+        idx++;
+        continue;
+      }
+      blocks.push({ type: 'p', inline: parseMdInline(source, line.start, line.end), rawStart: line.start, rawEnd: line.end });
+      idx++;
+    }
+    return blocks;
+  }
+
+  function appendMdInlineNodes(el, parsedInline) {
+    el.setAttribute('data-md-inline', '1');
+    mdRawOffsetMap.set(el, {
+      rawOffsets: parsedInline.rawOffsets,
+      rawStart: parsedInline.rawStart,
+      rawEnd: parsedInline.rawEnd
+    });
+    if (!parsedInline.segments.length) {
+      el.appendChild(document.createTextNode('\u00A0'));
+      return;
+    }
+    parsedInline.segments.forEach((seg) => {
+      let node = document.createTextNode(seg.text);
+      if (seg.code) {
+        const codeEl = document.createElement('code');
+        codeEl.className = 'md-inline-code';
+        codeEl.appendChild(node);
+        node = codeEl;
+      }
+      if (seg.strike) {
+        const sEl = document.createElement('del');
+        sEl.appendChild(node);
+        node = sEl;
+      }
+      if (seg.italic) {
+        const emEl = document.createElement('em');
+        emEl.appendChild(node);
+        node = emEl;
+      }
+      if (seg.bold) {
+        const stEl = document.createElement('strong');
+        stEl.appendChild(node);
+        node = stEl;
+      }
+      if (seg.linkUrl) {
+        const aEl = document.createElement('a');
+        aEl.className = 'md-link';
+        aEl.href = seg.linkUrl;
+        aEl.target = '_blank';
+        aEl.rel = 'noopener noreferrer';
+        aEl.appendChild(node);
+        aEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+        });
+        node = aEl;
+      } else if (seg.isImageLink) {
+        const sp = document.createElement('span');
+        sp.className = 'md-img-tag';
+        sp.appendChild(node);
+        node = sp;
+      }
+      el.appendChild(node);
+    });
+  }
+
+  function toggleMarkdownTaskCheckbox(source, checkboxCharIdx) {
+    if (!source || checkboxCharIdx <= 0 || checkboxCharIdx >= source.length - 1) return source;
+    if (source[checkboxCharIdx - 1] !== '[' || source[checkboxCharIdx + 1] !== ']') return source;
+    const cur = source[checkboxCharIdx];
+    const next = cur === ' ' ? 'x' : (cur === 'x' || cur === 'X' ? ' ' : null);
+    if (!next) return source;
+    return source.slice(0, checkboxCharIdx) + next + source.slice(checkboxCharIdx + 1);
+  }
+
+  async function updateNoteContentDirectly(note, newContent) {
+    try {
+      const res = await api('/api/notes/' + note.id, {
+        method: 'PUT',
+        body: { content: newContent, expectedUpdatedAt: note.updatedAt || null }
+      });
+      if (res && res.note) {
+        const idx = state.notes.findIndex((n) => n.id === note.id);
+        if (idx >= 0) state.notes[idx] = res.note;
+        renderNotesList();
+      }
+    } catch (err) {
+      showToast(err.message || '更新任务状态失败');
+      await loadCurrentView(false);
+    }
+  }
+
+  function renderMarkdownInto(container, content, options) {
+    container.innerHTML = '';
+    const blocks = parseMdBlocks(content || '');
+    if (!blocks.length) {
+      const p = document.createElement('div');
+      p.className = 'md-block md-p';
+      p.textContent = '\u00A0';
+      container.appendChild(p);
+      return;
+    }
+
+    blocks.forEach((b) => {
+      if (b.type === 'blank') {
+        const sp = document.createElement('div');
+        sp.className = 'md-block md-blank';
+        sp.dataset.rawStart = String(b.rawStart);
+        container.appendChild(sp);
+      } else if (b.type === 'hr') {
+        const hr = document.createElement('hr');
+        hr.className = 'md-block md-hr';
+        hr.dataset.rawStart = String(b.rawStart);
+        container.appendChild(hr);
+      } else if (b.type === 'heading') {
+        const h = document.createElement('div');
+        h.className = 'md-block md-h' + b.level;
+        appendMdInlineNodes(h, b.inline);
+        container.appendChild(h);
+      } else if (b.type === 'quote') {
+        const q = document.createElement('div');
+        q.className = 'md-block md-quote';
+        b.lines.forEach((ln) => {
+          const lineEl = document.createElement('div');
+          lineEl.className = 'md-p';
+          appendMdInlineNodes(lineEl, ln);
+          q.appendChild(lineEl);
+        });
+        container.appendChild(q);
+      } else if (b.type === 'code') {
+        const wrap = document.createElement('div');
+        wrap.className = 'md-block md-code-block';
+        wrap.dataset.rawStart = String(b.codeRawStart);
+        if (b.lang) {
+          const lg = document.createElement('div');
+          lg.className = 'md-code-lang';
+          lg.textContent = b.lang;
+          wrap.appendChild(lg);
+        }
+        const pre = document.createElement('pre');
+        pre.className = 'md-code-pre';
+        pre.textContent = b.code || ' ';
+        wrap.appendChild(pre);
+        container.appendChild(wrap);
+      } else if (b.type === 'ul') {
+        // 无序列表保留圆点
+        const row = document.createElement('div');
+        row.className = 'md-block md-list-row';
+        if (b.indent > 0) row.style.paddingLeft = (b.indent * 16) + 'px';
+        const dot = document.createElement('span');
+        dot.className = 'md-list-bullet';
+        dot.textContent = '•';
+        const txt = document.createElement('div');
+        txt.className = 'md-list-content';
+        appendMdInlineNodes(txt, b.inline);
+        row.appendChild(dot);
+        row.appendChild(txt);
+        container.appendChild(row);
+      } else if (b.type === 'ol') {
+        const row = document.createElement('div');
+        row.className = 'md-block md-list-row';
+        if (b.indent > 0) row.style.paddingLeft = (b.indent * 16) + 'px';
+        const num = document.createElement('span');
+        num.className = 'md-list-num';
+        num.textContent = b.marker;
+        const txt = document.createElement('div');
+        txt.className = 'md-list-content';
+        appendMdInlineNodes(txt, b.inline);
+        row.appendChild(num);
+        row.appendChild(txt);
+        container.appendChild(row);
+      } else if (b.type === 'task') {
+        const row = document.createElement('div');
+        row.className = 'md-block md-list-row';
+        if (b.indent > 0) row.style.paddingLeft = (b.indent * 16) + 'px';
+        const box = document.createElement('button');
+        box.type = 'button';
+        box.className = 'md-task-box';
+        box.title = b.checked ? '标记为未完成' : '标记为已完成';
+        if (b.checked) {
+          box.textContent = '✓';
+          box.style.fontSize = '11px';
+          box.style.lineHeight = '1';
+        }
+        box.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (options && typeof options.onToggleTask === 'function') {
+            options.onToggleTask(b.checkboxCharRawIndex);
+          }
+        });
+        const txt = document.createElement('div');
+        txt.className = 'md-list-content' + (b.checked ? ' md-task-done' : '');
+        appendMdInlineNodes(txt, b.inline);
+        row.appendChild(box);
+        row.appendChild(txt);
+        container.appendChild(row);
+      } else {
+        const p = document.createElement('div');
+        p.className = 'md-block md-p';
+        appendMdInlineNodes(p, b.inline);
+        container.appendChild(p);
+      }
+    });
+  }
+
+  function renderMarkdownPreviewText(container, content, emptyFallback) {
+    container.innerHTML = '';
+    if (!content || !content.trim()) {
+      container.textContent = emptyFallback || '';
+      return;
+    }
+    const blocks = parseMdBlocks(content);
+    let shownLines = 0;
+    blocks.forEach((b) => {
+      if (b.type === 'blank' || b.type === 'hr') return;
+      if (shownLines > 0) container.appendChild(document.createTextNode('\n'));
+      if (b.type === 'ul') {
+        const span = document.createElement('span');
+        span.textContent = '• ';
+        container.appendChild(span);
+        const inner = document.createElement('span');
+        appendMdInlineNodes(inner, b.inline);
+        container.appendChild(inner);
+      } else if (b.type === 'ol') {
+        const span = document.createElement('span');
+        span.textContent = b.marker + ' ';
+        container.appendChild(span);
+        const inner = document.createElement('span');
+        appendMdInlineNodes(inner, b.inline);
+        container.appendChild(inner);
+      } else if (b.type === 'task') {
+        const span = document.createElement('span');
+        span.textContent = b.checked ? '☑ ' : '☐ ';
+        container.appendChild(span);
+        const inner = document.createElement('span');
+        appendMdInlineNodes(inner, b.inline);
+        container.appendChild(inner);
+      } else if (b.type === 'code') {
+        const codeEl = document.createElement('code');
+        codeEl.className = 'md-inline-code';
+        codeEl.textContent = b.code || (b.lang ? '[' + b.lang + ' 代码]' : '[代码]');
+        container.appendChild(codeEl);
+      } else if (b.type === 'quote') {
+        b.lines.forEach((ln, idx) => {
+          if (idx > 0) container.appendChild(document.createTextNode('\n'));
+          const inner = document.createElement('span');
+          appendMdInlineNodes(inner, ln);
+          container.appendChild(inner);
+        });
+      } else if (b.inline) {
+        const inner = document.createElement('span');
+        appendMdInlineNodes(inner, b.inline);
+        container.appendChild(inner);
+      }
+      shownLines++;
+    });
+  }
+
   function getClickCharOffset(mouseEvent, container) {
     try {
       let range = null;
@@ -2574,6 +3348,26 @@
         }
       }
       if (range && container.contains(range.startContainer)) {
+        const startEl = range.startContainer.nodeType === 1
+          ? range.startContainer
+          : range.startContainer.parentElement;
+        const inlineHost = startEl && startEl.closest ? startEl.closest('[data-md-inline="1"]') : null;
+        if (inlineHost && container.contains(inlineHost) && mdRawOffsetMap.has(inlineHost)) {
+          const meta = mdRawOffsetMap.get(inlineHost);
+          const pre = document.createRange();
+          pre.selectNodeContents(inlineHost);
+          pre.setEnd(range.startContainer, range.startOffset);
+          const localDisplayOffset = pre.toString().length;
+          if (!meta.rawOffsets.length) return meta.rawStart;
+          if (localDisplayOffset <= 0) return meta.rawOffsets[0];
+          if (localDisplayOffset >= meta.rawOffsets.length) return meta.rawEnd;
+          return meta.rawOffsets[localDisplayOffset];
+        }
+        const blockHost = startEl && startEl.closest ? startEl.closest('[data-raw-start]') : null;
+        if (blockHost && container.contains(blockHost)) {
+          const parsedStart = parseInt(blockHost.dataset.rawStart, 10);
+          if (Number.isFinite(parsedStart)) return parsedStart;
+        }
         const pre = document.createRange();
         pre.selectNodeContents(container);
         pre.setEnd(range.startContainer, range.startOffset);
@@ -2844,7 +3638,7 @@
 
     const body = document.createElement('div');
     body.className = 'keyword-hint-body';
-    body.textContent = curNote.content;
+    renderMarkdownPreviewText(body, curNote.content || '', '');
 
     card.appendChild(head);
     card.appendChild(body);
@@ -3891,7 +4685,7 @@
 
         const content = document.createElement('div');
         content.className = 'trash-item-content';
-        content.textContent = (note.content && note.content.trim()) ? note.content : '（空笔记）';
+        renderMarkdownPreviewText(content, note.content || '', '（空笔记）');
 
         const meta = document.createElement('div');
         meta.className = 'trash-item-meta';

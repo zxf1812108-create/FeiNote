@@ -196,12 +196,13 @@ fun TrashBinDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (note.content.isBlank()) "（空笔记）" else note.content,
-                                        style = MaterialTheme.typography.bodyMedium,
+                                    MarkdownPreviewText(
+                                        content = note.content,
                                         maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = contentColor
+                                        emptyPlaceholder = "（空笔记）",
+                                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                            color = contentColor
+                                        )
                                     )
                                     Spacer(modifier = Modifier.height(5.dp))
                                     Text(

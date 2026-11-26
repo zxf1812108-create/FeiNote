@@ -558,8 +558,12 @@ object LanWebServer {
                 noteDao.getAllActiveNotes()
                     .asSequence()
                     .filter { note ->
-                        (allowedTypes == null || note.bulletType in allowedTypes) &&
-                            words.all { w -> note.content.contains(w, ignoreCase = true) }
+                        if (allowedTypes != null && note.bulletType !in allowedTypes) {
+                            false
+                        } else {
+                            val searchable = MarkdownParser.stripMarkdownForSearch(note.content)
+                            words.all { w -> searchable.contains(w, ignoreCase = true) }
+                        }
                     }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
                     .toList()
