@@ -186,9 +186,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var showTrashDialog by remember { mutableStateOf(false) }
     var trashBounds by remember { mutableStateOf<Rect?>(null) }
     var hoveringTrash by remember { mutableStateOf(false) }
-    var showBackupPicker by remember { mutableStateOf(false) }
-    var showWebDavSettings by remember { mutableStateOf(false) }
-    var showLanServerDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
     var backupToRestore by remember {
         mutableStateOf<com.feiji.bulletnotes.data.BackupManager.BackupFile?>(null)
     }
@@ -772,7 +770,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 },
                                 onLongClick = {
                                     closeEditor()
-                                    showBackupPicker = true
+                                    showSettingsDialog = true
                                     viewModel.loadBackupFiles()
                                 }
                             ),
@@ -1191,9 +1189,6 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         StarReviewDialog(
             note = targetNote,
             memoryCurveConfig = memoryCurveConfig,
-            onSaveMemoryCurveConfig = { updated ->
-                viewModel.updateMemoryCurveConfig(updated)
-            },
             onSelectFamiliarity = { familiarity ->
                 viewModel.reviewStarNote(targetNote, familiarity)
                 noteToReview = null
@@ -1260,630 +1255,55 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
         )
     }
 
-    // 备份列表
-    if (showBackupPicker) {
-        AlertDialog(
-            onDismissRequest = {
-                showBackupPicker = false
-            },
-            title = {
-                Text("选择要恢复的备份")
-            },
-            text = {
-                Column {
-                    if (backupFiles.isEmpty()) {
-                        Text("没有找到飞记备份文件，或正在读取。")
-                    } else {
-                        backupFiles.forEach { file ->
-                            TextButton(
-                                onClick = {
-                                    backupToRestore = file
-                                    showBackupPicker = false
-                                }
-                            ) {
-                                Text(file.name)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+    // 长按回收站弹出统一「设置」弹窗（默认停在电脑直连，含深浅色主题切换、同步设置、备份恢复、记忆曲线）
+    if (showSettingsDialog) {
+        UnifiedSettingsDialog(
+            lanServerState = lanServerState,
+            webDavConfig = webDavConfig,
+            backupFiles = backupFiles,
+            memoryCurveConfig = memoryCurveConfig,
+            onToggleTheme = onToggleTheme,
+            onStartLanServer = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
                 ) {
-                    // 左侧入口：「电脑直连」+「备份设置」
-                    TextButton(
-                        onClick = {
-                            showBackupPicker = false
-                            showLanServerDialog = true
-                        },
-                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            if (lanServerState.running) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(if (LocalIsDarkTheme.current) DarkOnlineGreen else LightOnlineGreen)
-                                )
-                            }
-                            Text(
-                                text = "电脑直连",
-                                maxLines = 1,
-                                softWrap = false,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                    TextButton(
-                        onClick = {
-                            showBackupPicker = false
-                            showWebDavSettings = true
-                        },
-                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "备份设置",
-                            maxLines = 1,
-                            softWrap = false,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    TextButton(
-                        onClick = {
-                            showBackupPicker = false
-                        },
-                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "取消",
-                            maxLines = 1,
-                            softWrap = false,
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                    }
-                    TextButton(
-                        onClick = {
-                            viewModel.loadBackupFiles()
-                        },
-                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "刷新",
-                            maxLines = 1,
-                            softWrap = false,
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                    }
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    viewModel.startLanServer()
                 }
-            }
-        )
-    }
-
-    // 局域网电脑/安卓设备直连控制弹窗
-    if (showLanServerDialog) {
-        val formattedPin = if (lanServerState.pin.length == 6) {
-            lanServerState.pin.substring(0, 3) + " " + lanServerState.pin.substring(3)
-        } else {
-            lanServerState.pin
-        }
-
-        AlertDialog(
-            onDismissRequest = {
-                showLanServerDialog = false
             },
-            title = {
-                Text(
-                    text = "局域网电脑直连",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
+            onStopLanServer = {
+                viewModel.stopLanServer()
+            },
+            onRefreshLanPin = {
+                viewModel.refreshLanPin()
+            },
+            onSaveWebDavSettings = { serverUrl, username, password, encryptionPassword, wifiAutoSyncEnabled ->
+                viewModel.saveWebDavSettings(
+                    serverUrl = serverUrl,
+                    username = username,
+                    password = password,
+                    encryptionPassword = encryptionPassword,
+                    wifiAutoSyncEnabled = wifiAutoSyncEnabled
                 )
             },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    if (!lanServerState.running) {
-                        Text(
-                            text = "开启后，同一 Wi-Fi 或热点下的电脑、平板或其他手机，可直接用浏览器读写本机笔记。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "· 锁屏或切到后台仍保持连接，通知栏可随时停止\n· 每次随机生成 6 位配对码，无操作 30 分钟自动关闭",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                        )
-                        lanServerState.errorMessage?.let { err ->
-                            Text(
-                                text = err,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = "在同局域网浏览器中打开：",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                        )
-                        val displayUrls = if (lanServerState.urls.isNotEmpty()) {
-                            lanServerState.urls
-                        } else {
-                            listOf("http://127.0.0.1:${lanServerState.port}")
-                        }
-                        displayUrls.forEach { url ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = url,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    onClick = {
-                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                        cm?.setPrimaryClip(ClipData.newPlainText("FeiNote LAN URL", url))
-                                        Toast.makeText(context, "已复制访问地址", Toast.LENGTH_SHORT).show()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                                ) {
-                                    Text("复制", style = MaterialTheme.typography.labelMedium)
-                                }
-                            }
-                        }
-                        if (lanServerState.urls.isEmpty()) {
-                            Text(
-                                text = "未检测到 Wi-Fi/热点局域网 IP，请连接 Wi-Fi 或开启热点（也支持 USB 线 adb forward 访问本机地址）。",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "配对码",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                                )
-                                Text(
-                                    text = formattedPin,
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                            TextButton(
-                                onClick = {
-                                    viewModel.refreshLanPin()
-                                    Toast.makeText(context, "配对码已刷新，旧连接已断开", Toast.LENGTH_SHORT).show()
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Text("换一个", style = MaterialTheme.typography.labelMedium)
-                            }
-                        }
-
-                        val statusDetail = buildString {
-                            if (lanServerState.activeSessions > 0 && !lanServerState.lastClientIp.isNullOrBlank()) {
-                                append("已连接（${lanServerState.activeSessions} 台设备，最近：${lanServerState.lastClientIp}）")
-                            } else {
-                                append("等待浏览器连接")
-                            }
-                            append("\n锁屏切后台持续运行 · 无操作 30 分钟自动关闭")
-                        }
-                        Text(
-                            text = statusDetail,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                        )
-                    }
-                }
+            onRefreshBackups = {
+                viewModel.loadBackupFiles()
             },
-            confirmButton = {
-                if (!lanServerState.running) {
-                    TextButton(
-                        onClick = {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.POST_NOTIFICATIONS
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            } else {
-                                viewModel.startLanServer()
-                            }
-                        }
-                    ) {
-                        Text("开启直连")
-                    }
-                } else {
-                    TextButton(
-                        onClick = {
-                            viewModel.stopLanServer()
-                        }
-                    ) {
-                        Text("停止直连", color = MaterialTheme.colorScheme.error)
-                    }
-                }
+            onSelectBackupToRestore = { file ->
+                backupToRestore = file
+                showSettingsDialog = false
             },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showLanServerDialog = false
-                    }
-                ) {
-                    Text(if (lanServerState.running) "后台保持" else "关闭")
-                }
+            onSaveMemoryCurveConfig = { updated ->
+                viewModel.updateMemoryCurveConfig(updated)
+            },
+            onDismiss = {
+                showSettingsDialog = false
             }
         )
-    }
-
-    // 备份设置弹窗（WebDAV 同步备份 + 加密备份 + 局域网自动同步）
-    if (showWebDavSettings) {
-        var serverUrlInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.serverUrl) }
-        var usernameInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.username) }
-        var passwordInput by remember(showWebDavSettings) { mutableStateOf(webDavConfig.password) }
-        var passwordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
-        var encryptionPasswordInput by remember(showWebDavSettings) {
-            mutableStateOf(webDavConfig.encryptionPassword)
-        }
-        var encryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
-        var confirmEncryptionPasswordInput by remember(showWebDavSettings) {
-            mutableStateOf(webDavConfig.encryptionPassword)
-        }
-        var confirmEncryptionPasswordVisible by remember(showWebDavSettings) { mutableStateOf(false) }
-        var encryptionPasswordMismatchError by remember(showWebDavSettings) { mutableStateOf(false) }
-        var serverUrlInvalidError by remember(showWebDavSettings) { mutableStateOf(false) }
-        var wifiAutoSyncInput by remember(showWebDavSettings) {
-            mutableStateOf(webDavConfig.wifiAutoSyncEnabled)
-        }
-
-        val isServerUrlUnsafe = serverUrlInput.isNotBlank() &&
-            !WebDavBackupManager.isAllowedServerUrl(serverUrlInput)
-        val showServerUrlError = serverUrlInvalidError || isServerUrlUnsafe
-        val isEncryptionPasswordMismatch = encryptionPasswordInput.isNotEmpty() &&
-            encryptionPasswordInput != confirmEncryptionPasswordInput
-        val showMismatchError = encryptionPasswordMismatchError ||
-            (confirmEncryptionPasswordInput.isNotEmpty() && isEncryptionPasswordMismatch)
-
-        val fieldTextStyle = MaterialTheme.typography.bodyMedium
-        val fieldShape = RoundedCornerShape(8.dp)
-        val dividerColor = MaterialTheme.colorScheme.outlineVariant
-        val dialogBorderColor = MaterialTheme.colorScheme.outlineVariant
-
-        Dialog(
-            onDismissRequest = { showWebDavSettings = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth(0.90f)
-                    .widthIn(max = 360.dp)
-                    .padding(vertical = 16.dp)
-                    .border(
-                        width = 1.dp,
-                        color = dialogBorderColor,
-                        shape = RoundedCornerShape(16.dp)
-                    ),
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                tonalElevation = 0.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 14.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = false)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "WebDAV同步备份",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            OutlinedTextField(
-                                value = serverUrlInput,
-                                onValueChange = {
-                                    serverUrlInput = it
-                                    serverUrlInvalidError = false
-                                },
-                                label = { Text("地址", style = MaterialTheme.typography.labelMedium) },
-                                textStyle = fieldTextStyle,
-                                shape = fieldShape,
-                                singleLine = true,
-                                isError = showServerUrlError,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            if (showServerUrlError) {
-                                Text(
-                                    text = "公网 WebDAV 服务器必须使用 https:// 加密地址",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                            OutlinedTextField(
-                                value = usernameInput,
-                                onValueChange = { usernameInput = it },
-                                label = { Text("账号", style = MaterialTheme.typography.labelMedium) },
-                                textStyle = fieldTextStyle,
-                                shape = fieldShape,
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            OutlinedTextField(
-                                value = passwordInput,
-                                onValueChange = { passwordInput = it },
-                                label = { Text("应用密码(留空则不上传)", style = MaterialTheme.typography.labelMedium) },
-                                textStyle = fieldTextStyle,
-                                shape = fieldShape,
-                                singleLine = true,
-                                visualTransformation = if (passwordVisible) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                trailingIcon = {
-                                    TextButton(
-                                        onClick = { passwordVisible = !passwordVisible },
-                                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                                    ) {
-                                        Text(
-                                            text = if (passwordVisible) "隐藏" else "显示",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(0.5.dp)
-                                .background(dividerColor)
-                        )
-
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "加密备份",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            OutlinedTextField(
-                                value = encryptionPasswordInput,
-                                onValueChange = {
-                                    encryptionPasswordInput = it
-                                    if (it.isEmpty()) {
-                                        confirmEncryptionPasswordInput = ""
-                                        wifiAutoSyncInput = false
-                                    }
-                                    encryptionPasswordMismatchError = false
-                                },
-                                label = { Text("加密密码(留空则不加密)", style = MaterialTheme.typography.labelMedium) },
-                                textStyle = fieldTextStyle,
-                                shape = fieldShape,
-                                singleLine = true,
-                                visualTransformation = if (encryptionPasswordVisible) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                trailingIcon = {
-                                    TextButton(
-                                        onClick = { encryptionPasswordVisible = !encryptionPasswordVisible },
-                                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                                    ) {
-                                        Text(
-                                            text = if (encryptionPasswordVisible) "隐藏" else "显示",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            OutlinedTextField(
-                                value = confirmEncryptionPasswordInput,
-                                onValueChange = {
-                                    confirmEncryptionPasswordInput = it
-                                    encryptionPasswordMismatchError = false
-                                },
-                                label = { Text("确认加密密码", style = MaterialTheme.typography.labelMedium) },
-                                textStyle = fieldTextStyle,
-                                shape = fieldShape,
-                                singleLine = true,
-                                isError = showMismatchError,
-                                visualTransformation = if (confirmEncryptionPasswordVisible) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                trailingIcon = {
-                                    TextButton(
-                                        onClick = { confirmEncryptionPasswordVisible = !confirmEncryptionPasswordVisible },
-                                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                                    ) {
-                                        Text(
-                                            text = if (confirmEncryptionPasswordVisible) "隐藏" else "显示",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            if (showMismatchError) {
-                                Text(
-                                    text = "两次输入的加密密码不一致",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(0.5.dp)
-                                .background(dividerColor)
-                        )
-
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            val canEnableWifiSync = encryptionPasswordInput.isNotEmpty()
-                            val effectiveWifiSyncChecked = wifiAutoSyncInput && canEnableWifiSync
-                            Text(
-                                text = "局域网自动同步",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 34.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable(enabled = canEnableWifiSync) {
-                                        wifiAutoSyncInput = !effectiveWifiSyncChecked
-                                    },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(
-                                    checked = effectiveWifiSyncChecked,
-                                    onCheckedChange = { checked ->
-                                        wifiAutoSyncInput = checked
-                                    },
-                                    enabled = canEnableWifiSync,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "同一WiFi下同时打开时同步",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(
-                                        alpha = if (canEnableWifiSync) 1f else 0.45f
-                                    )
-                                )
-                            }
-                            Text(
-                                text = if (canEnableWifiSync) {
-                                    "复用上方加密密码，两台设备密码一致时自动加密同步笔记与设置"
-                                } else {
-                                    "需先在上方设置加密密码，两台设备密码一致即可自动同步笔记与设置"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                lineHeight = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.60f)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(
-                            onClick = { showWebDavSettings = false },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = "取消",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        TextButton(
-                            onClick = {
-                                if (isServerUrlUnsafe) {
-                                    serverUrlInvalidError = true
-                                    return@TextButton
-                                }
-                                if (isEncryptionPasswordMismatch) {
-                                    encryptionPasswordMismatchError = true
-                                    return@TextButton
-                                }
-                                viewModel.saveWebDavSettings(
-                                    serverUrl = serverUrlInput,
-                                    username = usernameInput,
-                                    password = passwordInput,
-                                    encryptionPassword = encryptionPasswordInput,
-                                    wifiAutoSyncEnabled = wifiAutoSyncInput && encryptionPasswordInput.isNotEmpty()
-                                )
-                                showWebDavSettings = false
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = "保存",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 
     backupToRestore?.let { file ->

@@ -16,6 +16,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.feiji.bulletnotes.MainActivity
 import com.feiji.bulletnotes.R
+import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
+import com.feiji.bulletnotes.ui.theme.ThemePreferences
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,7 +43,9 @@ import java.net.SocketException
 import java.net.URLDecoder
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -57,9 +61,11 @@ object LanWebServer {
     private const val SOCKET_TIMEOUT_MS = 15_000
     private const val MAX_HEADER_BYTES = 16 * 1024
     private const val MAX_BODY_BYTES = 2 * 1024 * 1024
+    private const val MAX_NOTE_CONTENT_LENGTH = 200_000
     private const val IDLE_TIMEOUT_MS = 30 * 60_000L
     private const val MAX_PIN_FAILURES = 5
     private const val LOCKOUT_DURATION_MS = 5 * 60_000L
+    private const val TRASH_RETENTION_MS = 3L * 24L * 60L * 60L * 1000L
 
     private val gson = Gson()
     private val secureRandom = SecureRandom()
@@ -98,8 +104,61 @@ object LanWebServer {
     )
 
     private data class AuthPayload(val pin: String? = null)
-    private data class CreateNotePayload(val dateString: String? = null, val content: String? = null)
-    private data class UpdateNotePayload(val content: String? = null, val expectedUpdatedAt: Long? = null)
+
+    private data class CreateNotePayload(
+        val dateString: String? = null,
+        val content: String? = null,
+        val bulletType: String? = null,
+        val afterNoteId: Long? = null,
+        val allowBlank: Boolean? = null
+    )
+
+    private data class UpdateNotePayload(
+        val content: String? = null,
+        val dateString: String? = null,
+        val expectedUpdatedAt: Long? = null,
+        val deleteIfBlank: Boolean? = null
+    )
+
+    private data class AlarmPayload(
+        val alarmTimeMillis: Long? = null
+    )
+
+    private data class ReviewPayload(
+        val familiarity: String? = null
+    )
+
+    private data class UndoReviewPayload(
+        val dateString: String? = null,
+        val orderIndex: Int? = null,
+        val alarmTimeMillis: Long? = null,
+        val reviewCount: Int? = null,
+        val reviewIntervalDays: Int? = null,
+        val easeFactor: Float? = null,
+        val lastReviewedAt: Long? = null
+    )
+
+    private data class ReorderPayload(
+        val dateString: String? = null,
+        val orderedIds: List<Long>? = null
+    )
+
+    private data class MemoryCurvePayload(
+        val unfamiliarDays: Int? = null,
+        val initialSomewhatDays: Int? = null,
+        val initialVeryDays: Int? = null,
+        val initialEaseFactor: Float? = null,
+        val somewhatMultiplier: Float? = null,
+        val maxIntervalDays: Int? = null
+    )
+
+    private data class KeywordHintPayload(
+        val previousText: String? = null,
+        val currentText: String? = null,
+        val cursorPosition: Int? = null,
+        val excludeNoteId: Long? = null,
+        val dismissedKeywords: List<String>? = null
+    )
 
     private val _state = MutableStateFlow(LanServerState())
     val state: StateFlow<LanServerState> = _state.asStateFlow()
@@ -316,6 +375,11 @@ object LanWebServer {
         return result.sortedByDescending { it.startsWith("192.168.") }
     }
 
+    private fun parseValidDate(raw: String?): LocalDate? {
+        if (raw == null || !dateRegex.matches(raw)) return null
+        return runCatching { LocalDate.parse(raw) }.getOrNull()
+    }
+
     private suspend fun handleClient(
         appContext: Context,
         noteDao: NoteDao,
@@ -357,7 +421,15 @@ object LanWebServer {
         // 1. 静态入口页
         if (method == "GET" && (path == "/" || path == "/index.html")) {
             val html = htmlCache ?: "<h1>飞记</h1>".toByteArray(Charsets.UTF_8)
-            writeResponse(sock, 200, "text/html; charset=utf-8", html)
+            writeResponse(
+                sock,
+                200,
+                "text/html; charset=utf-8",
+                html,
+                extraHeaders = listOf(
+                    "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                )
+            )
             return
         }
 
@@ -414,20 +486,66 @@ object LanWebServer {
             return
         }
 
-        // 4. 按日期查询笔记
-        if (method == "GET" && path == "/api/notes") {
-            val dateStr = req.query["date"]?.takeIf { dateRegex.matches(it) }
-                ?: LocalDate.now().toString()
-            val list = noteDao.getNotesByDate(dateStr).first()
-            writeJson(sock, 200, mapOf("date" to dateStr, "notes" to list))
+        // 4. 元数据（日历笔记日期圆点、回收站数量、记忆曲线参数、最早五角星日期、手机主题偏好）
+        if (method == "GET" && path == "/api/meta") {
+            enforceTrashLimit(appContext, noteDao)
+            val activeNotes = noteDao.getAllActiveNotes()
+            val activeDates = activeNotes.map { it.dateString }.distinct().sorted()
+            val earliestStarDate = activeNotes
+                .asSequence()
+                .filter { it.bulletType == BulletType.STAR }
+                .map { it.dateString }
+                .minOrNull()
+            val trashCount = noteDao.getAllDeletedNotesOnce().size
+            val memoryCurveConfig = MemoryCurvePreferences.load(appContext)
+            val phoneDarkTheme = ThemePreferences.resolveDarkTheme(appContext, false)
+            writeJson(
+                sock,
+                200,
+                mapOf(
+                    "today" to LocalDate.now().toString(),
+                    "activeDates" to activeDates,
+                    "earliestStarDate" to earliestStarDate,
+                    "trashCount" to trashCount,
+                    "memoryCurveConfig" to memoryCurveConfig,
+                    "phoneDarkTheme" to phoneDarkTheme,
+                    "canScheduleExactAlarms" to NoteAlarmScheduler.canScheduleExactAlarms(appContext),
+                    "serverTimeMillis" to System.currentTimeMillis()
+                )
+            )
             return
         }
 
-        // 5. 全文搜索
+        // 5. 按日期查询笔记
+        if (method == "GET" && path == "/api/notes") {
+            val parsedDate = parseValidDate(req.query["date"]) ?: LocalDate.now()
+            val dateStr = parsedDate.toString()
+            val list = noteDao.getNotesByDate(dateStr).first()
+            writeJson(
+                sock,
+                200,
+                mapOf(
+                    "date" to dateStr,
+                    "today" to LocalDate.now().toString(),
+                    "notes" to list
+                )
+            )
+            return
+        }
+
+        // 6. 全文搜索（与手机端一致：支持 scope=normal|star|all 及旧版 bullet 参数）
         if (method == "GET" && path == "/api/search") {
             val rawQuery = req.query["q"]?.trim().orEmpty()
-            val bulletFilter = req.query["bullet"]?.trim()?.takeIf { it.isNotEmpty() }
+            val scopeParam = req.query["scope"]?.trim()?.lowercase().orEmpty()
+            val legacyBullet = req.query["bullet"]?.trim()?.takeIf { it.isNotEmpty() }
                 ?.let { runCatching { BulletType.valueOf(it) }.getOrNull() }
+            val allowedTypes: Set<BulletType>? = when {
+                scopeParam == "normal" -> setOf(BulletType.SQUARE, BulletType.CHECKED, BulletType.BULLET_DOT)
+                scopeParam == "star" -> setOf(BulletType.STAR)
+                scopeParam == "all" -> null
+                legacyBullet != null -> setOf(legacyBullet)
+                else -> null
+            }
             val words = rawQuery.split(Regex("\\s+")).filter { it.isNotBlank() }
             val matched = if (words.isEmpty()) {
                 emptyList()
@@ -435,7 +553,7 @@ object LanWebServer {
                 noteDao.getAllActiveNotes()
                     .asSequence()
                     .filter { note ->
-                        (bulletFilter == null || note.bulletType == bulletFilter) &&
+                        (allowedTypes == null || note.bulletType in allowedTypes) &&
                             words.all { w -> note.content.contains(w, ignoreCase = true) }
                     }
                     .sortedWith(compareByDescending<NoteEntity> { it.dateString }.thenBy { it.orderIndex })
@@ -445,20 +563,198 @@ object LanWebServer {
             return
         }
 
-        // 6. 新建笔记
+        // 7. 关键字即时提示（@关键词@ / #关键词#）
+        if (method == "POST" && path == "/api/hints") {
+            val payload = parseJsonBody(req.body, KeywordHintPayload::class.java)
+            val prev = payload?.previousText ?: ""
+            val curr = payload?.currentText ?: ""
+            val cursor = payload?.cursorPosition ?: curr.length
+            val excludeId = payload?.excludeNoteId ?: -1L
+            val dismissed = payload?.dismissedKeywords?.map { it.lowercase() }?.toSet() ?: emptySet()
+            val candidates = noteDao.getKeywordCandidateNotes().first()
+            val index = KeywordHintEngine.buildIndex(candidates)
+            val match = KeywordHintEngine.findMatchOnEdit(
+                previousText = prev,
+                currentText = curr,
+                cursorPosition = cursor,
+                index = index,
+                excludeNoteId = excludeId,
+                dismissedKeywords = dismissed
+            )
+            if (match == null) {
+                writeJson(sock, 200, mapOf("match" to null))
+            } else {
+                writeJson(
+                    sock,
+                    200,
+                    mapOf(
+                        "match" to mapOf(
+                            "displayKeyword" to match.displayKeyword,
+                            "normalizedKeyword" to match.normalizedKeyword,
+                            "notes" to match.notes.take(12)
+                        )
+                    )
+                )
+            }
+            return
+        }
+
+        // 8. 记忆曲线参数读取/保存
+        if (path == "/api/memory-curve") {
+            if (method == "GET") {
+                writeJson(sock, 200, mapOf("config" to MemoryCurvePreferences.load(appContext)))
+                return
+            }
+            if (method == "PUT") {
+                val payload = parseJsonBody(req.body, MemoryCurvePayload::class.java)
+                val current = MemoryCurvePreferences.load(appContext)
+                val updated = MemoryCurvePreferences.save(
+                    appContext,
+                    MemoryCurveConfig(
+                        unfamiliarDays = payload?.unfamiliarDays ?: current.unfamiliarDays,
+                        initialSomewhatDays = payload?.initialSomewhatDays ?: current.initialSomewhatDays,
+                        initialVeryDays = payload?.initialVeryDays ?: current.initialVeryDays,
+                        initialEaseFactor = payload?.initialEaseFactor ?: current.initialEaseFactor,
+                        somewhatMultiplier = payload?.somewhatMultiplier ?: current.somewhatMultiplier,
+                        maxIntervalDays = payload?.maxIntervalDays ?: current.maxIntervalDays
+                    )
+                )
+                scheduleLocalBackup(appContext, noteDao)
+                writeJson(sock, 200, mapOf("ok" to true, "config" to updated))
+                return
+            }
+        }
+
+        // 9. 回收站管理（3 天自动彻底清理 + 仅单条恢复 + 一键清空）
+        if (method == "GET" && path == "/api/trash") {
+            enforceTrashLimit(appContext, noteDao)
+            val deleted = noteDao.getAllDeletedNotesOnce()
+                .sortedByDescending { it.deletedAt ?: it.updatedAt }
+            writeJson(
+                sock,
+                200,
+                mapOf(
+                    "notes" to deleted,
+                    "serverTimeMillis" to System.currentTimeMillis()
+                )
+            )
+            return
+        }
+
+        if (method == "POST" && path == "/api/trash/empty") {
+            val deletedIds = noteDao.emptyTrashWithTombstones(System.currentTimeMillis())
+            deletedIds.forEach { NoteAlarmScheduler.cancelAlarm(appContext, it) }
+            if (deletedIds.isNotEmpty()) {
+                scheduleLocalBackup(appContext, noteDao)
+            }
+            writeJson(sock, 200, mapOf("ok" to true, "count" to deletedIds.size))
+            return
+        }
+
+        if (path.startsWith("/api/trash/")) {
+            val tail = path.removePrefix("/api/trash/")
+            val parts = tail.split('/').filter { it.isNotEmpty() }
+            val noteId = parts.firstOrNull()?.toLongOrNull()
+            if (noteId == null || noteId <= 0L) {
+                writeJson(sock, 400, mapOf("error" to "无效的笔记 ID"))
+                return
+            }
+            if (parts.size == 2 && parts[1] == "restore" && method == "POST") {
+                val existing = noteDao.getNoteById(noteId)
+                if (existing == null || !existing.isDeleted) {
+                    writeJson(sock, 404, mapOf("error" to "回收站中未找到该笔记"))
+                    return
+                }
+                noteDao.restoreNote(noteId)
+                val restored = noteDao.getNoteById(noteId)
+                if (restored != null) {
+                    NoteAlarmScheduler.syncNoteAlarm(appContext, restored)
+                }
+                scheduleLocalBackup(appContext, noteDao)
+                writeJson(sock, 200, mapOf("ok" to true, "note" to restored))
+                return
+            }
+        }
+
+        // 10. 拖拽重排序
+        if (method == "POST" && path == "/api/notes/reorder") {
+            val payload = parseJsonBody(req.body, ReorderPayload::class.java)
+            val date = parseValidDate(payload?.dateString)
+            val orderedIds = payload?.orderedIds?.filter { it > 0L }?.distinct().orEmpty()
+            if (date == null || orderedIds.isEmpty()) {
+                writeJson(sock, 400, mapOf("error" to "无效的排序参数"))
+                return
+            }
+            val dateStr = date.toString()
+            val dayNotes = noteDao.getActiveNotesByDateOnce(dateStr)
+            val byId = dayNotes.associateBy { it.id }
+            val arranged = ArrayList<NoteEntity>(dayNotes.size)
+            val seen = HashSet<Long>(orderedIds.size)
+            for (id in orderedIds) {
+                val item = byId[id]
+                if (item != null && seen.add(id)) {
+                    arranged.add(item)
+                }
+            }
+            for (item in dayNotes) {
+                if (seen.add(item.id)) {
+                    arranged.add(item)
+                }
+            }
+            val now = System.currentTimeMillis()
+            val updates = arranged.mapIndexedNotNull { index, item ->
+                if (item.orderIndex != index) item.copy(orderIndex = index, updatedAt = now) else null
+            }
+            if (updates.isNotEmpty()) {
+                noteDao.updateNotes(updates)
+                scheduleLocalBackup(appContext, noteDao)
+            }
+            writeJson(sock, 200, mapOf("ok" to true))
+            return
+        }
+
+        // 11. 新建笔记（支持指定符号、在某条笔记后插入、以及空白编辑创建）
         if (method == "POST" && path == "/api/notes") {
             val payload = parseJsonBody(req.body, CreateNotePayload::class.java)
+            val allowBlank = payload?.allowBlank == true
             val content = payload?.content?.trimEnd() ?: ""
-            if (content.isBlank()) {
+            if (!allowBlank && content.isBlank()) {
                 writeJson(sock, 400, mapOf("error" to "笔记内容不能为空"))
                 return
             }
-            val dateStr = payload?.dateString?.takeIf { dateRegex.matches(it) }
-                ?: LocalDate.now().toString()
-            val existing = noteDao.getNotesByDate(dateStr).first()
-            val nextOrder = (existing.maxOfOrNull { it.orderIndex } ?: 0) + 1
-            val bullet = BulletType.SQUARE
+            if (content.length > MAX_NOTE_CONTENT_LENGTH) {
+                writeJson(sock, 400, mapOf("error" to "笔记内容过长"))
+                return
+            }
+            val dateStr = (parseValidDate(payload?.dateString) ?: LocalDate.now()).toString()
+            val bullet = payload?.bulletType
+                ?.let { runCatching { BulletType.valueOf(it) }.getOrNull() }
+                ?.takeIf { it != BulletType.CHECKED }
+                ?: BulletType.SQUARE
+
+            val existing = noteDao.getActiveNotesByDateOnce(dateStr)
             val now = System.currentTimeMillis()
+            val afterId = payload?.afterNoteId
+            val referenceNote = afterId?.let { refId -> existing.firstOrNull { it.id == refId } }
+            val nextOrder = if (referenceNote != null) {
+                referenceNote.orderIndex + 1
+            } else {
+                (existing.maxOfOrNull { it.orderIndex } ?: -1) + 1
+            }
+
+            if (referenceNote != null) {
+                val shifted = existing.mapNotNull { item ->
+                    if (item.orderIndex >= nextOrder) {
+                        item.copy(orderIndex = item.orderIndex + 1, updatedAt = now)
+                    } else {
+                        null
+                    }
+                }
+                if (shifted.isNotEmpty()) {
+                    noteDao.updateNotes(shifted)
+                }
+            }
+
             val newNote = NoteEntity(
                 content = content,
                 dateString = dateStr,
@@ -473,7 +769,8 @@ object LanWebServer {
             return
         }
 
-        // 7. 单条笔记操作：PUT /api/notes/{id}, DELETE /api/notes/{id}, POST /api/notes/{id}/cycle
+        // 12. 单条笔记操作：PUT /api/notes/{id}, DELETE /api/notes/{id},
+        // POST /api/notes/{id}/cycle, /alarm, /review, /undo-review
         if (path.startsWith("/api/notes/")) {
             val tail = path.removePrefix("/api/notes/")
             val parts = tail.split('/').filter { it.isNotEmpty() }
@@ -501,6 +798,146 @@ object LanWebServer {
                 return
             }
 
+            if (parts.size == 2 && parts[1] == "alarm" && method == "POST") {
+                val note = noteDao.getNoteById(noteId)
+                if (note == null || note.isDeleted) {
+                    writeJson(sock, 404, mapOf("error" to "笔记不存在"))
+                    return
+                }
+                val payload = parseJsonBody(req.body, AlarmPayload::class.java)
+                val targetMillis = payload?.alarmTimeMillis
+                val now = System.currentTimeMillis()
+                if (targetMillis != null) {
+                    if (targetMillis <= now) {
+                        writeJson(sock, 400, mapOf("error" to "所选时间已过，请选择晚于当前的时间"))
+                        return
+                    }
+                    val zone = ZoneId.systemDefault()
+                    val alarmDateStr = Instant.ofEpochMilli(targetMillis).atZone(zone).toLocalDate().toString()
+                    if (alarmDateStr != note.dateString) {
+                        writeJson(sock, 400, mapOf("error" to "闹钟日期需与当前笔记日期一致"))
+                        return
+                    }
+                }
+                noteDao.updateNoteAlarm(noteId, targetMillis, now)
+                val updated = note.copy(alarmTimeMillis = targetMillis, updatedAt = now)
+                val scheduled = if (targetMillis != null) {
+                    NoteAlarmScheduler.scheduleAlarm(
+                        context = appContext,
+                        noteId = noteId,
+                        triggerAtMillis = targetMillis,
+                        noteContent = updated.content,
+                        noteDateString = updated.dateString
+                    )
+                } else {
+                    NoteAlarmScheduler.cancelAlarm(appContext, noteId)
+                    true
+                }
+                scheduleLocalBackup(appContext, noteDao)
+                val message = when {
+                    targetMillis == null -> "已清除闹钟"
+                    scheduled -> "已设置闹钟：${NoteAlarmScheduler.formatReadableAlarmTime(targetMillis)}"
+                    else -> "闹钟时间已保存，请在手机端开启精确闹钟权限以确保准时响铃"
+                }
+                writeJson(
+                    sock,
+                    200,
+                    mapOf("ok" to true, "note" to updated, "scheduled" to scheduled, "message" to message)
+                )
+                return
+            }
+
+            if (parts.size == 2 && parts[1] == "review" && method == "POST") {
+                val note = noteDao.getNoteById(noteId)
+                if (note == null || note.isDeleted) {
+                    writeJson(sock, 404, mapOf("error" to "笔记不存在"))
+                    return
+                }
+                val payload = parseJsonBody(req.body, ReviewPayload::class.java)
+                val familiarity = payload?.familiarity
+                    ?.let { runCatching { ReviewFamiliarity.valueOf(it) }.getOrNull() }
+                if (familiarity == null) {
+                    writeJson(sock, 400, mapOf("error" to "无效的熟悉度选项"))
+                    return
+                }
+                val today = LocalDate.now()
+                val config = MemoryCurvePreferences.load(appContext)
+                val schedule = SpacedRepetitionEngine.computeNextReview(
+                    note = note,
+                    familiarity = familiarity,
+                    today = today,
+                    config = config
+                )
+                val targetDateStr = schedule.nextDate.toString()
+                val targetOrderIndex = if (targetDateStr != note.dateString) {
+                    val targetDayNotes = noteDao.getActiveNotesByDateOnce(targetDateStr)
+                    (targetDayNotes.maxOfOrNull { it.orderIndex } ?: -1) + 1
+                } else {
+                    note.orderIndex
+                }
+                val now = System.currentTimeMillis()
+                val shiftedAlarm = NoteAlarmScheduler.retargetAlarmToDate(
+                    note.alarmTimeMillis,
+                    schedule.nextDate
+                )?.takeIf { it > now }
+                val updated = note.copy(
+                    dateString = targetDateStr,
+                    orderIndex = targetOrderIndex,
+                    alarmTimeMillis = shiftedAlarm,
+                    reviewCount = schedule.nextReviewCount,
+                    reviewIntervalDays = schedule.nextIntervalDays,
+                    easeFactor = schedule.nextEaseFactor,
+                    lastReviewedAt = now,
+                    updatedAt = now
+                )
+                noteDao.updateNote(updated)
+                NoteAlarmScheduler.syncNoteAlarm(appContext, updated)
+                scheduleLocalBackup(appContext, noteDao)
+                writeJson(
+                    sock,
+                    200,
+                    mapOf(
+                        "ok" to true,
+                        "note" to updated,
+                        "previousNote" to note,
+                        "targetDateString" to targetDateStr,
+                        "intervalDays" to schedule.nextIntervalDays
+                    )
+                )
+                return
+            }
+
+            if (parts.size == 2 && parts[1] == "undo-review" && method == "POST") {
+                val current = noteDao.getNoteById(noteId)
+                if (current == null || current.isDeleted) {
+                    writeJson(sock, 404, mapOf("error" to "笔记不存在"))
+                    return
+                }
+                val payload = parseJsonBody(req.body, UndoReviewPayload::class.java)
+                val prevDate = parseValidDate(payload?.dateString)
+                if (prevDate == null) {
+                    writeJson(sock, 400, mapOf("error" to "无效的撤销参数"))
+                    return
+                }
+                val now = System.currentTimeMillis()
+                val restoredAlarm = payload?.alarmTimeMillis?.takeIf { it > now }
+                val restored = current.copy(
+                    dateString = prevDate.toString(),
+                    orderIndex = payload?.orderIndex ?: current.orderIndex,
+                    alarmTimeMillis = restoredAlarm,
+                    reviewCount = (payload?.reviewCount ?: 0).coerceAtLeast(0),
+                    reviewIntervalDays = (payload?.reviewIntervalDays ?: 0).coerceIn(0, SpacedRepetitionEngine.HARD_MAX_INTERVAL_DAYS),
+                    easeFactor = SpacedRepetitionEngine.normalizeEaseFactor(payload?.easeFactor ?: SpacedRepetitionEngine.DEFAULT_EASE_FACTOR),
+                    lastReviewedAt = payload?.lastReviewedAt?.takeIf { it > 0L },
+                    updatedAt = now
+                )
+                noteDao.updateNote(restored)
+                NoteAlarmScheduler.syncNoteAlarm(appContext, restored)
+                scheduleLocalBackup(appContext, noteDao)
+                writeJson(sock, 200, mapOf("ok" to true, "note" to restored))
+                return
+            }
+
             if (parts.size == 1 && method == "PUT") {
                 val note = noteDao.getNoteById(noteId)
                 if (note == null || note.isDeleted) {
@@ -508,22 +945,75 @@ object LanWebServer {
                     return
                 }
                 val payload = parseJsonBody(req.body, UpdateNotePayload::class.java)
-                val newContent = payload?.content ?: ""
-                if (newContent.isBlank()) {
-                    writeJson(sock, 400, mapOf("error" to "笔记内容不能为空"))
-                    return
-                }
                 if (payload?.expectedUpdatedAt != null && payload.expectedUpdatedAt != note.updatedAt) {
                     writeJson(sock, 409, mapOf("error" to "笔记已在手机端被更新", "note" to note))
                     return
                 }
+
+                // 若传入了新内容且允许清空即永久删除（与手机端编辑逻辑一致）
+                val hasContentField = payload?.content != null
+                val nextContent = payload?.content ?: note.content
+                if (nextContent.length > MAX_NOTE_CONTENT_LENGTH) {
+                    writeJson(sock, 400, mapOf("error" to "笔记内容过长"))
+                    return
+                }
+                if (hasContentField && nextContent.isBlank()) {
+                    if (payload?.deleteIfBlank == true) {
+                        noteDao.deletePermanentlyWithTombstone(noteId)
+                        NoteAlarmScheduler.cancelAlarm(appContext, noteId)
+                        scheduleLocalBackup(appContext, noteDao)
+                        writeJson(sock, 200, mapOf("ok" to true, "deleted" to true))
+                        return
+                    } else {
+                        writeJson(sock, 400, mapOf("error" to "笔记内容不能为空"))
+                        return
+                    }
+                }
+
+                val now = System.currentTimeMillis()
+                var nextDateStr = note.dateString
+                var nextOrderIndex = note.orderIndex
+                var nextAlarmMillis = note.alarmTimeMillis
+                var dateChanged = false
+
+                if (!payload?.dateString.isNullOrBlank() && payload?.dateString != note.dateString) {
+                    val parsedNewDate = parseValidDate(payload?.dateString)
+                    if (parsedNewDate == null) {
+                        writeJson(sock, 400, mapOf("error" to "无效的日期格式"))
+                        return
+                    }
+                    nextDateStr = parsedNewDate.toString()
+                    val targetNotes = noteDao.getActiveNotesByDateOnce(nextDateStr)
+                    nextOrderIndex = (targetNotes.maxOfOrNull { it.orderIndex } ?: -1) + 1
+                    nextAlarmMillis = NoteAlarmScheduler.retargetAlarmToDate(
+                        note.alarmTimeMillis,
+                        parsedNewDate
+                    )?.takeIf { it > now }
+                    dateChanged = true
+                }
+
                 val updated = note.copy(
-                    content = newContent,
-                    updatedAt = System.currentTimeMillis()
+                    content = nextContent,
+                    dateString = nextDateStr,
+                    orderIndex = nextOrderIndex,
+                    alarmTimeMillis = nextAlarmMillis,
+                    updatedAt = now
                 )
                 noteDao.updateNote(updated)
+                if (dateChanged || updated.alarmTimeMillis != null) {
+                    NoteAlarmScheduler.syncNoteAlarm(appContext, updated)
+                }
                 scheduleLocalBackup(appContext, noteDao)
-                writeJson(sock, 200, mapOf("ok" to true, "note" to updated))
+                writeJson(
+                    sock,
+                    200,
+                    mapOf(
+                        "ok" to true,
+                        "note" to updated,
+                        "dateChanged" to dateChanged,
+                        "hadActiveAlarm" to (dateChanged && nextAlarmMillis != null)
+                    )
+                )
                 return
             }
 
@@ -534,8 +1024,8 @@ object LanWebServer {
                     return
                 }
                 noteDao.softDeleteNote(noteId)
-                com.feiji.bulletnotes.alarm.NoteAlarmScheduler.cancelAlarm(appContext, noteId)
-                enforceTrashLimit(noteDao)
+                NoteAlarmScheduler.cancelAlarm(appContext, noteId)
+                enforceTrashLimit(appContext, noteDao)
                 scheduleLocalBackup(appContext, noteDao)
                 writeJson(sock, 200, mapOf("ok" to true))
                 return
@@ -596,10 +1086,11 @@ object LanWebServer {
         )
     }
 
-    private suspend fun enforceTrashLimit(noteDao: NoteDao) {
+    private suspend fun enforceTrashLimit(appContext: Context, noteDao: NoteDao) {
         val now = System.currentTimeMillis()
-        val cutoff = now - 3L * 24L * 60L * 60L * 1000L
-        noteDao.deleteTrashOlderThanWithTombstones(cutoff = cutoff, now = now)
+        val cutoff = now - TRASH_RETENTION_MS
+        val purgedIds = noteDao.deleteTrashOlderThanWithTombstones(cutoff = cutoff, now = now)
+        purgedIds.forEach { NoteAlarmScheduler.cancelAlarm(appContext, it) }
     }
 
     private fun scheduleLocalBackup(appContext: Context, noteDao: NoteDao) {

@@ -27,11 +27,11 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-/** SAF 文件夹授权：每日一个 JSON 文件；同日覆盖；仅清理严格早于三天前的本应用备份。 */
+/** SAF 文件夹授权：每日一个 JSON 文件；同日覆盖；仅保留今天、昨天和前天共三天的本应用备份，更早自动清理。 */
 object BackupManager {
     private const val PREFS = "feiji_bullet_notes_prefs"
     private const val KEY_TREE = "saf_backup_tree_uri_v124"
-    private const val KEY_CLEANED = "backup_cleanup_date_v124"
+    private const val KEY_CLEANED = "backup_cleanup_date_v125"
 
     private const val BACKUP_SCHEMA_VERSION = 2
     private const val ENC_VERSION = 1
@@ -46,6 +46,8 @@ object BackupManager {
     private val gson = Gson()
     private val nameDate = DateTimeFormatter.ofPattern("yyMMdd")
     private val filePattern = Regex("""^飞记备份 (\d{6})(?:\.json)?$""")
+    // 清理旧备份时同时兼容系统/网盘因重名产生的序号副本（如“飞记备份 261120 (1).json”）。
+    private val cleanupFilePattern = Regex("""^飞记备份 (\d{6})(?:\s*\(\d+\))?(?:\.json)?$""")
 
     data class BackupFile(val name: String, val uri: Uri)
 
@@ -133,6 +135,11 @@ object BackupManager {
         return try { LocalDate.parse(match.groupValues[1], nameDate) } catch (_: Exception) { null }
     }
 
+    private fun cleanupBackupDate(name: String): LocalDate? {
+        val match = cleanupFilePattern.matchEntire(name) ?: return null
+        return try { LocalDate.parse(match.groupValues[1], nameDate) } catch (_: Exception) { null }
+    }
+
     suspend fun listBackups(context: Context): List<BackupFile> = withContext(Dispatchers.IO) {
         if (!hasBackupFolder(context)) return@withContext emptyList()
         children(context).filter { backupDate(it.name) != null }
@@ -164,19 +171,43 @@ object BackupManager {
             }
         }
 
-    /** 仅首次打开时清理：保留今天及过去三天的日期，其他文件绝不触碰。 */
+    /**
+     * 每日自动清理旧本地备份：仅保留今天、昨天和前天共三天的备份，严格早于前天的飞记备份自动删除，其他文件绝不触碰。
+     * 单个文件删除失败时不阻断其余文件，且不标记当日完成，待下次回到前台或写入备份时自动重试。
+     */
     suspend fun cleanOldBackupsOncePerDay(context: Context): Int = withContext(Dispatchers.IO) {
         if (!hasBackupFolder(context)) return@withContext 0
         val today = LocalDate.now()
         if (prefs(context).getString(KEY_CLEANED, null) == today.toString()) return@withContext 0
+        val oldestKeptDate = today.minusDays(2) // 今天、昨天、前天共三天
+        val root = tree(context)
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(root, DocumentsContract.getTreeDocumentId(root))
         var deleted = 0
+        var hadDeleteFailure = false
         for (file in children(context)) {
-            val date = backupDate(file.name) ?: continue
-            if (date.isBefore(today.minusDays(3))) {
-                if (DocumentsContract.deleteDocument(context.contentResolver, file.uri)) deleted++
+            val date = cleanupBackupDate(file.name) ?: continue
+            if (date.isBefore(oldestKeptDate)) {
+                val removed = try {
+                    DocumentsContract.deleteDocument(context.contentResolver, file.uri)
+                } catch (e: Exception) {
+                    Log.w("FeiJiBackup", "deleteDocument failed for ${file.name}", e)
+                    false
+                } || try {
+                    DocumentsContract.removeDocument(context.contentResolver, file.uri, parentUri)
+                } catch (e: Exception) {
+                    Log.w("FeiJiBackup", "removeDocument failed for ${file.name}", e)
+                    false
+                }
+                if (removed) {
+                    deleted++
+                } else {
+                    hadDeleteFailure = true
+                }
             }
         }
-        prefs(context).edit().putString(KEY_CLEANED, today.toString()).commit()
+        if (!hadDeleteFailure) {
+            prefs(context).edit().putString(KEY_CLEANED, today.toString()).commit()
+        }
         deleted
     }
 

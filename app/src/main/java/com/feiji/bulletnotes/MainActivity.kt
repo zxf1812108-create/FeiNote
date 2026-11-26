@@ -92,7 +92,7 @@ private fun BackupSetupPrompt(viewModel: NoteViewModel, onToggleTheme: () -> Uni
         AlertDialog(
             onDismissRequest = { viewModel.dismissBackupSetup() },
             title = { Text("设置自动备份文件夹") },
-            text = { Text("请选择一个文件夹并授权飞记读写。笔记变化后每分钟检查并备份；同一天覆盖同名文件，每天首次打开时清理三天以前的飞记备份。") },
+            text = { Text("请选择一个文件夹并授权飞记读写。笔记变化后自动备份；同一天覆盖同名文件，仅保留今天、昨天和前天共三天的飞记备份，更早的将自动清理。") },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.dismissBackupSetup()

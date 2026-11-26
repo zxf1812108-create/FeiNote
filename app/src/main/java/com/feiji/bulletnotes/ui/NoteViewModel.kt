@@ -221,6 +221,9 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             refreshTodayOnForegroundIfNeeded()
             rolloverOverdueStarNotesIfFirstOpenToday()
             purgeExpiredTrash()
+            viewModelScope.launch(Dispatchers.IO) {
+                cleanOldBackupsSafely(getApplication())
+            }
             startForegroundWebDavSyncLoop()
         } else {
             webDavForegroundSyncLoop?.cancel()
@@ -558,8 +561,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadBackupFiles() {
         viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            cleanOldBackupsSafely(app)
             try {
-                _backupFiles.value = BackupManager.listBackups(getApplication())
+                _backupFiles.value = BackupManager.listBackups(app)
                 if (_backupFiles.value.isEmpty()) _userMessage.value = "备份文件夹中没有可恢复的备份"
             } catch (e: Exception) {
                 _backupFiles.value = emptyList()
@@ -639,6 +644,17 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun cleanOldBackupsSafely(app: Application) {
+        if (!BackupManager.hasBackupFolder(app)) return
+        backupMutex.withLock {
+            try {
+                BackupManager.cleanOldBackupsOncePerDay(app)
+            } catch (_: Exception) {
+                // 静默容错；未标记今日完成时会在下次回到前台或写入备份时自动重试
+            }
+        }
+    }
+
     /**
      * 在正文写入锁和备份锁都已持有时调用。
      * 只有完整数据快照发生变化才写备份；写入失败时不更新比较基线，留待下次重试。
@@ -649,6 +665,11 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         if (current != lastSnapshot) {
             if (BackupManager.exportBackup(app, noteDao)) {
                 lastSnapshot = current
+                try {
+                    BackupManager.cleanOldBackupsOncePerDay(app)
+                } catch (_: Exception) {
+                    // 清理失败不影响本次备份结果，留待下次重试
+                }
             } else {
                 _userMessage.value = "自动备份失败，请检查备份文件夹权限"
             }
@@ -669,8 +690,10 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         backupLoop = viewModelScope.launch(Dispatchers.IO) {
             val app = getApplication<Application>()
             if (!BackupManager.hasBackupFolder(app)) return@launch
-            try { BackupManager.cleanOldBackupsOncePerDay(app) } catch (e: Exception) {
-                _userMessage.value = "清理旧备份失败：${e.localizedMessage ?: "未知错误"}"
+            backupMutex.withLock {
+                try { BackupManager.cleanOldBackupsOncePerDay(app) } catch (e: Exception) {
+                    _userMessage.value = "清理旧备份失败：${e.localizedMessage ?: "未知错误"}"
+                }
             }
             // 启动时记录当前数据作为比较基线；退出编辑时立即备份，另每 5 分钟兜底检查。
             contentWriteMutex.withLock {
@@ -680,6 +703,7 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
             }
             while (isActive) {
                 delay(5 * 60_000L)
+                cleanOldBackupsSafely(app)
                 backupIfChanged(app)
             }
         }
