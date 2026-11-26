@@ -72,6 +72,8 @@ import com.feiji.bulletnotes.data.WebDavBackupManager
 import com.feiji.bulletnotes.ui.theme.DarkOnlineGreen
 import com.feiji.bulletnotes.ui.theme.LightOnlineGreen
 import com.feiji.bulletnotes.ui.theme.LocalIsDarkTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -333,10 +335,28 @@ private fun LanConnectTabContent(
     val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
     val hairlineBorder = MaterialTheme.colorScheme.outlineVariant
 
-    val formattedPin = if (lanServerState.pin.length == 6) {
-        lanServerState.pin.substring(0, 3) + " " + lanServerState.pin.substring(3)
+    var previewUrls by remember { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(lanServerState.running, lanServerState.port) {
+        if (!lanServerState.running) {
+            previewUrls = withContext(Dispatchers.IO) {
+                LanWebServer.previewLanUrls(lanServerState.port)
+            }
+        }
+    }
+
+    val rawUrls = if (lanServerState.running) lanServerState.urls else previewUrls
+    val displayUrls = if (rawUrls.isNotEmpty()) {
+        rawUrls
     } else {
+        listOf("http://127.0.0.1:${lanServerState.port}")
+    }
+
+    val formattedPin = if (lanServerState.running && lanServerState.pin.length == 6) {
+        lanServerState.pin.substring(0, 3) + " " + lanServerState.pin.substring(3)
+    } else if (lanServerState.running && lanServerState.pin.isNotEmpty()) {
         lanServerState.pin
+    } else {
+        "--- ---"
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -347,137 +367,100 @@ private fun LanConnectTabContent(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            if (!lanServerState.running) {
-                Column(
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surface)
-                        .border(1.dp, hairlineBorder, RoundedCornerShape(12.dp))
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "局域网电脑直连",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = contentColor
-                    )
-                    Text(
-                        text = "开启后，同一 Wi-Fi 或热点下的电脑、平板或其他手机，可直接用浏览器同步读写本机笔记。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = contentColor.copy(alpha = 0.86f)
-                    )
-                    Text(
-                        text = "· 锁屏或切到后台仍保持连接，通知栏可随时停止\n· 每次随机生成 6 位配对码，无操作 30 分钟自动关闭",
-                        style = MaterialTheme.typography.labelMedium,
-                        lineHeight = 18.sp,
-                        color = mutedText
-                    )
-                }
-
-                lanServerState.errorMessage?.let { err ->
-                    Text(
-                        text = err,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-            } else {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(onlineGreen)
-                    )
-                    Text(
-                        text = if (lanServerState.activeSessions > 0 && !lanServerState.lastClientIp.isNullOrBlank()) {
-                            "直连运行中 · 已连接 ${lanServerState.activeSessions} 台设备（${lanServerState.lastClientIp}）"
-                        } else {
-                            "直连运行中 · 等待浏览器连接"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = contentColor
-                    )
-                }
-
-                Text(
-                    text = "在同局域网浏览器中打开",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = mutedText
-                )
-
-                val displayUrls = if (lanServerState.urls.isNotEmpty()) {
-                    lanServerState.urls
-                } else {
-                    listOf("http://127.0.0.1:${lanServerState.port}")
-                }
-                displayUrls.forEach { url ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(MaterialTheme.colorScheme.surface)
-                            .border(1.dp, hairlineBorder, RoundedCornerShape(10.dp))
-                            .padding(horizontal = 12.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = url,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            color = contentColor,
-                            modifier = Modifier.weight(1f)
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (lanServerState.running) onlineGreen
+                            else mutedText.copy(alpha = 0.4f)
                         )
-                        TextButton(
-                            onClick = {
-                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                cm?.setPrimaryClip(ClipData.newPlainText("FeiNote LAN URL", url))
-                                Toast.makeText(context, "已复制访问地址", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) {
-                            Text("复制", style = MaterialTheme.typography.labelMedium, color = contentColor)
-                        }
-                    }
-                }
+                )
+                Text(
+                    text = when {
+                        !lanServerState.running -> "未开启"
+                        lanServerState.activeSessions > 0 && !lanServerState.lastClientIp.isNullOrBlank() ->
+                            "直连运行中 · 已连接 ${lanServerState.activeSessions} 台设备（${lanServerState.lastClientIp}）"
+                        else -> "直连运行中 · 等待浏览器连接"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (lanServerState.running) contentColor else mutedText
+                )
+            }
 
-                if (lanServerState.urls.isEmpty()) {
-                    Text(
-                        text = "未检测到 Wi-Fi/热点局域网 IP，请连接 Wi-Fi 或开启热点（也支持 USB 线 adb forward 访问本机地址）。",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = mutedText
-                    )
-                }
+            Text(
+                text = "浏览器链接",
+                style = MaterialTheme.typography.labelMedium,
+                color = mutedText
+            )
 
+            displayUrls.forEach { url ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(MaterialTheme.colorScheme.surface)
                         .border(1.dp, hairlineBorder, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "配对码",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = mutedText
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = formattedPin,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = contentColor
-                        )
+                    Text(
+                        text = url,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = if (lanServerState.running) contentColor else contentColor.copy(alpha = 0.72f),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            cm?.setPrimaryClip(ClipData.newPlainText("FeiNote LAN URL", url))
+                            Toast.makeText(context, "已复制访问地址", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.defaultMinSize(minWidth = 1.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    ) {
+                        Text("复制", style = MaterialTheme.typography.labelMedium, color = contentColor)
                     }
+                }
+            }
+
+            if (rawUrls.isEmpty()) {
+                Text(
+                    text = "未检测到 Wi-Fi/热点局域网 IP",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = mutedText
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "配对码",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = mutedText
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = formattedPin,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (lanServerState.running) contentColor else mutedText.copy(alpha = 0.55f)
+                    )
+                }
+                if (lanServerState.running) {
                     TextButton(
                         onClick = {
                             onRefreshPin()
@@ -489,12 +472,13 @@ private fun LanConnectTabContent(
                         Text("换一个", style = MaterialTheme.typography.labelMedium, color = contentColor)
                     }
                 }
+            }
 
+            lanServerState.errorMessage?.let { err ->
                 Text(
-                    text = "锁屏切后台持续运行 · 无操作 30 分钟自动关闭，关闭此设置窗口不影响连接。",
+                    text = err,
                     style = MaterialTheme.typography.labelMedium,
-                    lineHeight = 17.sp,
-                    color = mutedText
+                    color = MaterialTheme.colorScheme.error
                 )
             }
         }
@@ -503,40 +487,39 @@ private fun LanConnectTabContent(
         HorizontalDivider(color = hairlineBorder)
         Spacer(modifier = Modifier.height(10.dp))
 
-        if (!lanServerState.running) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.primary)
-                    .clickable(onClick = onStart),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "开启电脑直连",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onPrimary
+        // 单个开关按钮：点击切换开启直连 / 停止直连
+        val isRunning = lanServerState.running
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(
+                    if (isRunning) Color.Transparent
+                    else MaterialTheme.colorScheme.primary
                 )
-            }
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
-                    .clickable(onClick = onStop),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "停止直连",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.error
+                .then(
+                    if (isRunning) {
+                        Modifier.border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                    } else {
+                        Modifier
+                    }
                 )
-            }
+                .clickable {
+                    if (isRunning) onStop() else onStart()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (isRunning) "停止直连" else "开启直连",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isRunning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onPrimary
+            )
         }
     }
 }

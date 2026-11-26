@@ -290,6 +290,11 @@ object LanWebServer {
         )
     }
 
+    /** 读取本机当前局域网访问链接预览（未启动服务时也能直接展示给用户）。 */
+    fun previewLanUrls(port: Int = BASE_PORT): List<String> {
+        return detectLocalIpv4Addresses().map { "http://$it:$port" }
+    }
+
     private fun bindAvailableSocket(): ServerSocket? {
         for (offset in 0 until PORT_SEARCH_COUNT) {
             val port = BASE_PORT + offset
