@@ -36,7 +36,15 @@ object MdxDictionaryManager {
         val entryCount: Long = 0L,
         val fileSizeBytes: Long = 0L,
         val enabled: Boolean = true
-    )
+    ) {
+        /** 始终优先展示导入时的文件名称（去除 .mdx 后缀），不采用 MDX 内置元数据标题 */
+        val displayFileName: String
+            get() = mdxFileName
+                .trim()
+                .removeSuffix(".mdx")
+                .removeSuffix(".MDX")
+                .ifBlank { mdxFileName.substringBeforeLast('.').ifBlank { title } }
+    }
 
     data class DictionaryLookupResult(
         val dictionaryId: String,
@@ -133,14 +141,13 @@ object MdxDictionaryManager {
                         }
                     } ?: error("无法读取所选 MDX 文件")
 
-                    // 立即试解析以验证文件合法性并提取词典标题与词条总数
+                    // 立即试解析以验证文件合法性并提取词条总数，显示名直接使用文件名称（去除 .mdx 后缀）
                     val engine = MdxDictionaryEngine.open(destFile)
-                    val fallbackName = displayName.substringBeforeLast('.').ifBlank { displayName }
-                    val title = if (engine.title.isBlank() || engine.title == id) {
-                        fallbackName
-                    } else {
-                        engine.title
-                    }
+                    val title = displayName
+                        .trim()
+                        .removeSuffix(".mdx")
+                        .removeSuffix(".MDX")
+                        .ifBlank { displayName.substringBeforeLast('.').ifBlank { displayName } }
                     val entryCount = engine.numEntries
                     val sizeBytes = destFile.length()
 
@@ -218,7 +225,7 @@ object MdxDictionaryManager {
                         }
                     }
                     persist(appCtx, updated)
-                    return@runCatching "已将「$displayName」绑定到「${target.title}」"
+                    return@runCatching "已将「$displayName」绑定到「${target.displayFileName}」"
                 }
             }
 
@@ -423,7 +430,7 @@ object MdxDictionaryManager {
             results.add(
                 DictionaryLookupResult(
                     dictionaryId = entry.id,
-                    dictionaryTitle = entry.title,
+                    dictionaryTitle = entry.displayFileName,
                     queriedWord = match.queriedWord,
                     matchedWord = match.matchedWord,
                     html = match.html,

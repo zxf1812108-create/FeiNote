@@ -1671,7 +1671,7 @@ private fun DictionarySettingsTabContent() {
                                     }
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Text(
-                                        text = dict.title,
+                                        text = dict.displayFileName,
                                         fontSize = 15.sp,
                                         fontWeight = FontWeight.Normal,
                                         color = contentColor,

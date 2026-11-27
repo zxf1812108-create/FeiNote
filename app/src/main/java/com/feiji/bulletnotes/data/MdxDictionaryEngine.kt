@@ -8,6 +8,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.Charset
 import java.text.Collator
+import java.text.Normalizer
 import java.util.Locale
 import java.util.zip.Inflater
 
@@ -15,9 +16,9 @@ import java.util.zip.Inflater
  * 纯本地离线 MDict (.mdx) 词典解析与极速查词引擎（零第三方依赖）：
  * - 完整支持 MDict v1.2 与 v2.0 格式；
  * - 支持 v2.0 索引块加密（RIPEMD-128 + fast_decrypt）、zlib / LZO1X / 未压缩块；
- * - 支持 UTF-8 / UTF-16LE / GB18030 / Big5 编码；
+ * - 支持 UTF-8 / UTF-16LE / GB18030 / GBK / Big5 编码与 StyleSheet 样式宏展开；
  * - 启动时仅加载词头块索引与记录块偏移表（常驻内存 < 2MB），查词按需随机读取单块解压；
- * - 支持 @@@LINK= 自动重定向与英文常见词形还原回退（复数、过去式、进行时、比较级等）。
+ * - 支持 @@@LINK= 自动重定向、中文词头规范化与多音字/同形词合并、英文常见词形还原回退。
  */
 class MdxDictionaryEngine private constructor(
     private val file: File,
@@ -31,7 +32,8 @@ class MdxDictionaryEngine private constructor(
     private val recordDataStartOffset: Long,
     private val recordBlocks: List<RecordBlockMeta>,
     private val totalRecordDecompSize: Long,
-    private val stripKey: Boolean
+    private val stripKey: Boolean,
+    private val styleSheet: Map<String, Pair<String, String>>
 ) : Closeable {
 
     private enum class BlockSortOrder {
@@ -82,6 +84,7 @@ class MdxDictionaryEngine private constructor(
     private class FullKeyIndex(
         val lowerToBlocks: HashMap<String, IntArray>,
         val strippedToBlocks: HashMap<String, IntArray>,
+        val cjkBaseToBlocks: HashMap<String, IntArray>,
         val sortedHeadwords: Array<String>,
         val sortedHeadwordsLower: Array<String>
     )
@@ -93,7 +96,7 @@ class MdxDictionaryEngine private constructor(
     }
 
     private val totalKeyDecompSize: Long = keyBlocks.sumOf { it.decompSize }
-    private val hasCjkHeadwords: Boolean = keyBlocks.any {
+    private val hasCjkHeadwords: Boolean = containsCjk(title) || keyBlocks.any {
         containsCjk(it.firstWord) || containsCjk(it.lastWord)
     }
     private val sortOrderInfo: Pair<BlockSortOrder, List<Int>> = detectSortOrder(keyBlocks, zhCollator)
@@ -151,8 +154,8 @@ class MdxDictionaryEngine private constructor(
 
         // 若已构建全量索引，或当前为非单调排序/中文词典且索引体量适中，直接二分全量词头
         val existingIdx = fullKeyIndex ?: if (
-            (primarySortOrder == BlockSortOrder.UNKNOWN || (containsCjk(cleaned) && hasCjkHeadwords)) &&
-            totalKeyDecompSize <= 24L * 1024 * 1024
+            (primarySortOrder == BlockSortOrder.UNKNOWN || containsCjk(cleaned)) &&
+            totalKeyDecompSize <= 96L * 1024 * 1024
         ) {
             ensureFullKeyIndex()
         } else {
@@ -324,9 +327,11 @@ class MdxDictionaryEngine private constructor(
         val primaryWord = hits.first().first
         val resolvedHtmls = LinkedHashSet<String>()
         for ((_, rawHtml) in hits) {
-            val resolved = resolveRedirectIfNeeded(rawHtml, word, maxHops)
-            if (!resolved.isNullOrBlank()) {
-                resolvedHtmls.add(resolved)
+            val resolvedList = resolveRedirectIfNeeded(rawHtml, word, maxHops)
+            for (item in resolvedList) {
+                if (item.isNotBlank()) {
+                    resolvedHtmls.add(item)
+                }
             }
         }
         if (resolvedHtmls.isEmpty()) return null
@@ -338,101 +343,160 @@ class MdxDictionaryEngine private constructor(
         initialHtml: String,
         originWord: String,
         maxHops: Int
-    ): String? {
-        var currentHtml = initialHtml.trim()
+    ): List<String> {
+        var currentList = listOf(stripLeadingBomAndNull(initialHtml))
         val visited = HashSet<String>()
         visited.add(originWord.lowercase(Locale.ROOT))
 
         repeat(maxHops) {
-            if (!currentHtml.startsWith("@@@LINK=", ignoreCase = true)) {
-                return currentHtml
+            val nextList = ArrayList<String>(currentList.size)
+            var followedAny = false
+            for (html in currentList) {
+                val trimmed = stripLeadingBomAndNull(html)
+                if (!trimmed.startsWith("@@@LINK=", ignoreCase = true)) {
+                    if (trimmed.isNotEmpty()) nextList.add(trimmed)
+                    continue
+                }
+                val target = trimmed.substring(8)
+                    .lineSequence()
+                    .firstOrNull()
+                    ?.let { trimHeadword(it) }
+                    .orEmpty()
+                if (target.isEmpty()) continue
+                val norm = target.lowercase(Locale.ROOT)
+                if (!visited.add(norm)) continue
+                val nextHits = lookupAllMatchingEntries(target)
+                if (nextHits.isNotEmpty()) {
+                    followedAny = true
+                    for ((_, nextHtml) in nextHits) {
+                        val cleanedNext = stripLeadingBomAndNull(nextHtml)
+                        if (cleanedNext.isNotEmpty()) nextList.add(cleanedNext)
+                    }
+                }
             }
-            val target = currentHtml.substring(8)
-                .lineSequence()
-                .firstOrNull()
-                ?.trim()
-                ?.trimEnd('\u0000', '\r', '\n', '\uFEFF')
-                .orEmpty()
-            if (target.isEmpty()) return null
-            val norm = target.lowercase(Locale.ROOT)
-            if (!visited.add(norm)) return null
-            val nextHits = lookupAllMatchingEntries(target)
-            if (nextHits.isEmpty()) return null
-            currentHtml = nextHits.first().second.trim()
+            if (!followedAny) {
+                return nextList.filterNot { it.startsWith("@@@LINK=", ignoreCase = true) }
+            }
+            currentList = nextList
         }
-        return if (currentHtml.startsWith("@@@LINK=", ignoreCase = true)) null else currentHtml
+        return currentList.filterNot { it.startsWith("@@@LINK=", ignoreCase = true) }
     }
 
     private fun lookupAllMatchingEntries(word: String): List<Pair<String, String>> {
         if (keyBlocks.isEmpty()) return emptyList()
-        val targetLower = word.lowercase(Locale.ROOT)
-        val targetStripped = stripForKey(word)
+        val normalizedWord = Normalizer.normalize(word, Normalizer.Form.NFC)
+        val targetLower = normalizedWord.lowercase(Locale.ROOT)
+        val targetStripped = stripForKey(normalizedWord)
+        val isCjkQuery = containsCjk(normalizedWord)
+        val targetCjkBase = if (isCjkQuery) extractCjkBaseKey(normalizedWord) else ""
 
-        // 1. 若已存在全量索引，直接 O(1) 定位词头块
+        // 1. 若已存在全量索引，直接 O(1) 定位词头块（依次尝试精确/忽略大小写 -> 去标点空白 -> 中文同形词/编号词头）
         fullKeyIndex?.let { idx ->
-            val blockIds = idx.lowerToBlocks[targetLower]
-                ?: if (stripKey && targetStripped.isNotEmpty()) idx.strippedToBlocks[targetStripped] else null
-            if (blockIds != null) {
-                val found = extractMatchesFromBlocks(blockIds.map { keyBlocks[it] }, word, targetStripped)
+            val directBlocks = idx.lowerToBlocks[targetLower]
+            if (directBlocks != null) {
+                val found = extractMatchesFromBlocks(directBlocks.map { keyBlocks[it] }, normalizedWord, targetStripped, targetCjkBase)
                 if (found.isNotEmpty()) return found
+            }
+            if (targetStripped.isNotEmpty()) {
+                val strippedBlocks = idx.strippedToBlocks[targetStripped]
+                if (strippedBlocks != null) {
+                    val found = extractMatchesFromBlocks(strippedBlocks.map { keyBlocks[it] }, normalizedWord, targetStripped, targetCjkBase)
+                    if (found.isNotEmpty()) return found
+                }
+            }
+            if (targetCjkBase.isNotEmpty()) {
+                val baseBlocks = idx.cjkBaseToBlocks[targetCjkBase]
+                if (baseBlocks != null) {
+                    val found = extractMatchesFromBlocks(baseBlocks.map { keyBlocks[it] }, normalizedWord, targetStripped, targetCjkBase)
+                    if (found.isNotEmpty()) return found
+                }
             }
             return emptyList()
         }
 
         // 2. 快速多排序通道（Unicode / stripKey / 原编码字节序[GBK等] / UTF-8字节序 / 中文拼音序）
-        val candidateBlocks = findCandidateKeyBlocks(word, targetLower, targetStripped)
-        val fastHits = extractMatchesFromBlocks(candidateBlocks, word, targetStripped)
+        val candidateBlocks = findCandidateKeyBlocks(normalizedWord, targetLower, targetStripped)
+        val fastHits = extractMatchesFromBlocks(candidateBlocks, normalizedWord, targetStripped, targetCjkBase)
         if (fastHits.isNotEmpty()) return fastHits
 
-        // 3. 兜底：若该词典包含中文词头或属于非单调排序（如部首/笔画/多音字拼音差异/多分区词典），
-        //    懒加载构建一次 O(1) 全量词头索引，彻底保证任何中文单字与词语 100% 查得到！
-        val shouldBuildFallback = (primarySortOrder == BlockSortOrder.UNKNOWN ||
-            (containsCjk(word) && (hasCjkHeadwords || keyBlocks.size <= 32))) &&
-            totalKeyDecompSize <= 32L * 1024 * 1024
+        // 3. 兜底：若为中文查询或非单调排序词典（如部首/笔画/多音字拼音/多分区/带编号词头），
+        //    懒加载构建一次 O(1) 全量词头索引（超大词典则流式顺序扫描），确保任何中文单字与词语 100% 查得到！
+        val shouldBuildFallback = primarySortOrder == BlockSortOrder.UNKNOWN ||
+            isCjkQuery ||
+            keyBlocks.size <= 32
 
         if (shouldBuildFallback) {
-            val idx = ensureFullKeyIndex() ?: return emptyList()
-            val blockIds = idx.lowerToBlocks[targetLower]
-                ?: if (stripKey && targetStripped.isNotEmpty()) idx.strippedToBlocks[targetStripped] else null
-            if (blockIds != null) {
-                return extractMatchesFromBlocks(blockIds.map { keyBlocks[it] }, word, targetStripped)
+            if (totalKeyDecompSize <= 96L * 1024 * 1024) {
+                val idx = ensureFullKeyIndex() ?: return emptyList()
+                val blockIds = idx.lowerToBlocks[targetLower]
+                    ?: targetStripped.takeIf { it.isNotEmpty() }?.let { idx.strippedToBlocks[it] }
+                    ?: targetCjkBase.takeIf { it.isNotEmpty() }?.let { idx.cjkBaseToBlocks[it] }
+                if (blockIds != null) {
+                    return extractMatchesFromBlocks(blockIds.map { keyBlocks[it] }, normalizedWord, targetStripped, targetCjkBase)
+                }
+            } else {
+                // 超大词典兜底：逐块顺序扫描（流式不常驻内存）
+                return scanAllBlocksStreaming(normalizedWord, targetStripped, targetCjkBase)
             }
         }
         return emptyList()
     }
 
+    private fun scanAllBlocksStreaming(
+        word: String,
+        targetStripped: String,
+        targetCjkBase: String
+    ): List<Pair<String, String>> {
+        val exactMatches = ArrayList<Pair<String, String>>(2)
+        val fallbackMatches = ArrayList<Pair<String, String>>(2)
+        for (block in keyBlocks) {
+            val hits = extractMatchesFromBlocks(listOf(block), word, targetStripped, targetCjkBase)
+            for (hit in hits) {
+                if (hit.first == word || hit.first.equals(word, ignoreCase = true)) {
+                    if (exactMatches.size < 6) exactMatches.add(hit)
+                } else {
+                    if (fallbackMatches.size < 6) fallbackMatches.add(hit)
+                }
+            }
+            if (exactMatches.size >= 6) break
+        }
+        return if (exactMatches.isNotEmpty()) exactMatches else fallbackMatches
+    }
+
     private fun extractMatchesFromBlocks(
         blocks: List<KeyBlockMeta>,
         word: String,
-        targetStripped: String
+        targetStripped: String,
+        targetCjkBase: String
     ): List<Pair<String, String>> {
         val exactMatches = ArrayList<Pair<String, String>>(2)
         val ciMatches = ArrayList<Pair<String, String>>(2)
         val strippedMatches = ArrayList<Pair<String, String>>(2)
+        val cjkBaseMatches = ArrayList<Pair<String, String>>(2)
 
         for (block in blocks) {
-            val entries = readKeyBlockEntries(block)
+            val entries = runCatching { readKeyBlockEntries(block) }.getOrNull() ?: continue
             for (i in entries.indices) {
                 val entry = entries[i]
                 val w = entry.word
+                if (w.isEmpty()) continue
                 val matchTier = when {
                     w == word -> 0
                     w.equals(word, ignoreCase = true) -> 1
-                    stripKey && targetStripped.isNotEmpty() && stripForKey(w) == targetStripped -> 2
+                    targetStripped.isNotEmpty() && (stripKey || containsCjk(word)) && stripForKey(w) == targetStripped -> 2
+                    targetCjkBase.isNotEmpty() && extractCjkBaseKey(w) == targetCjkBase -> 3
                     else -> -1
                 }
                 if (matchTier >= 0) {
-                    val nextOffset = if (i + 1 < entries.size) {
-                        entries[i + 1].recordOffset
-                    } else {
-                        resolveNextBlockStartRecordOffset(block.index)
-                    }
-                    val html = readRecordSlice(entry.recordOffset, nextOffset)
+                    val nextOffset = resolveEntryEndRecordOffset(block.index, entries, i)
+                    val html = runCatching { readRecordSlice(entry.recordOffset, nextOffset) }.getOrDefault("")
+                    if (html.isBlank()) continue
                     val pair = w to html
                     when (matchTier) {
                         0 -> if (exactMatches.size < 6) exactMatches.add(pair)
                         1 -> if (ciMatches.size < 6) ciMatches.add(pair)
                         2 -> if (strippedMatches.size < 6) strippedMatches.add(pair)
+                        3 -> if (cjkBaseMatches.size < 6) cjkBaseMatches.add(pair)
                     }
                 }
             }
@@ -441,7 +505,8 @@ class MdxDictionaryEngine private constructor(
         return when {
             exactMatches.isNotEmpty() -> exactMatches
             ciMatches.isNotEmpty() -> ciMatches
-            else -> strippedMatches
+            strippedMatches.isNotEmpty() -> strippedMatches
+            else -> cjkBaseMatches
         }
     }
 
@@ -450,35 +515,47 @@ class MdxDictionaryEngine private constructor(
         synchronized(lock) {
             fullKeyIndex?.let { return it }
             val reader = raf ?: return null
-            val lowerMap = HashMap<String, MutableList<Int>>(numEntries.toInt().coerceIn(1024, 200_000))
+            val initCap = numEntries.toInt().coerceIn(1024, 250_000)
+            val lowerMap = HashMap<String, MutableList<Int>>(initCap)
             val strippedMap = HashMap<String, MutableList<Int>>()
-            val uniqueHeadwords = LinkedHashMap<String, String>(numEntries.toInt().coerceIn(1024, 200_000))
+            val cjkBaseMap = HashMap<String, MutableList<Int>>()
+            val uniqueHeadwords = LinkedHashMap<String, String>(initCap)
 
             for (block in keyBlocks) {
-                val entries = keyBlockCache[block.index] ?: run {
+                val entries = keyBlockCache[block.index] ?: runCatching {
                     val compBytes = ByteArray(block.compSize.toInt())
                     reader.seek(keyBlocksStartOffset + block.compOffset)
                     reader.readFully(compBytes)
                     val decomp = decompressBlock(compBytes, block.decompSize.toInt())
                     parseKeyBlockEntries(decomp, numberWidth, charset)
-                }
+                }.getOrNull() ?: continue
+
                 for (entry in entries) {
                     val w = entry.word
                     if (w.isEmpty()) continue
                     val low = w.lowercase(Locale.ROOT)
                     val list = lowerMap.getOrPut(low) { ArrayList(1) }
-                    if (list.lastOrNull() != block.index && list.size < 4) {
+                    if (list.lastOrNull() != block.index && list.size < 6) {
                         list.add(block.index)
                     }
                     if (!uniqueHeadwords.containsKey(low)) {
                         uniqueHeadwords[low] = w
                     }
-                    if (stripKey) {
-                        val stripped = stripForKey(w)
-                        if (stripped.isNotEmpty() && stripped != low) {
-                            val sList = strippedMap.getOrPut(stripped) { ArrayList(1) }
-                            if (sList.lastOrNull() != block.index && sList.size < 4) {
-                                sList.add(block.index)
+
+                    val stripped = stripForKey(w)
+                    if (stripped.isNotEmpty() && stripped != low && (stripKey || containsCjk(w))) {
+                        val sList = strippedMap.getOrPut(stripped) { ArrayList(1) }
+                        if (sList.lastOrNull() != block.index && sList.size < 6) {
+                            sList.add(block.index)
+                        }
+                    }
+
+                    if (containsCjk(w)) {
+                        val cjkBase = extractCjkBaseKey(w)
+                        if (cjkBase.isNotEmpty() && cjkBase != low && cjkBase != stripped) {
+                            val bList = cjkBaseMap.getOrPut(cjkBase) { ArrayList(1) }
+                            if (bList.lastOrNull() != block.index && bList.size < 6) {
+                                bList.add(block.index)
                             }
                         }
                     }
@@ -493,6 +570,10 @@ class MdxDictionaryEngine private constructor(
             for ((k, v) in strippedMap) {
                 strippedArrMap[k] = v.toIntArray()
             }
+            val cjkBaseArrMap = HashMap<String, IntArray>(cjkBaseMap.size)
+            for ((k, v) in cjkBaseMap) {
+                cjkBaseArrMap[k] = v.toIntArray()
+            }
 
             val pairs = uniqueHeadwords.entries.sortedBy { it.key }
             val sortedWords = Array(pairs.size) { pairs[it].value }
@@ -501,6 +582,7 @@ class MdxDictionaryEngine private constructor(
             val built = FullKeyIndex(
                 lowerToBlocks = lowerArrMap,
                 strippedToBlocks = strippedArrMap,
+                cjkBaseToBlocks = cjkBaseArrMap,
                 sortedHeadwords = sortedWords,
                 sortedHeadwordsLower = sortedLowers
             )
@@ -625,13 +707,33 @@ class MdxDictionaryEngine private constructor(
         return result
     }
 
-    private fun resolveNextBlockStartRecordOffset(blockIndex: Int): Long {
-        val nextBlockIndex = blockIndex + 1
-        if (nextBlockIndex !in keyBlocks.indices) {
-            return totalRecordDecompSize
+    /**
+     * 查找当前词条对应的真实记录结束偏移：
+     * 兼容同形/别名词条共享同一 recordOffset 的 MDX（跳过相等偏移直到找到下一个更大的偏移）。
+     */
+    private fun resolveEntryEndRecordOffset(
+        blockIndex: Int,
+        entries: List<KeyEntry>,
+        entryIndex: Int
+    ): Long {
+        val currentOffset = entries[entryIndex].recordOffset
+        for (j in (entryIndex + 1) until entries.size) {
+            if (entries[j].recordOffset > currentOffset) {
+                return entries[j].recordOffset
+            }
         }
-        val nextEntries = readKeyBlockEntries(keyBlocks[nextBlockIndex])
-        return nextEntries.firstOrNull()?.recordOffset ?: totalRecordDecompSize
+        var nextBlockIdx = blockIndex + 1
+        while (nextBlockIdx in keyBlocks.indices) {
+            val nextEntries = runCatching { readKeyBlockEntries(keyBlocks[nextBlockIdx]) }.getOrNull()
+                ?: break
+            for (nextEntry in nextEntries) {
+                if (nextEntry.recordOffset > currentOffset) {
+                    return nextEntry.recordOffset
+                }
+            }
+            nextBlockIdx++
+        }
+        return totalRecordDecompSize
     }
 
     private fun readKeyBlockEntries(block: KeyBlockMeta): List<KeyEntry> {
@@ -691,13 +793,21 @@ class MdxDictionaryEngine private constructor(
                 blockIdx++
             }
 
-            return String(out.toByteArray(), charset).trimEnd('\u0000')
+            val rawText = String(out.toByteArray(), charset).trim('\u0000', '\uFEFF')
+            return if (styleSheet.isNotEmpty() && rawText.contains('`') && !rawText.trimStart().startsWith("@@@LINK=", ignoreCase = true)) {
+                substituteStylesheet(rawText, styleSheet)
+            } else {
+                rawText
+            }
         }
     }
 
     companion object {
-        private val headerAttrRegex = Regex("""(\w+)\s*=\s*"([^"]*)"""")
-        private val stripKeyRegex = Regex("""[\s\p{Punct}]+""")
+        private val headerAttrRegex = Regex("""(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+        private val stripKeyRegex = Regex("""[\s\u00A0\u3000\u200B-\u200D\uFEFF\p{P}]+""")
+        private val cjkTrailingDisambigRegex = Regex(
+            """(?:\s*(?:\([^)]{1,24}\)|（[^）]{1,24}）|\[[^\]]{1,24}]|【[^】]{1,24}】|[0-9０-９①-⑳⑴-⒇¹²³⁴⁵⁶⁷⁸⁹⁰]+|\s+[a-zA-Zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü]+))+$"""
+        )
 
         fun open(file: File): MdxDictionaryEngine {
             require(file.exists() && file.isFile && file.length() > 16) {
@@ -716,38 +826,31 @@ class MdxDictionaryEngine private constructor(
                 val headerXml = String(headerBytes, Charsets.UTF_16LE).trimEnd('\u0000')
                 val attrs = HashMap<String, String>()
                 headerAttrRegex.findAll(headerXml).forEach { m ->
-                    attrs[m.groupValues[1]] = unescapeHtmlAttr(m.groupValues[2])
+                    val attrKey = m.groupValues[1].lowercase(Locale.ROOT)
+                    val rawVal = if (m.groups[2] != null) m.groupValues[2] else m.groupValues[3]
+                    attrs[attrKey] = unescapeHtmlAttr(rawVal)
                 }
 
-                val versionStr = attrs["GeneratedByEngineVersion"]
-                    ?: attrs["RequiredEngineVersion"]
+                val versionStr = attrs["generatedbyengineversion"]
+                    ?: attrs["requiredengineversion"]
                     ?: "2.0"
                 val version = versionStr.toFloatOrNull() ?: 2.0f
                 val isV2 = version >= 2.0f
                 val numberWidth = if (isV2) 8 else 4
 
-                val encodingName = attrs["Encoding"].orEmpty().trim().uppercase(Locale.ROOT)
-                val charset = when {
-                    encodingName.isEmpty() || encodingName == "UTF-8" || encodingName == "UTF8" -> Charsets.UTF_8
-                    encodingName == "UTF-16" || encodingName == "UTF-16LE" || encodingName == "UTF16" -> Charsets.UTF_16LE
-                    encodingName.startsWith("GB") || encodingName == "CP936" -> {
-                        runCatching { Charset.forName("GB18030") }.getOrDefault(Charsets.UTF_8)
-                    }
-                    encodingName == "BIG5" -> {
-                        runCatching { Charset.forName("Big5") }.getOrDefault(Charsets.UTF_8)
-                    }
-                    else -> runCatching { Charset.forName(encodingName) }.getOrDefault(Charsets.UTF_8)
-                }
+                val encodingName = attrs["encoding"].orEmpty().trim().uppercase(Locale.ROOT)
+                val charset = resolveMdxCharset(encodingName)
 
-                val encryptedRaw = attrs["Encrypted"].orEmpty().trim()
+                val encryptedRaw = attrs["encrypted"].orEmpty().trim()
                 val encryptedFlags = when {
                     encryptedRaw.equals("Yes", ignoreCase = true) -> 1
                     encryptedRaw.equals("No", ignoreCase = true) || encryptedRaw.isEmpty() -> 0
                     else -> encryptedRaw.toIntOrNull() ?: 0
                 }
 
-                val stripKey = !attrs["StripKey"].equals("No", ignoreCase = true)
-                val rawTitle = attrs["Title"].orEmpty().trim()
+                val stripKey = !attrs["stripkey"].equals("No", ignoreCase = true)
+                val styleSheet = parseStyleSheet(attrs["stylesheet"].orEmpty())
+                val rawTitle = attrs["title"].orEmpty().trim()
                 val title = if (
                     rawTitle.isBlank() ||
                     rawTitle.equals("Title (No HTML code allowed)", ignoreCase = true)
@@ -864,7 +967,8 @@ class MdxDictionaryEngine private constructor(
                     recordDataStartOffset = recordDataStartOffset,
                     recordBlocks = recordBlocks,
                     totalRecordDecompSize = runDecomp,
-                    stripKey = stripKey
+                    stripKey = stripKey,
+                    styleSheet = styleSheet
                 )
             }
         }
@@ -897,14 +1001,14 @@ class MdxDictionaryEngine private constructor(
                 val firstBytes = ByteArray(firstByteCount)
                 buf.get(firstBytes)
                 val firstPayloadBytes = firstBytes.copyOf((firstLen * charUnitWidth).coerceAtMost(firstBytes.size))
-                val firstWord = String(firstPayloadBytes, charset).trimEnd('\u0000').trim('\uFEFF', '\r', '\n').trim()
+                val firstWord = trimHeadword(String(firstPayloadBytes, charset))
 
                 val lastLen = if (isV2) (buf.short.toInt() and 0xFFFF) else (buf.get().toInt() and 0xFF)
                 val lastByteCount = (lastLen + textTerm) * charUnitWidth
                 val lastBytes = ByteArray(lastByteCount)
                 buf.get(lastBytes)
                 val lastPayloadBytes = lastBytes.copyOf((lastLen * charUnitWidth).coerceAtMost(lastBytes.size))
-                val lastWord = String(lastPayloadBytes, charset).trimEnd('\u0000').trim('\uFEFF', '\r', '\n').trim()
+                val lastWord = trimHeadword(String(lastPayloadBytes, charset))
 
                 val compSize = readNumber(buf, numberWidth)
                 val decompSize = readNumber(buf, numberWidth)
@@ -953,18 +1057,18 @@ class MdxDictionaryEngine private constructor(
                     while (pos + 1 < raw.size && !(raw[pos] == 0.toByte() && raw[pos + 1] == 0.toByte())) {
                         pos += 2
                     }
-                    val word = String(raw, textStart, (pos - textStart).coerceAtLeast(0), charset)
-                        .trim('\u0000', '\uFEFF', '\r', '\n')
-                        .trim()
+                    val word = trimHeadword(
+                        String(raw, textStart, (pos - textStart).coerceAtLeast(0), charset)
+                    )
                     pos += 2
                     entries.add(KeyEntry(offset, word))
                 } else {
                     while (pos < raw.size && raw[pos] != 0.toByte()) {
                         pos++
                     }
-                    val word = String(raw, textStart, (pos - textStart).coerceAtLeast(0), charset)
-                        .trim('\u0000', '\uFEFF', '\r', '\n')
-                        .trim()
+                    val word = trimHeadword(
+                        String(raw, textStart, (pos - textStart).coerceAtLeast(0), charset)
+                    )
                     pos += 1
                     entries.add(KeyEntry(offset, word))
                 }
@@ -1009,7 +1113,7 @@ class MdxDictionaryEngine private constructor(
         }
 
         /**
-         * 纯 Kotlin 实现 LZO1X 解压，兼容早期使用 LZO 压缩的 MDX 文件。
+         * 纯 Kotlin 精确实现标准 minilzo LZO1X 解压状态机，兼容所有采用 LZO 压缩的 MDX 词典。
          */
         private fun lzo1xDecompress(
             src: ByteArray,
@@ -1017,9 +1121,11 @@ class MdxDictionaryEngine private constructor(
             srcLen: Int,
             expectedSize: Int
         ): ByteArray {
-            val end = srcOffset + srcLen
+            val end = (srcOffset + srcLen).coerceAtMost(src.size)
             var ip = srcOffset
-            var out = ByteArray(expectedSize.coerceAtLeast(4096))
+            if (ip >= end) return ByteArray(0)
+
+            var out = ByteArray(expectedSize.coerceIn(4096, 4 * 1024 * 1024))
             var op = 0
 
             fun ensureCapacity(extra: Int) {
@@ -1031,130 +1137,158 @@ class MdxDictionaryEngine private constructor(
                 }
             }
 
-            fun copyLiterals(count: Int) {
-                ensureCapacity(count)
-                System.arraycopy(src, ip, out, op, count)
-                ip += count
-                op += count
+            fun copyLiterals(count: Int): Boolean {
+                if (count <= 0) return true
+                val safeCount = minOf(count, end - ip)
+                if (safeCount <= 0) return false
+                ensureCapacity(safeCount)
+                System.arraycopy(src, ip, out, op, safeCount)
+                ip += safeCount
+                op += safeCount
+                return safeCount == count
             }
 
-            fun copyMatch(mPosStart: Int, count: Int) {
+            fun copyMatch(mPosStart: Int, count: Int): Boolean {
+                if (count <= 0) return true
+                if (mPosStart < 0 || mPosStart >= op) return false
                 ensureCapacity(count)
                 var mp = mPosStart
                 repeat(count) {
                     out[op++] = out[mp++]
                 }
+                return true
             }
 
-            if (ip >= end) return ByteArray(0)
+            // 严格对齐 minilzo.c lzo1x_decompress 的 4 个核心状态
+            val stateLiteralRun = 0
+            val stateFirstLiteralRun = 1
+            val stateMatch = 2
+            val stateMatchDone = 3
 
+            var state: Int
             var t = src[ip].toInt() and 0xFF
-            var skipFirstLiteralRun = false
+            var matchTrail = 0
+
             if (t > 17) {
                 ip++
                 t -= 17
                 if (t < 4) {
-                    copyLiterals(t)
+                    if (!copyLiterals(t) || ip >= end) return out.copyOf(op)
                     t = src[ip++].toInt() and 0xFF
-                    skipFirstLiteralRun = true
+                    state = stateMatch
                 } else {
-                    copyLiterals(t)
-                    skipFirstLiteralRun = true
-                    t = src[ip++].toInt() and 0xFF
+                    if (!copyLiterals(t)) return out.copyOf(op)
+                    state = stateFirstLiteralRun
                 }
             } else {
-                t = src[ip++].toInt() and 0xFF
+                state = stateLiteralRun
             }
 
-            mainLoop@ while (true) {
-                if (!skipFirstLiteralRun) {
-                    if (t < 16) {
+            loop@ while (true) {
+                when (state) {
+                    stateLiteralRun -> {
+                        if (ip >= end) break@loop
+                        t = src[ip++].toInt() and 0xFF
+                        if (t >= 16) {
+                            state = stateMatch
+                            continue@loop
+                        }
                         var litLen = t
                         if (litLen == 0) {
                             while (ip < end && src[ip] == 0.toByte()) {
                                 litLen += 255
                                 ip++
                             }
+                            if (ip >= end) break@loop
                             litLen += 15 + (src[ip++].toInt() and 0xFF)
                         }
-                        copyLiterals(litLen + 3)
-                        if (ip >= end) break@mainLoop
+                        if (!copyLiterals(litLen + 3)) break@loop
+                        state = stateFirstLiteralRun
+                    }
+
+                    stateFirstLiteralRun -> {
+                        if (ip >= end) break@loop
                         t = src[ip++].toInt() and 0xFF
-                        if (t < 16) {
-                            var mPos = op - (1 + 0x0800)
-                            mPos -= (t ushr 2)
-                            mPos -= ((src[ip++].toInt() and 0xFF) shl 2)
-                            copyMatch(mPos, 3)
-                            val trail = t and 3
-                            if (trail > 0) copyLiterals(trail)
-                            if (ip >= end) break@mainLoop
+                        if (t >= 16) {
+                            state = stateMatch
+                            continue@loop
+                        }
+                        if (ip >= end) break@loop
+                        val b = src[ip++].toInt() and 0xFF
+                        val mPos = op - (1 + 0x0800) - (t ushr 2) - (b shl 2)
+                        if (!copyMatch(mPos, 3)) break@loop
+                        matchTrail = t and 3
+                        state = stateMatchDone
+                    }
+
+                    stateMatch -> {
+                        when {
+                            t >= 64 -> {
+                                if (ip >= end) break@loop
+                                val b = src[ip++].toInt() and 0xFF
+                                val mPos = op - 1 - ((t ushr 2) and 7) - (b shl 3)
+                                val mLen = (t ushr 5) - 1 + 2
+                                if (!copyMatch(mPos, mLen)) break@loop
+                                matchTrail = t and 3
+                            }
+                            t >= 32 -> {
+                                var len = t and 31
+                                if (len == 0) {
+                                    while (ip < end && src[ip] == 0.toByte()) {
+                                        len += 255
+                                        ip++
+                                    }
+                                    if (ip >= end) break@loop
+                                    len += 31 + (src[ip++].toInt() and 0xFF)
+                                }
+                                if (ip + 1 >= end) break@loop
+                                val b0 = src[ip++].toInt() and 0xFF
+                                val b1 = src[ip++].toInt() and 0xFF
+                                val mPos = op - 1 - ((b0 ushr 2) + (b1 shl 6))
+                                if (!copyMatch(mPos, len + 2)) break@loop
+                                matchTrail = b0 and 3
+                            }
+                            t >= 16 -> {
+                                var pos = op - ((t and 8) shl 11)
+                                var len = t and 7
+                                if (len == 0) {
+                                    while (ip < end && src[ip] == 0.toByte()) {
+                                        len += 255
+                                        ip++
+                                    }
+                                    if (ip >= end) break@loop
+                                    len += 7 + (src[ip++].toInt() and 0xFF)
+                                }
+                                if (ip + 1 >= end) break@loop
+                                val b0 = src[ip++].toInt() and 0xFF
+                                val b1 = src[ip++].toInt() and 0xFF
+                                pos -= (b0 ushr 2) + (b1 shl 6)
+                                if (pos == op) {
+                                    break@loop
+                                }
+                                val mPos = pos - 0x4000
+                                if (!copyMatch(mPos, len + 2)) break@loop
+                                matchTrail = b0 and 3
+                            }
+                            else -> {
+                                if (ip >= end) break@loop
+                                val b = src[ip++].toInt() and 0xFF
+                                val mPos = op - 1 - (t ushr 2) - (b shl 2)
+                                if (!copyMatch(mPos, 2)) break@loop
+                                matchTrail = t and 3
+                            }
+                        }
+                        state = stateMatchDone
+                    }
+
+                    stateMatchDone -> {
+                        if (matchTrail == 0) {
+                            state = stateLiteralRun
+                        } else {
+                            if (!copyLiterals(matchTrail) || ip >= end) break@loop
                             t = src[ip++].toInt() and 0xFF
-                            continue@mainLoop
+                            state = stateMatch
                         }
-                    }
-                }
-                skipFirstLiteralRun = false
-
-                while (true) {
-                    val mPos: Int
-                    val mLen: Int
-                    when {
-                        t >= 64 -> {
-                            mPos = op - 1 - ((t ushr 2) and 7) - ((src[ip++].toInt() and 0xFF) shl 3)
-                            mLen = (t ushr 5) - 1 + 2
-                        }
-                        t >= 32 -> {
-                            var len = t and 31
-                            if (len == 0) {
-                                while (ip < end && src[ip] == 0.toByte()) {
-                                    len += 255
-                                    ip++
-                                }
-                                len += 31 + (src[ip++].toInt() and 0xFF)
-                            }
-                            val b0 = src[ip++].toInt() and 0xFF
-                            val b1 = src[ip++].toInt() and 0xFF
-                            mPos = op - 1 - ((b0 ushr 2) + (b1 shl 6))
-                            mLen = len + 2
-                            t = b0
-                        }
-                        t >= 16 -> {
-                            var pos = op - ((t and 8) shl 11)
-                            var len = t and 7
-                            if (len == 0) {
-                                while (ip < end && src[ip] == 0.toByte()) {
-                                    len += 255
-                                    ip++
-                                }
-                                len += 7 + (src[ip++].toInt() and 0xFF)
-                            }
-                            val b0 = src[ip++].toInt() and 0xFF
-                            val b1 = src[ip++].toInt() and 0xFF
-                            pos -= (b0 ushr 2) + (b1 shl 6)
-                            if (pos == op) {
-                                break@mainLoop
-                            }
-                            mPos = pos - 0x4000
-                            mLen = len + 2
-                            t = b0
-                        }
-                        else -> {
-                            mPos = op - 1 - (t ushr 2) - ((src[ip++].toInt() and 0xFF) shl 2)
-                            mLen = 2
-                        }
-                    }
-
-                    copyMatch(mPos, mLen)
-                    val litTrail = t and 3
-                    if (litTrail > 0) {
-                        copyLiterals(litTrail)
-                        if (ip >= end) break@mainLoop
-                        t = src[ip++].toInt() and 0xFF
-                        continue
-                    } else {
-                        if (ip >= end) break@mainLoop
-                        t = src[ip++].toInt() and 0xFF
-                        break
                     }
                 }
             }
@@ -1303,8 +1437,92 @@ class MdxDictionaryEngine private constructor(
             return digest
         }
 
+        private fun resolveMdxCharset(encodingName: String): Charset {
+            return when {
+                encodingName.isEmpty() || encodingName == "UTF-8" || encodingName == "UTF8" -> Charsets.UTF_8
+                encodingName == "UTF-16" || encodingName == "UTF-16LE" || encodingName == "UTF16" || encodingName == "UNICODE" -> Charsets.UTF_16LE
+                encodingName.startsWith("GB") || encodingName == "CP936" || encodingName == "MS936" -> {
+                    listOf("GB18030", "GBK", "GB2312").firstNotNullOfOrNull { name ->
+                        runCatching { Charset.forName(name) }.getOrNull()
+                    } ?: Charsets.UTF_8
+                }
+                encodingName == "BIG5" || encodingName == "BIG-5" || encodingName == "CP950" -> {
+                    listOf("Big5", "Big5-HKSCS").firstNotNullOfOrNull { name ->
+                        runCatching { Charset.forName(name) }.getOrNull()
+                    } ?: Charsets.UTF_8
+                }
+                else -> runCatching { Charset.forName(encodingName) }.getOrDefault(Charsets.UTF_8)
+            }
+        }
+
+        private fun parseStyleSheet(raw: String): Map<String, Pair<String, String>> {
+            if (raw.isBlank()) return emptyMap()
+            val lines = raw.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+            val map = HashMap<String, Pair<String, String>>()
+            var i = 0
+            while (i + 2 < lines.size) {
+                val id = lines[i].trim()
+                val begin = lines[i + 1]
+                val end = lines[i + 2]
+                if (id.isNotEmpty()) {
+                    map[id] = begin to end
+                }
+                i += 3
+            }
+            return map
+        }
+
+        private fun substituteStylesheet(
+            txt: String,
+            styleSheet: Map<String, Pair<String, String>>
+        ): String {
+            val sb = StringBuilder(txt.length + 64)
+            var lastEnd = ""
+            var i = 0
+            val n = txt.length
+            while (i < n) {
+                if (txt[i] == '`') {
+                    val close = txt.indexOf('`', i + 1)
+                    if (close > i + 1 && close - i <= 8) {
+                        val key = txt.substring(i + 1, close)
+                        val style = styleSheet[key]
+                        if (style != null) {
+                            sb.append(lastEnd)
+                            sb.append(style.first)
+                            lastEnd = style.second
+                            i = close + 1
+                            continue
+                        }
+                    }
+                }
+                sb.append(txt[i])
+                i++
+            }
+            sb.append(lastEnd)
+            return sb.toString()
+        }
+
+        private fun stripLeadingBomAndNull(raw: String): String {
+            return raw.trim('\u0000', '\uFEFF', '\u200B', '\r', '\n', ' ', '\t', '\u3000', '\u00A0')
+        }
+
+        private fun trimHeadword(raw: String): String {
+            val cleaned = raw.trim('\u0000', '\uFEFF', '\u200B', '\u200C', '\u200D', '\r', '\n', ' ', '\t', '\u3000', '\u00A0')
+            return if (cleaned.isEmpty()) "" else Normalizer.normalize(cleaned, Normalizer.Form.NFC)
+        }
+
         private fun stripForKey(text: String): String {
-            return stripKeyRegex.replace(text, "").lowercase(Locale.ROOT)
+            val nfc = Normalizer.normalize(text, Normalizer.Form.NFC)
+            return stripKeyRegex.replace(nfc, "").lowercase(Locale.ROOT)
+        }
+
+        private fun extractCjkBaseKey(text: String): String {
+            val trimmed = trimHeadword(text)
+            if (trimmed.isEmpty()) return ""
+            val unwrapped = edgePunctRegex.replace(trimmed, "").trim()
+            val withoutSuffix = cjkTrailingDisambigRegex.replace(unwrapped, "").trim()
+            val cleaned = stripKeyRegex.replace(withoutSuffix, "")
+            return if (cleaned.isNotEmpty() && isCjkWord(cleaned)) cleaned else ""
         }
 
         private fun unescapeHtmlAttr(text: String): String {
@@ -1415,11 +1633,14 @@ class MdxDictionaryEngine private constructor(
         private val englishWordTokenRegex = Regex("""^[A-Za-z]+(?:[-'’][A-Za-z]+)*$""")
 
         fun cleanBasicQuery(raw: String): String {
-            return softCharsRegex.replace(raw, "")
+            val cleaned = softCharsRegex.replace(raw, "")
                 .replace('’', '\'')
                 .replace('‘', '\'')
+                .replace('\u3000', ' ')
+                .replace('\u00A0', ' ')
                 .trim()
                 .let { multiSpaceRegex.replace(it, " ") }
+            return if (cleaned.isEmpty()) "" else Normalizer.normalize(cleaned, Normalizer.Form.NFC)
         }
 
         /**

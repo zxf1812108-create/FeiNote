@@ -608,12 +608,14 @@ fun DictionaryLookupDialog(
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                 keyboardActions = KeyboardActions(
                                     onSearch = {
-                                        if (inputValue.composition == null) {
+                                        val hasCjk = inputValue.text.any { Character.isIdeographic(it.code) }
+                                        if (inputValue.composition == null || hasCjk) {
                                             commitManualSearchAndExpand()
                                         }
                                     },
                                     onDone = {
-                                        if (inputValue.composition == null) {
+                                        val hasCjk = inputValue.text.any { Character.isIdeographic(it.code) }
+                                        if (inputValue.composition == null || hasCjk) {
                                             commitManualSearchAndExpand()
                                         }
                                     }

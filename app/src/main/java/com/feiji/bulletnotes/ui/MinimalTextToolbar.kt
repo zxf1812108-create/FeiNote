@@ -223,6 +223,12 @@ private fun ContextMenuToolbarPopup(
     val hasCopy = itemsByKey.containsKey(TextContextMenuKeys.CopyKey)
 
     val actions = buildList {
+        if (hasCopy && lookupCandidate != null) {
+            add(ToolbarActionItem("翻译") {
+                session.close()
+                onTranslateRequest(lookupCandidate)
+            })
+        }
         itemsByKey[TextContextMenuKeys.CutKey]?.let { item ->
             add(ToolbarActionItem("剪切") { item.onClick(session) })
         }
@@ -234,12 +240,6 @@ private fun ContextMenuToolbarPopup(
         }
         itemsByKey[TextContextMenuKeys.SelectAllKey]?.let { item ->
             add(ToolbarActionItem("全选") { item.onClick(session) })
-        }
-        if (hasCopy && lookupCandidate != null) {
-            add(ToolbarActionItem("翻译") {
-                session.close()
-                onTranslateRequest(lookupCandidate)
-            })
         }
     }
 
@@ -265,6 +265,12 @@ private fun LegacyTextToolbarOverlay(
 
     val lookupCandidate = MdxDictionaryEngine.sanitizeSelectionQuery(ActiveSelectionTracker.selectedText)
     val actions = buildList {
+        if (state.onCopyRequested != null && lookupCandidate != null) {
+            add(ToolbarActionItem("翻译") {
+                state.hide()
+                onTranslateRequest(lookupCandidate)
+            })
+        }
         state.onCutRequested?.let { action ->
             add(ToolbarActionItem("剪切") { action() })
         }
@@ -276,12 +282,6 @@ private fun LegacyTextToolbarOverlay(
         }
         state.onSelectAllRequested?.let { action ->
             add(ToolbarActionItem("全选") { action() })
-        }
-        if (state.onCopyRequested != null && lookupCandidate != null) {
-            add(ToolbarActionItem("翻译") {
-                state.hide()
-                onTranslateRequest(lookupCandidate)
-            })
         }
     }
 
