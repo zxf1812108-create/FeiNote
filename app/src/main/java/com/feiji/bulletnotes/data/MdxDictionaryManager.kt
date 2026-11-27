@@ -24,6 +24,7 @@ object MdxDictionaryManager {
     private const val KEY_ENTRIES = "dictionary_entries_v1"
     private const val KEY_DEFAULT_CSS_FILE = "default_css_file_v1"
     private const val KEY_DEFAULT_CSS_NAME = "default_css_name_v1"
+    private const val KEY_PREFERRED_ID = "preferred_dictionary_id_v1"
 
     data class DictionaryEntry(
         val id: String,
@@ -43,7 +44,8 @@ object MdxDictionaryManager {
         val queriedWord: String,
         val matchedWord: String,
         val html: String,
-        val cssText: String
+        val cssText: String,
+        val hasCustomCss: Boolean = cssText.isNotBlank()
     )
 
     private val gson = Gson()
@@ -55,6 +57,9 @@ object MdxDictionaryManager {
 
     private val _defaultCssName = MutableStateFlow<String?>(null)
     val defaultCssName: StateFlow<String?> = _defaultCssName.asStateFlow()
+
+    private val _preferredDictionaryId = MutableStateFlow<String?>(null)
+    val preferredDictionaryId: StateFlow<String?> = _preferredDictionaryId.asStateFlow()
 
     private var initialized = false
 
@@ -89,6 +94,11 @@ object MdxDictionaryManager {
                 _defaultCssName.value = defCssDisplay ?: defCssStored
             } else {
                 _defaultCssName.value = null
+            }
+
+            val savedPreferred = prefs.getString(KEY_PREFERRED_ID, null)
+            _preferredDictionaryId.value = savedPreferred?.takeIf { prefId ->
+                valid.any { it.id == prefId }
             }
             initialized = true
         }
@@ -125,7 +135,12 @@ object MdxDictionaryManager {
 
                     // 立即试解析以验证文件合法性并提取词典标题与词条总数
                     val engine = MdxDictionaryEngine.open(destFile)
-                    val title = engine.title
+                    val fallbackName = displayName.substringBeforeLast('.').ifBlank { displayName }
+                    val title = if (engine.title.isBlank() || engine.title == id) {
+                        fallbackName
+                    } else {
+                        engine.title
+                    }
                     val entryCount = engine.numEntries
                     val sizeBytes = destFile.length()
 
@@ -221,6 +236,57 @@ object MdxDictionaryManager {
         }
     }
 
+    /**
+     * 支持单选或多选导入（可一次选中 .mdx 词库及其配套 .css 样式，自动按同名优先绑定）。
+     */
+    suspend fun importFiles(context: Context, uris: List<Uri>): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                ensureLoaded(context)
+                val appCtx = context.applicationContext
+                if (uris.isEmpty()) error("未选择文件")
+
+                val named = uris.map { uri -> uri to (resolveDisplayName(appCtx, uri) ?: "") }
+                val mdxUris = named.filter { it.second.endsWith(".mdx", ignoreCase = true) }
+                val cssUris = named.filter { it.second.endsWith(".css", ignoreCase = true) }
+
+                if (mdxUris.isEmpty() && cssUris.isEmpty()) {
+                    error("请选择后缀为 .mdx 的词典文件或 .css 样式文件")
+                }
+
+                val importedTitles = mutableListOf<String>()
+                var cssCount = 0
+                var lastCssMsg: String? = null
+                var firstError: Throwable? = null
+
+                for ((uri, _) in mdxUris) {
+                    importMdx(appCtx, uri)
+                        .onSuccess { importedTitles.add(it.title) }
+                        .onFailure { if (firstError == null) firstError = it }
+                }
+                for ((uri, _) in cssUris) {
+                    importCss(appCtx, uri, targetDictionaryId = null)
+                        .onSuccess { msg ->
+                            cssCount++
+                            lastCssMsg = msg
+                        }
+                        .onFailure { if (firstError == null) firstError = it }
+                }
+
+                when {
+                    importedTitles.size == 1 && cssCount == 0 ->
+                        "已导入「${importedTitles.first()}」"
+                    importedTitles.isNotEmpty() && cssCount > 0 ->
+                        "已导入 ${importedTitles.size} 本词典与 $cssCount 份样式"
+                    importedTitles.size > 1 ->
+                        "已导入 ${importedTitles.size} 本词典"
+                    cssCount > 0 ->
+                        lastCssMsg ?: "已导入 $cssCount 份样式"
+                    else -> throw (firstError ?: IllegalStateException("导入词库失败"))
+                }
+            }
+        }
+
     fun clearDictionaryCss(context: Context, dictionaryId: String) {
         ensureLoaded(context)
         val appCtx = context.applicationContext
@@ -259,6 +325,35 @@ object MdxDictionaryManager {
         persist(context, updated)
     }
 
+    fun togglePreferredDictionary(context: Context, dictionaryId: String) {
+        ensureLoaded(context)
+        val appCtx = context.applicationContext
+        val nextId = if (_preferredDictionaryId.value == dictionaryId) null else dictionaryId
+        val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (nextId != null) {
+            prefs.edit().putString(KEY_PREFERRED_ID, nextId).apply()
+        } else {
+            prefs.edit().remove(KEY_PREFERRED_ID).apply()
+        }
+        _preferredDictionaryId.value = nextId
+    }
+
+    fun reorderDictionaries(context: Context, orderedIds: List<String>) {
+        ensureLoaded(context)
+        val byId = _dictionaries.value.associateBy { it.id }
+        val reordered = buildList {
+            for (id in orderedIds) {
+                byId[id]?.let { add(it) }
+            }
+            for (entry in _dictionaries.value) {
+                if (entry.id !in orderedIds) add(entry)
+            }
+        }
+        if (reordered != _dictionaries.value) {
+            persist(context, reordered)
+        }
+    }
+
     fun deleteDictionary(context: Context, dictionaryId: String) {
         ensureLoaded(context)
         val appCtx = context.applicationContext
@@ -270,7 +365,29 @@ object MdxDictionaryManager {
         runCatching { File(dir, target.mdxStoredName).delete() }
         target.cssStoredName?.let { runCatching { File(dir, it).delete() } }
         val updated = _dictionaries.value.filterNot { it.id == dictionaryId }
+        if (_preferredDictionaryId.value == dictionaryId) {
+            appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_PREFERRED_ID)
+                .apply()
+            _preferredDictionaryId.value = null
+        }
         persist(appCtx, updated)
+    }
+
+    private fun resolveOrderedEnabledDictionaries(): List<DictionaryEntry> {
+        val enabledDicts = _dictionaries.value.filter { it.enabled }
+        val prefId = _preferredDictionaryId.value
+        return if (prefId != null) {
+            val preferred = enabledDicts.firstOrNull { it.id == prefId }
+            if (preferred != null) {
+                listOf(preferred) + enabledDicts.filterNot { it.id == prefId }
+            } else {
+                enabledDicts
+            }
+        } else {
+            enabledDicts
+        }
     }
 
     suspend fun lookupAcrossDictionaries(
@@ -278,7 +395,7 @@ object MdxDictionaryManager {
         query: String
     ): List<DictionaryLookupResult> = withContext(Dispatchers.IO) {
         ensureLoaded(context)
-        val trimmed = query.trim()
+        val trimmed = MdxDictionaryEngine.cleanBasicQuery(query)
         if (trimmed.isEmpty()) return@withContext emptyList()
 
         val appCtx = context.applicationContext
@@ -291,17 +408,17 @@ object MdxDictionaryManager {
             ?.let { runCatching { it.readText(Charsets.UTF_8) }.getOrDefault("") }
             .orEmpty()
 
-        val enabledDicts = _dictionaries.value.filter { it.enabled }
-        val results = ArrayList<DictionaryLookupResult>(enabledDicts.size)
+        val orderedDicts = resolveOrderedEnabledDictionaries()
+        val results = ArrayList<DictionaryLookupResult>(orderedDicts.size)
 
-        for (entry in enabledDicts) {
+        for (entry in orderedDicts) {
             val engine = getOrOpenEngine(dir, entry) ?: continue
             val match = runCatching { engine.lookup(trimmed) }.getOrNull() ?: continue
-            val cssText = entry.cssStoredName
+            val customCss = entry.cssStoredName
                 ?.let { File(dir, it) }
                 ?.takeIf { it.exists() }
                 ?.let { runCatching { it.readText(Charsets.UTF_8) }.getOrNull() }
-                ?: defaultCssContent
+            val cssText = customCss ?: defaultCssContent
 
             results.add(
                 DictionaryLookupResult(
@@ -310,9 +427,43 @@ object MdxDictionaryManager {
                     queriedWord = match.queriedWord,
                     matchedWord = match.matchedWord,
                     html = match.html,
-                    cssText = cssText
+                    cssText = cssText,
+                    hasCustomCss = cssText.isNotBlank()
                 )
             )
+        }
+        results
+    }
+
+    /**
+     * 跨所有已启用词典按优先级前缀联想，去重后返回候选词列表。
+     */
+    suspend fun suggestAcrossDictionaries(
+        context: Context,
+        prefix: String,
+        limit: Int = 16
+    ): List<String> = withContext(Dispatchers.IO) {
+        ensureLoaded(context)
+        val trimmed = MdxDictionaryEngine.cleanBasicQuery(prefix)
+        if (trimmed.isEmpty() || limit <= 0) return@withContext emptyList()
+
+        val appCtx = context.applicationContext
+        val dir = getDictDir(appCtx)
+        val orderedDicts = resolveOrderedEnabledDictionaries()
+        val results = ArrayList<String>(limit)
+        val seenLower = HashSet<String>(limit * 2)
+
+        for (entry in orderedDicts) {
+            if (results.size >= limit) break
+            val engine = getOrOpenEngine(dir, entry) ?: continue
+            val hits = runCatching { engine.suggestPrefix(trimmed, limit) }.getOrDefault(emptyList())
+            for (word in hits) {
+                val key = word.lowercase(java.util.Locale.ROOT)
+                if (seenLower.add(key)) {
+                    results.add(word)
+                    if (results.size >= limit) break
+                }
+            }
         }
         results
     }

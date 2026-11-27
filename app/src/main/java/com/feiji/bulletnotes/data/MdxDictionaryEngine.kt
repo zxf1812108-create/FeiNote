@@ -84,7 +84,7 @@ class MdxDictionaryEngine private constructor(
     }
 
     fun lookup(rawQuery: String): LookupMatch? {
-        val cleaned = rawQuery.trim().trim('\uFEFF', '\u200B')
+        val cleaned = cleanBasicQuery(rawQuery)
         if (cleaned.isEmpty()) return null
 
         val candidates = buildLookupCandidates(cleaned)
@@ -99,6 +99,93 @@ class MdxDictionaryEngine private constructor(
             }
         }
         return null
+    }
+
+    /**
+     * 前缀联想搜索：按词头索引块快速定位起始位置并按需扫描邻近块，返回最多 limit 个候选词头。
+     */
+    fun suggestPrefix(rawPrefix: String, limit: Int = 12): List<String> {
+        val cleaned = cleanBasicQuery(rawPrefix)
+        if (cleaned.isEmpty() || keyBlocks.isEmpty() || limit <= 0) return emptyList()
+
+        val prefixLower = cleaned.lowercase(Locale.ROOT)
+        val prefixStripped = stripForKey(cleaned)
+        val startBlockIdx = findPrefixStartBlockIndex(prefixLower, prefixStripped)
+        if (startBlockIdx !in keyBlocks.indices) return emptyList()
+
+        val exactPrefixHits = LinkedHashSet<String>(limit)
+        val strippedPrefixHits = LinkedHashSet<String>(limit)
+        val seenLower = HashSet<String>(limit * 2)
+
+        // 从命中的前一块开始最多扫描 6 个连续词头块，既覆盖跨块边界又保证毫秒级响应
+        val firstScan = (startBlockIdx - 1).coerceAtLeast(0)
+        val lastScan = (startBlockIdx + 5).coerceAtMost(keyBlocks.lastIndex)
+
+        for (bIdx in firstScan..lastScan) {
+            val block = keyBlocks[bIdx]
+            val entries = readKeyBlockEntries(block)
+            var passedBlock = false
+            for (entry in entries) {
+                val word = entry.word.trim()
+                if (word.isEmpty()) continue
+                val wordLower = word.lowercase(Locale.ROOT)
+                val wordStripped = if (stripKey && prefixStripped.isNotEmpty()) stripForKey(word) else ""
+
+                val isExactPrefix = wordLower.startsWith(prefixLower)
+                val isStrippedPrefix = !isExactPrefix &&
+                    prefixStripped.isNotEmpty() &&
+                    wordStripped.startsWith(prefixStripped)
+
+                if (isExactPrefix || isStrippedPrefix) {
+                    if (seenLower.add(wordLower)) {
+                        if (isExactPrefix) {
+                            exactPrefixHits.add(word)
+                        } else {
+                            strippedPrefixHits.add(word)
+                        }
+                        if (exactPrefixHits.size >= limit) break
+                    }
+                } else if (exactPrefixHits.isNotEmpty() || strippedPrefixHits.isNotEmpty()) {
+                    val pastLower = wordLower > prefixLower && !wordLower.startsWith(prefixLower)
+                    val pastStripped = prefixStripped.isEmpty() ||
+                        (wordStripped > prefixStripped && !wordStripped.startsWith(prefixStripped))
+                    if (pastLower && pastStripped) {
+                        passedBlock = true
+                        break
+                    }
+                }
+            }
+            if (exactPrefixHits.size >= limit || passedBlock) break
+        }
+
+        val combined = ArrayList<String>(limit)
+        for (w in exactPrefixHits) {
+            if (combined.size < limit) combined.add(w)
+        }
+        for (w in strippedPrefixHits) {
+            if (combined.size < limit) combined.add(w)
+        }
+        return combined
+    }
+
+    private fun findPrefixStartBlockIndex(prefixLower: String, prefixStripped: String): Int {
+        if (keyBlocks.isEmpty()) return -1
+        // 先找首个可能包含此前缀的块
+        if (stripKey && prefixStripped.isNotEmpty()) {
+            for (i in keyBlocks.indices) {
+                val b = keyBlocks[i]
+                if (b.lastStripped >= prefixStripped || b.lastStripped.startsWith(prefixStripped)) {
+                    return i
+                }
+            }
+        }
+        for (i in keyBlocks.indices) {
+            val b = keyBlocks[i]
+            if (b.lastLower >= prefixLower || b.lastLower.startsWith(prefixLower)) {
+                return i
+            }
+        }
+        return -1
     }
 
     private fun lookupExactWithRedirect(word: String, maxHops: Int): Pair<String, String>? {
@@ -891,6 +978,54 @@ class MdxDictionaryEngine private constructor(
                 .replace("&amp;", "&")
         }
 
+        private val edgePunctRegex = Regex(
+            """^[\s\p{Punct}《》「」『』【】（）()、，。！？；：""''—–…·•·]+|[\s\p{Punct}《》「」『』【】（）()、，。！？；：""''—–…·•·]+$"""
+        )
+        private val softCharsRegex = Regex("""[\u00AD\u200B\u200C\u200D\uFEFF]""")
+        private val multiSpaceRegex = Regex("""\s+""")
+        private val cjkWordRegex = Regex("""^[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]{1,8}$""")
+        private val englishWordTokenRegex = Regex("""^[A-Za-z]+(?:[-'’][A-Za-z]+)*$""")
+
+        fun cleanBasicQuery(raw: String): String {
+            return softCharsRegex.replace(raw, "")
+                .replace('’', '\'')
+                .replace('‘', '\'')
+                .trim()
+                .let { multiSpaceRegex.replace(it, " ") }
+        }
+
+        /**
+         * 选词过滤：
+         * - 清理软连字符与首尾标点，拒绝换行或整句；
+         * - 支持 1~8 个汉字的中文单字/词语/成语；
+         * - 支持英文单词、连字符词或最多 3 词短语。
+         */
+        fun sanitizeSelectionQuery(raw: String): String? {
+            if (raw.contains('\n') || raw.contains('\r')) return null
+            val strippedSoft = softCharsRegex.replace(raw, "")
+                .replace('’', '\'')
+                .replace('‘', '\'')
+                .trim()
+            if (strippedSoft.isEmpty()) return null
+            val cleaned = edgePunctRegex.replace(strippedSoft, "")
+                .let { multiSpaceRegex.replace(it, " ") }
+                .trim()
+            if (cleaned.isEmpty() || cleaned.length > 64) return null
+
+            // 中文：1~8 个纯汉字
+            if (cjkWordRegex.matches(cleaned)) {
+                return cleaned
+            }
+
+            // 英文：单词、连字符词或最多 3 词短语
+            val tokens = cleaned.split(' ').filter { it.isNotEmpty() }
+            if (tokens.size in 1..3 && tokens.all { englishWordTokenRegex.matches(it) }) {
+                return tokens.joinToString(" ")
+            }
+
+            return null
+        }
+
         private fun buildLookupCandidates(query: String): List<String> {
             val out = LinkedHashSet<String>()
             fun add(v: String) {
@@ -898,61 +1033,88 @@ class MdxDictionaryEngine private constructor(
                 if (trimmed.isNotEmpty()) out.add(trimmed)
             }
 
-            add(query)
-            val lower = query.lowercase(Locale.ROOT)
+            val normalized = edgePunctRegex.replace(cleanBasicQuery(query), "").trim()
+            val effective = normalized.ifEmpty { cleanBasicQuery(query) }
+            add(effective)
+            val lower = effective.lowercase(Locale.ROOT)
             add(lower)
             if (lower.length > 1) {
                 add(lower.replaceFirstChar { it.uppercase(Locale.ROOT) })
             }
 
-            // 仅对纯英文单词生成常见词形还原候选（复数、三单、过去式、现在分词、比较级等）
-            if (lower.length >= 3 && lower.all { it in 'a'..'z' || it == '\'' || it == '-' }) {
-                if (lower.endsWith("'s") || lower.endsWith("’s")) {
-                    add(lower.dropLast(2))
+            // 仅对纯英文单词（或含撇号/连字符词）生成完整词形还原候选
+            if (lower.length >= 2 && lower.all { it in 'a'..'z' || it == '\'' || it == '-' }) {
+                // 所有格 's / 末尾撇号
+                val baseWord = when {
+                    lower.endsWith("'s") -> lower.dropLast(2).also { add(it) }
+                    lower.endsWith("'") -> lower.dropLast(1).also { add(it) }
+                    else -> lower
                 }
-                if (lower.endsWith("ies") && lower.length > 4) {
-                    add(lower.dropLast(3) + "y")
+
+                // 复数 / 第三人称单数 (-ies / -ves / -es / -s)
+                if (baseWord.endsWith("ies") && baseWord.length > 4) {
+                    add(baseWord.dropLast(3) + "y")
                 }
-                if (lower.endsWith("es") && lower.length > 3) {
-                    add(lower.dropLast(2))
+                if (baseWord.endsWith("ves") && baseWord.length > 4) {
+                    val stem = baseWord.dropLast(3)
+                    add(stem + "f")
+                    add(stem + "fe")
                 }
-                if (lower.endsWith("s") && !lower.endsWith("ss") && lower.length > 3) {
-                    add(lower.dropLast(1))
+                if (baseWord.endsWith("es") && baseWord.length > 3) {
+                    add(baseWord.dropLast(2))
                 }
-                if (lower.endsWith("ied") && lower.length > 4) {
-                    add(lower.dropLast(3) + "y")
+                if (baseWord.endsWith("s") && !baseWord.endsWith("ss") && baseWord.length > 3) {
+                    add(baseWord.dropLast(1))
                 }
-                if (lower.endsWith("ed") && lower.length > 3) {
-                    val stem = lower.dropLast(2)
+
+                // 过去式 / 过去分词 (-ied / -ed / 双写辅音还原)
+                if (baseWord.endsWith("ied") && baseWord.length > 4) {
+                    add(baseWord.dropLast(3) + "y")
+                }
+                if (baseWord.endsWith("ed") && baseWord.length > 3) {
+                    val stem = baseWord.dropLast(2)
                     add(stem)
                     add(stem + "e")
                     if (stem.length >= 3 && stem[stem.lastIndex] == stem[stem.lastIndex - 1]) {
                         add(stem.dropLast(1))
                     }
                 }
-                if (lower.endsWith("ing") && lower.length > 4) {
-                    val stem = lower.dropLast(3)
+
+                // 进行时 (-ying -> -ie / -ing / 去 e / 双写辅音还原)
+                if (baseWord.endsWith("ying") && baseWord.length > 5) {
+                    add(baseWord.dropLast(4) + "ie")
+                }
+                if (baseWord.endsWith("ing") && baseWord.length > 4) {
+                    val stem = baseWord.dropLast(3)
                     add(stem)
                     add(stem + "e")
                     if (stem.length >= 3 && stem[stem.lastIndex] == stem[stem.lastIndex - 1]) {
                         add(stem.dropLast(1))
                     }
                 }
-                if (lower.endsWith("ier") && lower.length > 4) {
-                    add(lower.dropLast(3) + "y")
+
+                // 比较级 / 最高级 (-ier / -er / -iest / -est / 双写辅音还原)
+                if (baseWord.endsWith("ier") && baseWord.length > 4) {
+                    add(baseWord.dropLast(3) + "y")
                 }
-                if (lower.endsWith("er") && lower.length > 4) {
-                    val stem = lower.dropLast(2)
+                if (baseWord.endsWith("er") && baseWord.length > 4) {
+                    val stem = baseWord.dropLast(2)
                     add(stem)
                     add(stem + "e")
+                    if (stem.length >= 3 && stem[stem.lastIndex] == stem[stem.lastIndex - 1]) {
+                        add(stem.dropLast(1))
+                    }
                 }
-                if (lower.endsWith("iest") && lower.length > 5) {
-                    add(lower.dropLast(4) + "y")
+                if (baseWord.endsWith("iest") && baseWord.length > 5) {
+                    add(baseWord.dropLast(4) + "y")
                 }
-                if (lower.endsWith("est") && lower.length > 5) {
-                    val stem = lower.dropLast(3)
+                if (baseWord.endsWith("est") && baseWord.length > 5) {
+                    val stem = baseWord.dropLast(3)
                     add(stem)
                     add(stem + "e")
+                    if (stem.length >= 3 && stem[stem.lastIndex] == stem[stem.lastIndex - 1]) {
+                        add(stem.dropLast(1))
+                    }
                 }
             }
             return out.toList()

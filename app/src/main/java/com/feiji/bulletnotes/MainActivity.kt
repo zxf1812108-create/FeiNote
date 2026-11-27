@@ -3,6 +3,7 @@ package com.feiji.bulletnotes
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +24,7 @@ import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
 import com.feiji.bulletnotes.data.MdxDictionaryManager
 import com.feiji.bulletnotes.ui.BulletNotesScreen
 import com.feiji.bulletnotes.ui.DictionaryLookupDialog
+import com.feiji.bulletnotes.ui.DictionaryVolumeKeyDispatcher
 import com.feiji.bulletnotes.ui.MinimalTextToolbarHost
 import com.feiji.bulletnotes.ui.NoteViewModel
 import com.feiji.bulletnotes.ui.theme.FeiJiTheme
@@ -89,6 +91,23 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         viewModel.onAppForegroundChanged(false)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val handler = DictionaryVolumeKeyDispatcher.onVolumePage
+        if (handler != null && (
+                event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+                event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+            )
+        ) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                val direction = if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) -1 else 1
+                if (handler(direction)) return true
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 }
 

@@ -1,5 +1,6 @@
 package com.feiji.bulletnotes.ui
 
+import androidx.compose.foundation.MutatorMutex
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,6 +11,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.contextmenu.data.TextContextMenuItem
+import androidx.compose.foundation.text.contextmenu.data.TextContextMenuKeys
+import androidx.compose.foundation.text.contextmenu.data.TextContextMenuSession
+import androidx.compose.foundation.text.contextmenu.provider.LocalTextContextMenuDropdownProvider
+import androidx.compose.foundation.text.contextmenu.provider.LocalTextContextMenuToolbarProvider
+import androidx.compose.foundation.text.contextmenu.provider.TextContextMenuDataProvider
+import androidx.compose.foundation.text.contextmenu.provider.TextContextMenuProvider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -23,6 +31,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.TextToolbar
@@ -38,6 +48,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.feiji.bulletnotes.data.MdxDictionaryEngine
+import kotlinx.coroutines.CompletableDeferred
 import kotlin.math.roundToInt
 
 /**
@@ -65,8 +77,7 @@ object ActiveSelectionTracker {
 }
 
 /**
- * 极简 5 项自定义 TextToolbar（仅保留：剪切、复制、粘贴、全选、翻译），
- * 接管 Android 系统原生 ActionMode，过滤第三方 App 与 ROM 注入的冗杂菜单项。
+ * 兼容旧版 LocalTextToolbar 的状态容器（与 Compose 1.9 新版 TextContextMenuProvider 双轨接管）。
  */
 class MinimalTextToolbarState : TextToolbar {
     var isVisible by mutableStateOf(false)
@@ -109,77 +120,200 @@ class MinimalTextToolbarState : TextToolbar {
     }
 }
 
+private data class ActiveContextMenuRequest(
+    val session: TextContextMenuSession,
+    val dataProvider: TextContextMenuDataProvider
+)
+
+/**
+ * Compose Foundation 1.9+ 官方新版文本菜单通道的自定义实现：
+ * 彻底接管 LocalTextContextMenuToolbarProvider / DropdownProvider，
+ * 阻止系统默认 AndroidTextContextMenuToolbarProvider 弹出原生 ActionMode 悬浮菜单。
+ */
+private class MinimalTextContextMenuProvider : TextContextMenuProvider {
+    private val mutatorMutex = MutatorMutex()
+    var activeRequest by mutableStateOf<ActiveContextMenuRequest?>(null)
+        private set
+
+    override suspend fun showTextContextMenu(dataProvider: TextContextMenuDataProvider) {
+        val closedSignal = CompletableDeferred<Unit>()
+        val session = object : TextContextMenuSession {
+            override fun close() {
+                closedSignal.complete(Unit)
+            }
+        }
+        val request = ActiveContextMenuRequest(session = session, dataProvider = dataProvider)
+        mutatorMutex.mutate {
+            try {
+                activeRequest = request
+                closedSignal.await()
+            } finally {
+                if (activeRequest === request) {
+                    activeRequest = null
+                }
+            }
+        }
+    }
+}
+
 private data class ToolbarActionItem(
     val label: String,
     val onClick: () -> Unit
 )
 
+/**
+ * 极简 5 项选区菜单宿主（仅保留：剪切、复制、粘贴、全选、翻译）：
+ * - 同时接管 Compose 1.9 默认启用的 LocalTextContextMenuToolbarProvider / DropdownProvider
+ *   以及旧版 LocalTextToolbar，彻底屏蔽 Android 系统 ActionMode 注入的冗杂第三方菜单项。
+ */
 @Composable
 fun MinimalTextToolbarHost(
     onTranslateRequest: (String) -> Unit,
-    modifier: Modifier = Modifier,
+    modifier: Modifier = Modifier.fillMaxSize(),
     content: @Composable () -> Unit
 ) {
-    val toolbarState = remember { MinimalTextToolbarState() }
+    val contextMenuProvider = remember { MinimalTextContextMenuProvider() }
+    val legacyToolbarState = remember { MinimalTextToolbarState() }
+    var hostCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
-    CompositionLocalProvider(LocalTextToolbar provides toolbarState) {
-        Box(modifier = modifier.fillMaxSize()) {
+    CompositionLocalProvider(
+        LocalTextContextMenuToolbarProvider provides contextMenuProvider,
+        LocalTextContextMenuDropdownProvider provides contextMenuProvider,
+        LocalTextToolbar provides legacyToolbarState
+    ) {
+        Box(
+            modifier = modifier.onGloballyPositioned { hostCoordinates = it }
+        ) {
             content()
-            MinimalTextToolbarOverlay(
-                state = toolbarState,
-                onTranslateRequest = onTranslateRequest
-            )
+
+            val activeRequest = contextMenuProvider.activeRequest
+            val coords = hostCoordinates
+            if (activeRequest != null && coords != null && coords.isAttached) {
+                ContextMenuToolbarPopup(
+                    session = activeRequest.session,
+                    dataProvider = activeRequest.dataProvider,
+                    anchorCoordinates = coords,
+                    onTranslateRequest = onTranslateRequest
+                )
+            } else {
+                LegacyTextToolbarOverlay(
+                    state = legacyToolbarState,
+                    onTranslateRequest = onTranslateRequest
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun MinimalTextToolbarOverlay(
-    state: MinimalTextToolbarState,
+private fun ContextMenuToolbarPopup(
+    session: TextContextMenuSession,
+    dataProvider: TextContextMenuDataProvider,
+    anchorCoordinates: LayoutCoordinates,
     onTranslateRequest: (String) -> Unit
 ) {
-    if (!state.isVisible) return
+    val menuData = dataProvider.data()
+    val itemsByKey = remember(menuData) {
+        menuData.components
+            .filterIsInstance<TextContextMenuItem>()
+            .associateBy { it.key }
+    }
 
-    val selectedWord = ActiveSelectionTracker.selectedText.trim()
+    val lookupCandidate = MdxDictionaryEngine.sanitizeSelectionQuery(ActiveSelectionTracker.selectedText)
+    val hasCopy = itemsByKey.containsKey(TextContextMenuKeys.CopyKey)
+
     val actions = buildList {
-        state.onCutRequested?.let { action ->
-            add(ToolbarActionItem("剪切") {
-                action()
-            })
+        itemsByKey[TextContextMenuKeys.CutKey]?.let { item ->
+            add(ToolbarActionItem("剪切") { item.onClick(session) })
         }
-        state.onCopyRequested?.let { action ->
-            add(ToolbarActionItem("复制") {
-                action()
-            })
+        itemsByKey[TextContextMenuKeys.CopyKey]?.let { item ->
+            add(ToolbarActionItem("复制") { item.onClick(session) })
         }
-        state.onPasteRequested?.let { action ->
-            add(ToolbarActionItem("粘贴") {
-                action()
-            })
+        itemsByKey[TextContextMenuKeys.PasteKey]?.let { item ->
+            add(ToolbarActionItem("粘贴") { item.onClick(session) })
         }
-        state.onSelectAllRequested?.let { action ->
-            add(ToolbarActionItem("全选") {
-                action()
-            })
+        itemsByKey[TextContextMenuKeys.SelectAllKey]?.let { item ->
+            add(ToolbarActionItem("全选") { item.onClick(session) })
         }
-        if (state.onCopyRequested != null && selectedWord.isNotEmpty()) {
+        if (hasCopy && lookupCandidate != null) {
             add(ToolbarActionItem("翻译") {
-                state.hide()
-                onTranslateRequest(selectedWord)
+                session.close()
+                onTranslateRequest(lookupCandidate)
             })
         }
     }
 
     if (actions.isEmpty()) return
 
+    val localRect = runCatching {
+        if (anchorCoordinates.isAttached) dataProvider.contentBounds(anchorCoordinates) else null
+    }.getOrNull() ?: return
+
+    MinimalToolbarPopupBar(
+        actions = actions,
+        selectionRect = localRect,
+        rectIsRelativeToAnchor = true
+    )
+}
+
+@Composable
+private fun LegacyTextToolbarOverlay(
+    state: MinimalTextToolbarState,
+    onTranslateRequest: (String) -> Unit
+) {
+    if (!state.isVisible) return
+
+    val lookupCandidate = MdxDictionaryEngine.sanitizeSelectionQuery(ActiveSelectionTracker.selectedText)
+    val actions = buildList {
+        state.onCutRequested?.let { action ->
+            add(ToolbarActionItem("剪切") { action() })
+        }
+        state.onCopyRequested?.let { action ->
+            add(ToolbarActionItem("复制") { action() })
+        }
+        state.onPasteRequested?.let { action ->
+            add(ToolbarActionItem("粘贴") { action() })
+        }
+        state.onSelectAllRequested?.let { action ->
+            add(ToolbarActionItem("全选") { action() })
+        }
+        if (state.onCopyRequested != null && lookupCandidate != null) {
+            add(ToolbarActionItem("翻译") {
+                state.hide()
+                onTranslateRequest(lookupCandidate)
+            })
+        }
+    }
+
+    if (actions.isEmpty()) return
+
+    MinimalToolbarPopupBar(
+        actions = actions,
+        selectionRect = state.anchorRect,
+        rectIsRelativeToAnchor = false
+    )
+}
+
+@Composable
+private fun MinimalToolbarPopupBar(
+    actions: List<ToolbarActionItem>,
+    selectionRect: Rect,
+    rectIsRelativeToAnchor: Boolean
+) {
     val density = LocalDensity.current
     val marginPx = with(density) { 10.dp.roundToPx() }
     val aboveGapPx = with(density) { 10.dp.roundToPx() }
     val belowGapPx = with(density) { 14.dp.roundToPx() }
     val topSafePx = with(density) { 36.dp.roundToPx() }
 
-    val rect = state.anchorRect
-    val positionProvider = remember(rect, marginPx, aboveGapPx, belowGapPx, topSafePx) {
+    val positionProvider = remember(
+        selectionRect,
+        rectIsRelativeToAnchor,
+        marginPx,
+        aboveGapPx,
+        belowGapPx,
+        topSafePx
+    ) {
         object : PopupPositionProvider {
             override fun calculatePosition(
                 anchorBounds: IntRect,
@@ -187,14 +321,24 @@ private fun MinimalTextToolbarOverlay(
                 layoutDirection: LayoutDirection,
                 popupContentSize: IntSize
             ): IntOffset {
-                val centerX = ((rect.left + rect.right) / 2f).roundToInt()
+                val offsetX = if (rectIsRelativeToAnchor) anchorBounds.left else 0
+                val offsetY = if (rectIsRelativeToAnchor) anchorBounds.top else 0
+
+                val left = offsetX + selectionRect.left
+                val right = offsetX + selectionRect.right
+                val top = offsetY + selectionRect.top
+                val bottom = offsetY + selectionRect.bottom
+
+                val centerX = ((left + right) / 2f).roundToInt()
                 val desiredX = centerX - popupContentSize.width / 2
-                val maxX = (windowSize.width - popupContentSize.width - marginPx).coerceAtLeast(marginPx)
+                val maxX = (windowSize.width - popupContentSize.width - marginPx)
+                    .coerceAtLeast(marginPx)
                 val x = desiredX.coerceIn(marginPx, maxX)
 
-                val aboveY = rect.top.roundToInt() - popupContentSize.height - aboveGapPx
-                val belowY = rect.bottom.roundToInt() + belowGapPx
-                val maxY = (windowSize.height - popupContentSize.height - marginPx).coerceAtLeast(marginPx)
+                val aboveY = top.roundToInt() - popupContentSize.height - aboveGapPx
+                val belowY = bottom.roundToInt() + belowGapPx
+                val maxY = (windowSize.height - popupContentSize.height - marginPx)
+                    .coerceAtLeast(marginPx)
                 val y = if (aboveY >= topSafePx) {
                     aboveY.coerceIn(marginPx, maxY)
                 } else {

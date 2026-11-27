@@ -6,9 +6,13 @@ import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +50,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -53,9 +60,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -66,6 +85,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.feiji.bulletnotes.data.BackupManager
@@ -1348,41 +1368,55 @@ private fun CurveParameterStepperRow(
 private fun formatCurveDecimal(value: Float, digits: Int): String =
     String.format(Locale.US, "%.${digits}f", value).trimEnd('0').trimEnd('.')
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DictionarySettingsTabContent() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
     val contentColor = MaterialTheme.colorScheme.onSurface
     val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
     val hairlineBorder = MaterialTheme.colorScheme.outlineVariant
+    val cardBg = MaterialTheme.colorScheme.surface
+    val buttonBg = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.55f)
+    val dragHighlightBg = MaterialTheme.colorScheme.surfaceContainerHigh
 
     LaunchedEffect(Unit) {
         MdxDictionaryManager.ensureLoaded(context)
     }
 
     val dictionaries by MdxDictionaryManager.dictionaries.collectAsState()
+    val preferredDictId by MdxDictionaryManager.preferredDictionaryId.collectAsState()
     val defaultCssName by MdxDictionaryManager.defaultCssName.collectAsState()
     var isImporting by remember { mutableStateOf(false) }
     var pendingCssTargetDictId by remember { mutableStateOf<String?>(null) }
 
-    val mdxPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
+    val orderedDicts = remember { mutableStateListOf<MdxDictionaryManager.DictionaryEntry>() }
+    var draggingDictId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(dictionaries, draggingDictId) {
+        if (draggingDictId == null) {
+            orderedDicts.clear()
+            orderedDicts.addAll(dictionaries)
+        }
+    }
+
+    val libraryPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
             isImporting = true
             scope.launch {
-                val res = MdxDictionaryManager.importMdx(context, uri)
+                val res = MdxDictionaryManager.importFiles(context, uris)
                 isImporting = false
-                res.onSuccess { entry ->
-                    Toast.makeText(
-                        context,
-                        "已导入「${entry.title}」（${entry.entryCount} 词条）",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                res.onSuccess { msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                 }.onFailure { err ->
                     Toast.makeText(
                         context,
-                        err.message ?: "导入 MDX 词典失败",
+                        err.message ?: "导入词库失败",
                         Toast.LENGTH_LONG
                     ).show()
                 }
@@ -1417,95 +1451,58 @@ private fun DictionarySettingsTabContent() {
         }
     }
 
+    val rowHeightDp = 54.dp
+    val rowStepPx = with(density) { (rowHeightDp + 0.5.dp).toPx() }
+
     Column(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 顶部导入操作行：导入 MDX 词典 + 导入 CSS 样式
+        // 顶部栏：左侧「词典」标题 + 右侧「↑ 导入词库」按钮
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(38.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                    .border(1.dp, hairlineBorder, RoundedCornerShape(9.dp))
-                    .clickable(enabled = !isImporting) {
-                        mdxPicker.launch(arrayOf("*/*"))
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = if (isImporting) "导入中…" else "导入 MDX 词典",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = contentColor
-                )
-            }
+            Text(
+                text = "词典",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                color = contentColor,
+                modifier = Modifier.weight(1f)
+            )
 
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(38.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(1.dp, hairlineBorder, RoundedCornerShape(9.dp))
-                    .clickable(enabled = !isImporting) {
-                        pendingCssTargetDictId = null
-                        cssPicker.launch(arrayOf("*/*"))
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "导入 CSS 样式",
-                    fontSize = 13.sp,
-                    color = contentColor
-                )
-            }
-        }
-
-        if (defaultCssName != null) {
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(1.dp, hairlineBorder, RoundedCornerShape(9.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(buttonBg)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(10.dp))
+                    .clickable(enabled = !isImporting) {
+                        libraryPicker.launch(arrayOf("*/*"))
+                    }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                DictUploadTrayIcon(color = contentColor)
                 Text(
-                    text = "默认样式：$defaultCssName",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = mutedText,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = "清除",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = mutedText,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { MdxDictionaryManager.clearDefaultCss(context) }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                    text = if (isImporting) "导入中…" else "导入词库",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = contentColor,
+                    maxLines = 1
                 )
             }
         }
 
-        if (dictionaries.isEmpty()) {
+        if (orderedDicts.isEmpty()) {
             Box(
                 modifier = Modifier
-                    .weight(1f)
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(1.dp, hairlineBorder, RoundedCornerShape(12.dp))
-                    .padding(20.dp),
+                    .weight(1f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(cardBg)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(14.dp))
+                    .padding(24.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
@@ -1513,13 +1510,13 @@ private fun DictionarySettingsTabContent() {
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "暂无本地词典",
+                        text = "暂无词典",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                         color = contentColor
                     )
                     Text(
-                        text = "导入 .mdx 字典文件（可配同名 .css 样式）后，在编辑时选中文字点击「翻译」即可离线查词。",
+                        text = "点击右上角「导入词库」选择 .mdx 词典文件，导入后可为每本词典单独配置 .css 样式。",
                         style = MaterialTheme.typography.bodySmall,
                         color = mutedText,
                         textAlign = TextAlign.Center
@@ -1527,111 +1524,244 @@ private fun DictionarySettingsTabContent() {
                 }
             }
         } else {
-            LazyColumn(
+            Column(
                 modifier = Modifier
+                    .fillMaxWidth()
                     .weight(1f)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(dictionaries, key = { it.id }) { dict ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(MaterialTheme.colorScheme.surface)
-                            .border(1.dp, hairlineBorder, RoundedCornerShape(11.dp))
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = dict.enabled,
-                                onCheckedChange = { checked ->
-                                    MdxDictionaryManager.setDictionaryEnabled(context, dict.id, checked)
-                                },
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = dict.title,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (dict.enabled) contentColor else mutedText,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "${dict.entryCount} 词条 · ${formatFileSize(dict.fileSizeBytes)}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = mutedText,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                // 统一圆角分组卡片：每本词典单行展示，支持拖拽排序、点选优先词典、单独配/换样式、删除
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(cardBg)
+                        .border(1.dp, hairlineBorder, RoundedCornerShape(14.dp))
+                ) {
+                    orderedDicts.forEachIndexed { index, dict ->
+                        key(dict.id) {
+                            if (index > 0) {
+                                HorizontalDivider(
+                                    thickness = 0.5.dp,
+                                    color = hairlineBorder.copy(alpha = 0.65f)
                                 )
                             }
-                        }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = dict.cssFileName?.let { "样式：$it" }
-                                    ?: defaultCssName?.let { "样式：默认（$it）" }
-                                    ?: "样式：内置默认",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = mutedText,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
+                            val isDragging = draggingDictId == dict.id
+                            val isPreferred = dict.id == preferredDictId
+                            val hasCss = dict.cssFileName != null
 
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(rowHeightDp)
+                                    .zIndex(if (isDragging) 10f else 0f)
+                                    .graphicsLayer {
+                                        translationY = if (isDragging) dragOffsetY else 0f
+                                    }
+                                    .background(if (isDragging) dragHighlightBg else Color.Transparent)
+                                    .padding(start = 6.dp, end = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = if (dict.cssFileName != null) "换CSS" else "配CSS",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = contentColor,
+                                // 左侧 6 点拖拽手柄
+                                Box(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable(enabled = !isImporting) {
-                                            pendingCssTargetDictId = dict.id
-                                            cssPicker.launch(arrayOf("*/*"))
+                                        .width(26.dp)
+                                        .fillMaxHeight()
+                                        .pointerInput(dict.id) {
+                                            detectDragGestures(
+                                                onDragStart = {
+                                                    draggingDictId = dict.id
+                                                    dragOffsetY = 0f
+                                                    haptic.performHapticFeedback(
+                                                        HapticFeedbackType.LongPress
+                                                    )
+                                                },
+                                                onDragEnd = {
+                                                    val finalIds = orderedDicts.map { it.id }
+                                                    draggingDictId = null
+                                                    dragOffsetY = 0f
+                                                    MdxDictionaryManager.reorderDictionaries(
+                                                        context,
+                                                        finalIds
+                                                    )
+                                                },
+                                                onDragCancel = {
+                                                    val finalIds = orderedDicts.map { it.id }
+                                                    draggingDictId = null
+                                                    dragOffsetY = 0f
+                                                    MdxDictionaryManager.reorderDictionaries(
+                                                        context,
+                                                        finalIds
+                                                    )
+                                                },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    dragOffsetY += dragAmount.y
+                                                    var curIdx = orderedDicts.indexOfFirst {
+                                                        it.id == dict.id
+                                                    }
+                                                    if (curIdx < 0) return@detectDragGestures
+
+                                                    while (
+                                                        dragOffsetY > rowStepPx * 0.52f &&
+                                                        curIdx < orderedDicts.lastIndex
+                                                    ) {
+                                                        val item = orderedDicts.removeAt(curIdx)
+                                                        orderedDicts.add(curIdx + 1, item)
+                                                        curIdx++
+                                                        dragOffsetY -= rowStepPx
+                                                        haptic.performHapticFeedback(
+                                                            HapticFeedbackType.TextHandleMove
+                                                        )
+                                                    }
+                                                    while (
+                                                        dragOffsetY < -rowStepPx * 0.52f &&
+                                                        curIdx > 0
+                                                    ) {
+                                                        val item = orderedDicts.removeAt(curIdx)
+                                                        orderedDicts.add(curIdx - 1, item)
+                                                        curIdx--
+                                                        dragOffsetY += rowStepPx
+                                                        haptic.performHapticFeedback(
+                                                            HapticFeedbackType.TextHandleMove
+                                                        )
+                                                    }
+
+                                                    val minY = if (curIdx == 0) 0f else -rowStepPx
+                                                    val maxY = if (curIdx == orderedDicts.lastIndex) {
+                                                        0f
+                                                    } else {
+                                                        rowStepPx
+                                                    }
+                                                    dragOffsetY = dragOffsetY.coerceIn(minY, maxY)
+                                                }
+                                            )
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    DictDragDotsIcon(color = mutedText.copy(alpha = 0.65f))
+                                }
+
+                                // 词典图标（[A] / ✓）+ 词典名称，点击切换优先词典
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            MdxDictionaryManager.togglePreferredDictionary(
+                                                context,
+                                                dict.id
+                                            )
                                         }
-                                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                                )
-                                if (dict.cssFileName != null) {
+                                        .padding(horizontal = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier.size(20.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isPreferred) {
+                                            DictCheckmarkIcon(color = contentColor)
+                                        } else {
+                                            DictBookAIcon(color = mutedText.copy(alpha = 0.85f))
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
                                     Text(
-                                        text = "清CSS",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = mutedText,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .clickable {
-                                                MdxDictionaryManager.clearDictionaryCss(context, dict.id)
-                                            }
-                                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                                        text = dict.title,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Normal,
+                                        color = contentColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                Text(
-                                    text = "删除",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.error,
+
+                                // 单本词典样式按钮（</> 样式 / </> 换样式；长按已绑定样式可清除）
+                                Row(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .combinedClickable(
+                                            enabled = !isImporting,
+                                            onClick = {
+                                                pendingCssTargetDictId = dict.id
+                                                cssPicker.launch(arrayOf("*/*"))
+                                            },
+                                            onLongClick = {
+                                                if (hasCss) {
+                                                    MdxDictionaryManager.clearDictionaryCss(
+                                                        context,
+                                                        dict.id
+                                                    )
+                                                    Toast.makeText(
+                                                        context,
+                                                        "已清除「${dict.title}」的自定义样式",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            }
+                                        )
+                                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    DictCodeStyleIcon(color = mutedText.copy(alpha = 0.85f))
+                                    Text(
+                                        text = if (hasCss) "换样式" else "样式",
+                                        fontSize = 13.sp,
+                                        color = mutedText,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+
+                                // 删除按钮
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(RoundedCornerShape(8.dp))
                                         .clickable {
                                             MdxDictionaryManager.deleteDictionary(context, dict.id)
-                                        }
-                                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                                )
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    DictTrashIcon(color = mutedText.copy(alpha = 0.85f))
+                                }
                             }
                         }
+                    }
+                }
+
+                if (defaultCssName != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(cardBg)
+                            .border(1.dp, hairlineBorder, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "通用样式：$defaultCssName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = mutedText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "清除",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = mutedText,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { MdxDictionaryManager.clearDefaultCss(context) }
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
                     }
                 }
             }
@@ -1639,11 +1769,197 @@ private fun DictionarySettingsTabContent() {
     }
 }
 
-private fun formatFileSize(bytes: Long): String {
-    return when {
-        bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
-        bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
-        else -> "$bytes B"
+@Composable
+private fun DictUploadTrayIcon(color: Color) {
+    Canvas(modifier = Modifier.size(15.dp)) {
+        val sw = 1.4.dp.toPx()
+        val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val w = size.width
+        val h = size.height
+        // 向上箭头竖杆
+        drawLine(
+            color = color,
+            start = Offset(w * 0.5f, h * 0.68f),
+            end = Offset(w * 0.5f, h * 0.18f),
+            strokeWidth = sw,
+            cap = StrokeCap.Round
+        )
+        // 箭头双翼
+        val arrowPath = Path().apply {
+            moveTo(w * 0.28f, h * 0.38f)
+            lineTo(w * 0.5f, h * 0.16f)
+            lineTo(w * 0.72f, h * 0.38f)
+        }
+        drawPath(arrowPath, color = color, style = stroke)
+        // 底部托盘
+        val trayPath = Path().apply {
+            moveTo(w * 0.16f, h * 0.66f)
+            lineTo(w * 0.16f, h * 0.84f)
+            lineTo(w * 0.84f, h * 0.84f)
+            lineTo(w * 0.84f, h * 0.66f)
+        }
+        drawPath(trayPath, color = color, style = stroke)
     }
 }
+
+@Composable
+private fun DictDragDotsIcon(color: Color) {
+    Canvas(modifier = Modifier.size(width = 10.dp, height = 16.dp)) {
+        val r = 1.15.dp.toPx()
+        val cols = listOf(size.width * 0.28f, size.width * 0.72f)
+        val rows = listOf(size.height * 0.2f, size.height * 0.5f, size.height * 0.8f)
+        for (cy in rows) {
+            for (cx in cols) {
+                drawCircle(color = color, radius = r, center = Offset(cx, cy))
+            }
+        }
+    }
+}
+
+@Composable
+private fun DictBookAIcon(color: Color) {
+    Canvas(modifier = Modifier.size(17.dp)) {
+        val sw = 1.3.dp.toPx()
+        val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val w = size.width
+        val h = size.height
+        // 外框（竖版词典封面轮廓）
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(w * 0.16f, h * 0.08f),
+            size = Size(w * 0.68f, h * 0.84f),
+            cornerRadius = CornerRadius(2.2.dp.toPx(), 2.2.dp.toPx()),
+            style = stroke
+        )
+        // 字母 A
+        val aPath = Path().apply {
+            moveTo(w * 0.36f, h * 0.63f)
+            lineTo(w * 0.50f, h * 0.27f)
+            lineTo(w * 0.64f, h * 0.63f)
+        }
+        drawPath(aPath, color = color, style = stroke)
+        drawLine(
+            color = color,
+            start = Offset(w * 0.41f, h * 0.52f),
+            end = Offset(w * 0.59f, h * 0.52f),
+            strokeWidth = sw,
+            cap = StrokeCap.Round
+        )
+        // 底部书脊横线
+        drawLine(
+            color = color,
+            start = Offset(w * 0.28f, h * 0.78f),
+            end = Offset(w * 0.72f, h * 0.78f),
+            strokeWidth = sw * 0.85f,
+            cap = StrokeCap.Round
+        )
+    }
+}
+
+@Composable
+private fun DictCheckmarkIcon(color: Color) {
+    Canvas(modifier = Modifier.size(17.dp)) {
+        val sw = 1.7.dp.toPx()
+        val path = Path().apply {
+            moveTo(size.width * 0.18f, size.height * 0.52f)
+            lineTo(size.width * 0.42f, size.height * 0.76f)
+            lineTo(size.width * 0.84f, size.height * 0.26f)
+        }
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+    }
+}
+
+@Composable
+private fun DictCodeStyleIcon(color: Color) {
+    Canvas(modifier = Modifier.size(15.dp)) {
+        val sw = 1.25.dp.toPx()
+        val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val w = size.width
+        val h = size.height
+        // 折角文档轮廓
+        val docPath = Path().apply {
+            moveTo(w * 0.18f, h * 0.10f)
+            lineTo(w * 0.62f, h * 0.10f)
+            lineTo(w * 0.84f, h * 0.32f)
+            lineTo(w * 0.84f, h * 0.90f)
+            lineTo(w * 0.18f, h * 0.90f)
+            close()
+        }
+        drawPath(docPath, color = color, style = stroke)
+        // 右上折角线
+        val foldPath = Path().apply {
+            moveTo(w * 0.60f, h * 0.10f)
+            lineTo(w * 0.60f, h * 0.32f)
+            lineTo(w * 0.84f, h * 0.32f)
+        }
+        drawPath(foldPath, color = color, style = stroke)
+        // <> 代码括号
+        val leftChevron = Path().apply {
+            moveTo(w * 0.44f, h * 0.50f)
+            lineTo(w * 0.31f, h * 0.62f)
+            lineTo(w * 0.44f, h * 0.74f)
+        }
+        val rightChevron = Path().apply {
+            moveTo(w * 0.58f, h * 0.50f)
+            lineTo(w * 0.71f, h * 0.62f)
+            lineTo(w * 0.58f, h * 0.74f)
+        }
+        drawPath(leftChevron, color = color, style = stroke)
+        drawPath(rightChevron, color = color, style = stroke)
+    }
+}
+
+@Composable
+private fun DictTrashIcon(color: Color) {
+    Canvas(modifier = Modifier.size(16.dp)) {
+        val sw = 1.3.dp.toPx()
+        val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val w = size.width
+        val h = size.height
+        // 桶盖顶柄
+        val handlePath = Path().apply {
+            moveTo(w * 0.38f, h * 0.24f)
+            lineTo(w * 0.38f, h * 0.14f)
+            lineTo(w * 0.62f, h * 0.14f)
+            lineTo(w * 0.62f, h * 0.24f)
+        }
+        drawPath(handlePath, color = color, style = stroke)
+        // 桶盖横线
+        drawLine(
+            color = color,
+            start = Offset(w * 0.16f, h * 0.24f),
+            end = Offset(w * 0.84f, h * 0.24f),
+            strokeWidth = sw,
+            cap = StrokeCap.Round
+        )
+        // 桶身
+        val bodyPath = Path().apply {
+            moveTo(w * 0.25f, h * 0.26f)
+            lineTo(w * 0.29f, h * 0.86f)
+            lineTo(w * 0.71f, h * 0.86f)
+            lineTo(w * 0.75f, h * 0.26f)
+        }
+        drawPath(bodyPath, color = color, style = stroke)
+        // 桶内两条竖纹
+        drawLine(
+            color = color,
+            start = Offset(w * 0.42f, h * 0.42f),
+            end = Offset(w * 0.43f, h * 0.72f),
+            strokeWidth = sw * 0.9f,
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = color,
+            start = Offset(w * 0.58f, h * 0.42f),
+            end = Offset(w * 0.57f, h * 0.72f),
+            strokeWidth = sw * 0.9f,
+            cap = StrokeCap.Round
+        )
+    }
+}
+
 
