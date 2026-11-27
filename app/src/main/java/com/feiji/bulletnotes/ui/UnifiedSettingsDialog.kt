@@ -37,7 +37,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,9 +52,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -586,7 +587,7 @@ private fun SyncSettingsTabContent(
                     fontWeight = FontWeight.SemiBold,
                     color = contentColor
                 )
-                OutlinedTextField(
+                SmartOutlinedTextField(
                     value = serverUrlInput,
                     onValueChange = {
                         serverUrlInput = it
@@ -606,7 +607,7 @@ private fun SyncSettingsTabContent(
                         color = MaterialTheme.colorScheme.error
                     )
                 }
-                OutlinedTextField(
+                SmartOutlinedTextField(
                     value = usernameInput,
                     onValueChange = { usernameInput = it },
                     label = { Text("账号", style = MaterialTheme.typography.labelMedium) },
@@ -615,7 +616,7 @@ private fun SyncSettingsTabContent(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
+                SmartOutlinedTextField(
                     value = passwordInput,
                     onValueChange = { passwordInput = it },
                     label = { Text("应用密码（留空则不上传）", style = MaterialTheme.typography.labelMedium) },
@@ -656,7 +657,7 @@ private fun SyncSettingsTabContent(
                     fontWeight = FontWeight.SemiBold,
                     color = contentColor
                 )
-                OutlinedTextField(
+                SmartOutlinedTextField(
                     value = encryptionPasswordInput,
                     onValueChange = {
                         encryptionPasswordInput = it
@@ -690,7 +691,7 @@ private fun SyncSettingsTabContent(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
+                SmartOutlinedTextField(
                     value = confirmEncryptionPasswordInput,
                     onValueChange = {
                         confirmEncryptionPasswordInput = it
@@ -1244,9 +1245,26 @@ private fun CurveParameterStepperRow(
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.Center
             ) {
+                var stepperFieldValue by remember {
+                    mutableStateOf(TextFieldValue(text, TextRange(text.length)))
+                }
+                if (stepperFieldValue.text != text) {
+                    stepperFieldValue = TextFieldValue(text, TextRange(text.length))
+                }
+                val stepperSmartSelection = remember { SmartSelectionController() }
                 BasicTextField(
-                    value = text,
-                    onValueChange = onTextChange,
+                    value = stepperFieldValue,
+                    onValueChange = { incoming ->
+                        val adjusted = stepperSmartSelection.adjustIncomingValue(
+                            previous = stepperFieldValue,
+                            incoming = incoming
+                        )
+                        val textChanged = adjusted.text != stepperFieldValue.text
+                        stepperFieldValue = adjusted
+                        if (textChanged) {
+                            onTextChange(adjusted.text)
+                        }
+                    },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
@@ -1255,7 +1273,29 @@ private fun CurveParameterStepperRow(
                         fontWeight = FontWeight.Medium
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    modifier = Modifier.fillMaxWidth()
+                    onTextLayout = { layout ->
+                        stepperSmartSelection.layout = layout
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .smartSelectionObserver(
+                                    key = label,
+                                    controller = stepperSmartSelection,
+                                    currentValue = stepperFieldValue,
+                                    onSelectionChange = { newSelection ->
+                                        stepperFieldValue = stepperFieldValue.copy(
+                                            selection = newSelection
+                                        )
+                                    }
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            innerTextField()
+                        }
+                    }
                 )
             }
 

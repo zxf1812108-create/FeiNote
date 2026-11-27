@@ -86,7 +86,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -170,6 +169,8 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     val noteDates by viewModel.noteDates.collectAsState()
     var isSearchMode by remember { mutableStateOf(false) }
     var searchText by remember { mutableStateOf("") }
+    var searchFieldValue by remember { mutableStateOf(TextFieldValue("")) }
+    val searchSmartSelection = remember { SmartSelectionController() }
     // 单击搜索图标限定搜索方框或圆点笔记，长按搜索图标限定搜索五角星笔记。
     val squareOrDotSearchFilter = remember {
         setOf(BulletType.SQUARE, BulletType.CHECKED, BulletType.BULLET_DOT)
@@ -538,15 +539,30 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                 )
                             }
                         }
+                        if (searchFieldValue.text != searchText) {
+                            searchFieldValue = TextFieldValue(searchText, TextRange(searchText.length))
+                        }
                         BasicTextField(
-                            value = searchText,
-                            onValueChange = { searchText = it },
+                            value = searchFieldValue,
+                            onValueChange = { incoming ->
+                                val adjusted = searchSmartSelection.adjustIncomingValue(
+                                    previous = searchFieldValue,
+                                    incoming = incoming
+                                )
+                                searchFieldValue = adjusted
+                                if (adjusted.text != searchText) {
+                                    searchText = adjusted.text
+                                }
+                            },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(
                                 color = MaterialTheme.colorScheme.onSurface,
                                 lineHeight = MaterialTheme.typography.bodyLarge.lineHeight
                             ),
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            onTextLayout = { layout ->
+                                searchSmartSelection.layout = layout
+                            },
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             modifier = Modifier
                                 .weight(1f)
@@ -563,7 +579,20 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Box(modifier = Modifier.weight(1f)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .smartSelectionObserver(
+                                                key = "search_bar",
+                                                controller = searchSmartSelection,
+                                                currentValue = searchFieldValue,
+                                                onSelectionChange = { newSelection ->
+                                                    searchFieldValue = searchFieldValue.copy(
+                                                        selection = newSelection
+                                                    )
+                                                }
+                                            )
+                                    ) {
                                         innerTextField()
                                     }
                                     if (searchText.isNotEmpty()) {
@@ -574,6 +603,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                                 .clip(CircleShape)
                                                 .clickable {
                                                     searchText = ""
+                                                    searchFieldValue = TextFieldValue("")
                                                     viewModel.searchNotes("", searchBulletFilter)
                                                     searchFocusRequester.requestFocus()
                                                     keyboardController?.show()
@@ -1389,7 +1419,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    OutlinedTextField(
+                    SmartOutlinedTextField(
                         value = decryptPasswordInput,
                         onValueChange = { decryptPasswordInput = it },
                         label = { Text("加密密码") },
@@ -2023,9 +2053,16 @@ fun BulletNoteRow(
                         )
                     }
                 } else {
+                    val smartSelectionController = remember(note.id, isEditing) {
+                        SmartSelectionController()
+                    }
                     BasicTextField(
                         value = editValue,
-                        onValueChange = { newValue ->
+                        onValueChange = { incoming ->
+                            val newValue = smartSelectionController.adjustIncomingValue(
+                                previous = editValue,
+                                incoming = incoming
+                            )
                             val textChanged = newValue.text != editValue.text
                             if (textChanged) {
                                 undoHistory.add(editValue.text)
@@ -2058,6 +2095,7 @@ fun BulletNoteRow(
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         onTextLayout = { layout ->
                             textLayout = layout
+                            smartSelectionController.layout = layout
                             if (layout.lineCount > 0) {
                                 firstLineHeightPx =
                                     layout.getLineBottom(0) - layout.getLineTop(0)
@@ -2068,7 +2106,18 @@ fun BulletNoteRow(
                         keyboardActions = KeyboardActions.Default,
                         decorationBox = { innerTextField ->
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                Box(modifier = Modifier.fillMaxWidth()) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .smartSelectionObserver(
+                                            key = note.id,
+                                            controller = smartSelectionController,
+                                            currentValue = editValue,
+                                            onSelectionChange = { newSelection ->
+                                                editValue = editValue.copy(selection = newSelection)
+                                            }
+                                        )
+                                ) {
                                     innerTextField()
                                 }
 
@@ -2675,9 +2724,16 @@ private fun KeywordHintCard(
                         )
                     }
                 } else {
+                    val hintSmartSelectionController = remember(hintNote.id, isEditingHint) {
+                        SmartSelectionController()
+                    }
                     BasicTextField(
                         value = hintEditValue,
-                        onValueChange = { newValue ->
+                        onValueChange = { incoming ->
+                            val newValue = hintSmartSelectionController.adjustIncomingValue(
+                                previous = hintEditValue,
+                                incoming = incoming
+                            )
                             val textChanged = newValue.text != hintEditValue.text
                             if (textChanged) {
                                 hintUndoHistory.add(hintEditValue.text)
@@ -2698,6 +2754,7 @@ private fun KeywordHintCard(
                         ),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         onTextLayout = { layout ->
+                            hintSmartSelectionController.layout = layout
                             if (layout.lineCount > 0) {
                                 firstLineHeightPx =
                                     layout.getLineBottom(0) - layout.getLineTop(0)
@@ -2714,7 +2771,22 @@ private fun KeywordHintCard(
                                         .heightIn(max = 200.dp)
                                         .verticalScroll(rememberScrollState())
                                 ) {
-                                    innerTextField()
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .smartSelectionObserver(
+                                                key = hintNote.id,
+                                                controller = hintSmartSelectionController,
+                                                currentValue = hintEditValue,
+                                                onSelectionChange = { newSelection ->
+                                                    hintEditValue = hintEditValue.copy(
+                                                        selection = newSelection
+                                                    )
+                                                }
+                                            )
+                                    ) {
+                                        innerTextField()
+                                    }
                                 }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
