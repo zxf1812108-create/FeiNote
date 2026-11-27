@@ -1,12 +1,12 @@
 package com.feiji.bulletnotes.ui
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +26,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,8 +43,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
@@ -138,29 +139,181 @@ private fun buildMarkdownAnnotatedString(
 }
 
 /**
+ * 浏览态 Markdown 坐标命中器：
+ * 统一收集当前笔记各文本块/代码块的布局坐标与排版结果，供外层手势状态机在
+ * - 单击时判断是否点中超链接；
+ * - 长按原地松手时将长按坐标精准映射回 Markdown 原文光标偏移。
+ */
+class MarkdownHitTester {
+    private sealed class Segment {
+        abstract val coordinates: LayoutCoordinates
+        abstract val layout: TextLayoutResult
+
+        class InlineText(
+            override val coordinates: LayoutCoordinates,
+            override val layout: TextLayoutResult,
+            val parsed: MarkdownParser.ParsedInline
+        ) : Segment()
+
+        class CodeText(
+            override val coordinates: LayoutCoordinates,
+            override val layout: TextLayoutResult,
+            val codeRawStart: Int,
+            val codeRawEnd: Int
+        ) : Segment()
+    }
+
+    private val segments = LinkedHashMap<String, Segment>()
+
+    fun registerInline(
+        key: String,
+        coordinates: LayoutCoordinates?,
+        layout: TextLayoutResult?,
+        parsed: MarkdownParser.ParsedInline
+    ) {
+        if (coordinates != null && layout != null) {
+            segments[key] = Segment.InlineText(coordinates, layout, parsed)
+        } else {
+            segments.remove(key)
+        }
+    }
+
+    fun registerCode(
+        key: String,
+        coordinates: LayoutCoordinates?,
+        layout: TextLayoutResult?,
+        codeRawStart: Int,
+        codeRawEnd: Int
+    ) {
+        if (coordinates != null && layout != null) {
+            segments[key] = Segment.CodeText(coordinates, layout, codeRawStart, codeRawEnd)
+        } else {
+            segments.remove(key)
+        }
+    }
+
+    fun unregister(key: String) {
+        segments.remove(key)
+    }
+
+    fun findLinkAt(containerCoords: LayoutCoordinates?, localInContainer: Offset): String? {
+        if (containerCoords == null || !containerCoords.isAttached) return null
+        for (segment in segments.values) {
+            if (segment !is Segment.InlineText) continue
+            val segCoords = segment.coordinates
+            if (!segCoords.isAttached) continue
+            val local = runCatching {
+                segCoords.localPositionOf(containerCoords, localInContainer)
+            }.getOrNull() ?: continue
+            val size = segCoords.size
+            if (local.x < 0f || local.y < 0f || local.x > size.width || local.y > size.height) {
+                continue
+            }
+            val layout = segment.layout
+            if (layout.lineCount == 0) continue
+            val line = layout.getLineForVerticalPosition(local.y).coerceIn(0, layout.lineCount - 1)
+            if (local.x < layout.getLineLeft(line) || local.x > layout.getLineRight(line)) {
+                continue
+            }
+            val displayOffset = layout.getOffsetForPosition(local)
+            val url = segment.parsed.findLinkAt(displayOffset)
+                ?: if (displayOffset > 0 && local.x < layout.getLineRight(line)) {
+                    segment.parsed.findLinkAt(displayOffset - 1)
+                } else {
+                    null
+                }
+            if (url != null) return url
+        }
+        return null
+    }
+
+    fun findRawOffsetAt(
+        containerCoords: LayoutCoordinates?,
+        localInContainer: Offset,
+        fallbackLength: Int
+    ): Int {
+        val safeLen = fallbackLength.coerceAtLeast(0)
+        if (containerCoords == null || !containerCoords.isAttached) return safeLen
+
+        var bestSegment: Segment? = null
+        var bestLocal = Offset.Zero
+        var bestVerticalDistance = Float.POSITIVE_INFINITY
+
+        for (segment in segments.values) {
+            val segCoords = segment.coordinates
+            if (!segCoords.isAttached) continue
+            val local = runCatching {
+                segCoords.localPositionOf(containerCoords, localInContainer)
+            }.getOrNull() ?: continue
+            val height = segCoords.size.height.toFloat().coerceAtLeast(1f)
+            val verticalDistance = when {
+                local.y < 0f -> -local.y
+                local.y > height -> local.y - height
+                else -> 0f
+            }
+            if (verticalDistance < bestVerticalDistance) {
+                bestVerticalDistance = verticalDistance
+                bestSegment = segment
+                bestLocal = local
+                if (verticalDistance == 0f) break
+            }
+        }
+
+        val target = bestSegment ?: return safeLen
+        val clampedX = bestLocal.x.coerceAtLeast(0f)
+        val maxY = (target.coordinates.size.height.toFloat() - 1f).coerceAtLeast(0f)
+        val clampedY = bestLocal.y.coerceIn(0f, maxY)
+        val clampedPos = Offset(clampedX, clampedY)
+
+        return when (target) {
+            is Segment.InlineText -> {
+                val displayOff = target.layout.getOffsetForPosition(clampedPos)
+                target.parsed.mapDisplayOffsetToRaw(displayOff)
+            }
+
+            is Segment.CodeText -> {
+                val displayOff = target.layout.getOffsetForPosition(clampedPos)
+                (target.codeRawStart + displayOff).coerceIn(target.codeRawStart, target.codeRawEnd)
+            }
+        }.coerceIn(0, safeLen)
+    }
+}
+
+fun openSafeMarkdownUrl(context: Context, url: String) {
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }
+}
+
+/**
  * 收起单行浏览态 Markdown 渲染：
  * - 保留正文正常字号、无序列表圆点与行内样式；
- * - 精准回报第一行高度和溢出状态，非折叠单行点击时通过 rawOffsets 还原原文光标位置。
+ * - 精准回报第一行高度和溢出状态，并向 hitTester 注册坐标映射供长按落光标与链接识别。
  */
 @Composable
 fun MarkdownCollapsedLine(
     noteId: Long,
     content: String,
     textStyle: TextStyle,
-    isCollapsedMultiLine: Boolean,
     onFirstLineHeightMeasured: (Float) -> Unit,
     onEllipsizedChanged: (Boolean) -> Unit,
-    onTap: (rawCursorOffset: Int?) -> Unit,
+    hitTester: MarkdownHitTester? = null,
     modifier: Modifier = Modifier
 ) {
     val palette = rememberMarkdownPalette()
     val parsed = remember(content) { MarkdownParser.parseCollapsedFirstLine(content) }
     val annotated = remember(parsed, palette) { buildMarkdownAnnotatedString(parsed, palette) }
 
+    val segmentKey = "collapsed_$noteId"
+    var coords by remember(noteId, content) { mutableStateOf<LayoutCoordinates?>(null) }
     var textLayout by remember(noteId, content) { mutableStateOf<TextLayoutResult?>(null) }
-    val latestCollapsed = rememberUpdatedState(isCollapsedMultiLine)
-    val latestParsed = rememberUpdatedState(parsed)
-    val latestOnTap = rememberUpdatedState(onTap)
+
+    DisposableEffect(hitTester, segmentKey) {
+        onDispose { hitTester?.unregister(segmentKey) }
+    }
 
     Text(
         text = annotated,
@@ -169,21 +322,13 @@ fun MarkdownCollapsedLine(
         overflow = TextOverflow.Ellipsis,
         modifier = modifier
             .fillMaxWidth()
-            .pointerInput(noteId) {
-                detectTapGestures(
-                    onTap = { tapOffset ->
-                        if (!latestCollapsed.value) {
-                            val displayOff = textLayout?.getOffsetForPosition(tapOffset)
-                            val rawOff = displayOff?.let { latestParsed.value.mapDisplayOffsetToRaw(it) }
-                            latestOnTap.value(rawOff)
-                        } else {
-                            latestOnTap.value(null)
-                        }
-                    }
-                )
+            .onGloballyPositioned { c ->
+                coords = c
+                hitTester?.registerInline(segmentKey, c, textLayout, parsed)
             },
         onTextLayout = { layout ->
             textLayout = layout
+            hitTester?.registerInline(segmentKey, coords, layout, parsed)
             if (layout.lineCount > 0) {
                 onFirstLineHeightMeasured(layout.getLineBottom(0) - layout.getLineTop(0))
             }
@@ -204,8 +349,7 @@ fun MarkdownPreviewText(
     emptyPlaceholder: String = " ",
     onFirstLineHeightMeasured: ((Float) -> Unit)? = null,
     onOverflowChanged: ((Boolean) -> Unit)? = null,
-    onTap: ((rawCursorOffset: Int?) -> Unit)? = null,
-    isTruncated: Boolean = false
+    hitTester: MarkdownHitTester? = null
 ) {
     val palette = rememberMarkdownPalette()
     val previewPair = remember(content, maxLines) {
@@ -218,28 +362,12 @@ fun MarkdownPreviewText(
     val parsed = previewPair.first
     val annotated = remember(parsed, palette) { buildMarkdownAnnotatedString(parsed, palette) }
 
+    val segmentKey = "preview_$maxLines"
+    var coords by remember(content, maxLines) { mutableStateOf<LayoutCoordinates?>(null) }
     var textLayout by remember(content, maxLines) { mutableStateOf<TextLayoutResult?>(null) }
-    val latestTruncated = rememberUpdatedState(isTruncated)
-    val latestParsed = rememberUpdatedState(parsed)
-    val latestOnTap = rememberUpdatedState(onTap)
 
-    val tapMod = if (onTap != null) {
-        Modifier.pointerInput(content, maxLines) {
-            detectTapGestures(
-                onTap = { tapOffset ->
-                    val handler = latestOnTap.value ?: return@detectTapGestures
-                    if (!latestTruncated.value) {
-                        val displayOff = textLayout?.getOffsetForPosition(tapOffset)
-                        val rawOff = displayOff?.let { latestParsed.value.mapDisplayOffsetToRaw(it) }
-                        handler(rawOff)
-                    } else {
-                        handler(null)
-                    }
-                }
-            )
-        }
-    } else {
-        Modifier
+    DisposableEffect(hitTester, segmentKey) {
+        onDispose { hitTester?.unregister(segmentKey) }
     }
 
     Text(
@@ -249,9 +377,13 @@ fun MarkdownPreviewText(
         overflow = TextOverflow.Ellipsis,
         modifier = modifier
             .fillMaxWidth()
-            .then(tapMod),
+            .onGloballyPositioned { c ->
+                coords = c
+                hitTester?.registerInline(segmentKey, c, textLayout, parsed)
+            },
         onTextLayout = { layout ->
             textLayout = layout
+            hitTester?.registerInline(segmentKey, coords, layout, parsed)
             if (layout.lineCount > 0) {
                 onFirstLineHeightMeasured?.invoke(layout.getLineBottom(0) - layout.getLineTop(0))
             }
@@ -263,7 +395,7 @@ fun MarkdownPreviewText(
 /**
  * 展开浏览态完整 Markdown 块级渲染：
  * - 支持 H1–H3、粗/斜/删除线、行内代码、代码块、引用块、无序列表（保留圆点）、有序列表、任务复选框、分割线、安全链接；
- * - 点击链接直接打开浏览器；点击任务复选框直接切换并写回原文；点击其他文字精确映射原文光标进入编辑。
+ * - 任务复选框支持直接单击切换并写回原文；链接点击与长按落光标由外层统一手势通过 hitTester 协调。
  */
 @Composable
 fun MarkdownExpandedContent(
@@ -271,35 +403,20 @@ fun MarkdownExpandedContent(
     content: String,
     baseTextStyle: TextStyle,
     onFirstLineHeightMeasured: (Float) -> Unit,
-    onTapToEdit: (rawCursorOffset: Int) -> Unit,
+    hitTester: MarkdownHitTester? = null,
     onToggleTask: ((updatedContent: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val palette = rememberMarkdownPalette()
     val blocks = remember(content) { MarkdownParser.parseBlocks(content) }
     val latestContent = rememberUpdatedState(content)
-    val latestOnTapToEdit = rememberUpdatedState(onTapToEdit)
     val latestOnToggleTask = rememberUpdatedState(onToggleTask)
-
-    fun openSafeUrl(url: String) {
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        }
-    }
 
     if (blocks.isEmpty()) {
         Text(
             text = " ",
             style = baseTextStyle,
-            modifier = modifier
-                .fillMaxWidth()
-                .pointerInput(noteId) {
-                    detectTapGestures(onTap = { latestOnTapToEdit.value(0) })
-                },
+            modifier = modifier.fillMaxWidth(),
             onTextLayout = { layout ->
                 if (layout.lineCount > 0) {
                     onFirstLineHeightMeasured(layout.getLineBottom(0) - layout.getLineTop(0))
@@ -315,13 +432,7 @@ fun MarkdownExpandedContent(
             this is MarkdownParser.MarkdownBlock.TaskListItem
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .pointerInput(noteId, content) {
-                detectTapGestures(
-                    onTap = { latestOnTapToEdit.value(latestContent.value.length) }
-                )
-            }
+        modifier = modifier.fillMaxWidth()
     ) {
         blocks.forEachIndexed { index, block ->
             if (index > 0) {
@@ -377,11 +488,11 @@ fun MarkdownExpandedContent(
                         fontWeight = weight
                     )
                     MarkdownInlineText(
+                        segmentKey = "b_${noteId}_$index",
                         parsed = block.inline,
                         style = headingStyle,
                         palette = palette,
-                        onOpenUrl = ::openSafeUrl,
-                        onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
+                        hitTester = hitTester,
                         onFirstLineLayout = measureFirst
                     )
                 }
@@ -406,11 +517,11 @@ fun MarkdownExpandedContent(
                         ) {
                             block.lines.forEachIndexed { lineIdx, lineInline ->
                                 MarkdownInlineText(
+                                    segmentKey = "q_${noteId}_${index}_$lineIdx",
                                     parsed = lineInline,
                                     style = baseTextStyle.copy(color = palette.quoteTextColor),
                                     palette = palette,
-                                    onOpenUrl = ::openSafeUrl,
-                                    onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
+                                    hitTester = hitTester,
                                     onFirstLineLayout = if (index == 0 && lineIdx == 0) measureFirst else null
                                 )
                             }
@@ -424,17 +535,18 @@ fun MarkdownExpandedContent(
                         fontSize = 13.5.sp,
                         lineHeight = 20.sp
                     )
+                    val codeKey = "code_${noteId}_$index"
+                    var codeCoords by remember(codeKey, block.code) { mutableStateOf<LayoutCoordinates?>(null) }
+                    var codeLayout by remember(codeKey, block.code) { mutableStateOf<TextLayoutResult?>(null) }
+                    DisposableEffect(hitTester, codeKey) {
+                        onDispose { hitTester?.unregister(codeKey) }
+                    }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(palette.codeBlockBg)
                             .border(1.dp, palette.codeBlockBorder, RoundedCornerShape(8.dp))
-                            .pointerInput(block.rawStart, block.rawEnd) {
-                                detectTapGestures(
-                                    onTap = { latestOnTapToEdit.value(block.codeRawStart) }
-                                )
-                            }
                             .padding(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         if (block.language.isNotEmpty()) {
@@ -453,7 +565,27 @@ fun MarkdownExpandedContent(
                             Text(
                                 text = block.code.ifEmpty { " " },
                                 style = codeTextStyle,
-                                onTextLayout = { layout -> measureFirst?.invoke(layout) }
+                                modifier = Modifier.onGloballyPositioned { c ->
+                                    codeCoords = c
+                                    hitTester?.registerCode(
+                                        codeKey,
+                                        c,
+                                        codeLayout,
+                                        block.codeRawStart,
+                                        block.rawEnd
+                                    )
+                                },
+                                onTextLayout = { layout ->
+                                    codeLayout = layout
+                                    hitTester?.registerCode(
+                                        codeKey,
+                                        codeCoords,
+                                        layout,
+                                        block.codeRawStart,
+                                        block.rawEnd
+                                    )
+                                    measureFirst?.invoke(layout)
+                                }
                             )
                         }
                     }
@@ -476,11 +608,11 @@ fun MarkdownExpandedContent(
                             modifier = Modifier.padding(end = 7.dp)
                         )
                         MarkdownInlineText(
+                            segmentKey = "ul_${noteId}_$index",
                             parsed = block.inline,
                             style = baseTextStyle,
                             palette = palette,
-                            onOpenUrl = ::openSafeUrl,
-                            onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
+                            hitTester = hitTester,
                             onFirstLineLayout = measureFirst,
                             modifier = Modifier.weight(1f)
                         )
@@ -501,11 +633,11 @@ fun MarkdownExpandedContent(
                             modifier = Modifier.padding(end = 6.dp)
                         )
                         MarkdownInlineText(
+                            segmentKey = "ol_${noteId}_$index",
                             parsed = block.inline,
                             style = baseTextStyle,
                             palette = palette,
-                            onOpenUrl = ::openSafeUrl,
-                            onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
+                            hitTester = hitTester,
                             onFirstLineLayout = measureFirst,
                             modifier = Modifier.weight(1f)
                         )
@@ -550,12 +682,12 @@ fun MarkdownExpandedContent(
                             )
                         }
                         MarkdownInlineText(
+                            segmentKey = "task_${noteId}_$index",
                             parsed = block.inline,
                             style = taskTextStyle,
                             palette = palette,
                             baseTextDecoration = if (block.checked) TextDecoration.LineThrough else null,
-                            onOpenUrl = ::openSafeUrl,
-                            onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
+                            hitTester = hitTester,
                             onFirstLineLayout = measureFirst,
                             modifier = Modifier.weight(1f)
                         )
@@ -564,11 +696,11 @@ fun MarkdownExpandedContent(
 
                 is MarkdownParser.MarkdownBlock.Paragraph -> {
                     MarkdownInlineText(
+                        segmentKey = "p_${noteId}_$index",
                         parsed = block.inline,
                         style = baseTextStyle,
                         palette = palette,
-                        onOpenUrl = ::openSafeUrl,
-                        onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
+                        hitTester = hitTester,
                         onFirstLineLayout = measureFirst
                     )
                 }
@@ -579,48 +711,37 @@ fun MarkdownExpandedContent(
 
 @Composable
 private fun MarkdownInlineText(
+    segmentKey: String,
     parsed: MarkdownParser.ParsedInline,
     style: TextStyle,
     palette: MarkdownRenderPalette,
     baseTextDecoration: TextDecoration? = null,
-    onOpenUrl: (String) -> Unit,
-    onTapCursor: (Int) -> Unit,
+    hitTester: MarkdownHitTester? = null,
     onFirstLineLayout: ((TextLayoutResult) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val annotated = remember(parsed, palette, baseTextDecoration) {
         buildMarkdownAnnotatedString(parsed, palette, baseTextDecoration)
     }
-    var textLayout by remember(parsed) { mutableStateOf<TextLayoutResult?>(null) }
-    val latestParsed = rememberUpdatedState(parsed)
-    val latestOnOpenUrl = rememberUpdatedState(onOpenUrl)
-    val latestOnTapCursor = rememberUpdatedState(onTapCursor)
+    var coords by remember(segmentKey, parsed) { mutableStateOf<LayoutCoordinates?>(null) }
+    var textLayout by remember(segmentKey, parsed) { mutableStateOf<TextLayoutResult?>(null) }
+
+    DisposableEffect(hitTester, segmentKey) {
+        onDispose { hitTester?.unregister(segmentKey) }
+    }
 
     Text(
         text = annotated,
         style = style,
         modifier = modifier
             .fillMaxWidth()
-            .pointerInput(parsed) {
-                detectTapGestures(
-                    onTap = { tapOffset ->
-                        val layout = textLayout
-                        if (layout != null) {
-                            val displayOffset = layout.getOffsetForPosition(tapOffset)
-                            val url = latestParsed.value.findLinkAt(displayOffset)
-                            if (url != null) {
-                                latestOnOpenUrl.value(url)
-                                return@detectTapGestures
-                            }
-                            latestOnTapCursor.value(latestParsed.value.mapDisplayOffsetToRaw(displayOffset))
-                        } else {
-                            latestOnTapCursor.value(latestParsed.value.rawEnd)
-                        }
-                    }
-                )
+            .onGloballyPositioned { c ->
+                coords = c
+                hitTester?.registerInline(segmentKey, c, textLayout, parsed)
             },
         onTextLayout = { layout ->
             textLayout = layout
+            hitTester?.registerInline(segmentKey, coords, layout, parsed)
             onFirstLineLayout?.invoke(layout)
         }
     )

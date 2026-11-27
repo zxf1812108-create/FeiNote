@@ -55,14 +55,17 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -212,7 +215,7 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     var noteForAlarm by remember { mutableStateOf<NoteEntity?>(null) }
     var showExactAlarmPermissionDialog by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
-    // 多行笔记首次点击仅展开浏览（不进入编辑），再次点击才进入编辑模式。
+    // 多行笔记单击在单行收起与展开浏览态间切换，长按原地松手进入编辑模式。
     var expandedNoteId by remember { mutableStateOf<Long?>(null) }
     // 防止连续快速点击新增提示条时重复插入多条空白笔记。
     var isCreatingFromHint by remember { mutableStateOf(false) }
@@ -941,19 +944,30 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
                                         showDatePicker = true
                                     }
                                 },
-                                onContentClick = { isCollapsedMultiLine ->
-                                    if (editingNoteId == note.id) {
-                                        closeEditor()
-                                    } else if (isCollapsedMultiLine && expandedNoteId != note.id) {
+                                canDrag = !isSearchMode,
+                                onToggleExpand = { shouldExpand ->
+                                    if (shouldExpand) {
                                         closeEditor()
                                         focusManager.clearFocus()
                                         expandedNoteId = note.id
-                                    } else {
+                                    } else if (expandedNoteId == note.id) {
                                         expandedNoteId = null
-                                        viewModel.setEditingNoteId(note.id)
                                     }
                                 },
-                                onDragStart = {
+                                onSingleLineTap = {
+                                    // 单行笔记在浏览态下单击无反应；仅当其他笔记处于编辑态时关闭其键盘。
+                                    if (editingNoteId != null && editingNoteId != note.id) {
+                                        closeEditor()
+                                    }
+                                },
+                                onEnterEdit = {
+                                    expandedNoteId = null
+                                    viewModel.setEditingNoteId(note.id)
+                                },
+                                onCloseEdit = {
+                                    closeEditor()
+                                },
+                                onDragStart = { downLocalY, wasExpanded ->
                                     if (!isSearchMode) {
                                         hoveringTrash = false
                                         closeEditor()
@@ -963,7 +977,13 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
 
                                         if (info != null) {
                                             dragAnchorTop = info.offset.toFloat()
-                                            draggingOffset = 0f
+                                            val collapsedHalfHeightPx =
+                                                with(densityForNewNoteScroll) { 20.dp.toPx() }
+                                            draggingOffset = if (wasExpanded) {
+                                                (downLocalY - collapsedHalfHeightPx).coerceAtLeast(0f)
+                                            } else {
+                                                0f
+                                            }
                                             dragStartIndex =
                                                 visibleNotes.indexOfFirst { it.id == note.id }
                                             draggingNoteId = note.id
@@ -1426,6 +1446,147 @@ fun BulletNotesScreen(viewModel: NoteViewModel, onToggleTheme: () -> Unit) {
     }
 }
 
+private const val NOTE_LONG_PRESS_TIMEOUT_MS = 350L
+
+private sealed class PreLongPressOutcome {
+    data class Tapped(val position: Offset) : PreLongPressOutcome()
+    data object Cancelled : PreLongPressOutcome()
+}
+
+/**
+ * 统一的浏览态笔记手势状态机（方案 A）：
+ * - 单击：即时回调 onTap（零双击等待延迟）；若已被子组件（如任务复选框）或滚动手势消费则自动让出；
+ * - 按住约 350ms 后轻震动进入长按就绪态（onLongPressReadyChanged(true)）：
+ *   - 继续移动手指超过 touchSlop（且 canDrag=true）→ 切换为拖动排序 / 拖到回收站；
+ *   - 原地松手（未移动）→ 回调 onLongPressEdit(downLocalOffset)，在长按位置精准落光标进入编辑。
+ */
+@Composable
+private fun Modifier.noteBrowseGestures(
+    key: Any,
+    canDrag: Boolean,
+    onLongPressReadyChanged: (Boolean) -> Unit,
+    onTap: (localOffset: Offset) -> Unit,
+    onLongPressEdit: (localOffset: Offset) -> Unit,
+    onDragStart: (downLocalOffset: Offset) -> Unit = {},
+    onDragMove: (currentLocalOffset: Offset, fallbackDeltaY: Float) -> Unit = { _, _ -> },
+    onDragEnd: (completedNormally: Boolean) -> Unit = {}
+): Modifier {
+    val haptic = LocalHapticFeedback.current
+    val latestCanDrag by rememberUpdatedState(canDrag)
+    val latestOnLongPressReadyChanged by rememberUpdatedState(onLongPressReadyChanged)
+    val latestOnTap by rememberUpdatedState(onTap)
+    val latestOnLongPressEdit by rememberUpdatedState(onLongPressEdit)
+    val latestOnDragStart by rememberUpdatedState(onDragStart)
+    val latestOnDragMove by rememberUpdatedState(onDragMove)
+    val latestOnDragEnd by rememberUpdatedState(onDragEnd)
+
+    return this.pointerInput(key) {
+        val touchSlop = viewConfiguration.touchSlop
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = true)
+            val downId = down.id
+            val downPos = down.position
+
+            var longPressTriggered = false
+            var dragStarted = false
+
+            try {
+                val preLongPressResult = withTimeoutOrNull(NOTE_LONG_PRESS_TIMEOUT_MS) {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Main)
+                        val change = event.changes.firstOrNull { it.id == downId }
+                            ?: return@withTimeoutOrNull PreLongPressOutcome.Cancelled
+
+                        if (event.changes.count { it.pressed } > 1) {
+                            return@withTimeoutOrNull PreLongPressOutcome.Cancelled
+                        }
+
+                        if (!change.pressed) {
+                            return@withTimeoutOrNull if (change.isConsumed) {
+                                PreLongPressOutcome.Cancelled
+                            } else {
+                                change.consume()
+                                PreLongPressOutcome.Tapped(change.position)
+                            }
+                        }
+
+                        if (change.isConsumed || (change.position - downPos).getDistance() > touchSlop) {
+                            return@withTimeoutOrNull PreLongPressOutcome.Cancelled
+                        }
+                    }
+                }
+
+                when (preLongPressResult) {
+                    is PreLongPressOutcome.Tapped -> {
+                        latestOnTap(preLongPressResult.position)
+                        return@awaitEachGesture
+                    }
+
+                    PreLongPressOutcome.Cancelled -> {
+                        return@awaitEachGesture
+                    }
+
+                    null -> {
+                        longPressTriggered = true
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnLongPressReadyChanged(true)
+                    }
+                }
+
+                var lastPos = downPos
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == downId }
+                    if (change == null) {
+                        if (dragStarted) {
+                            latestOnDragEnd(false)
+                            dragStarted = false
+                        }
+                        break
+                    }
+
+                    if (!change.pressed) {
+                        change.consume()
+                        if (dragStarted) {
+                            latestOnDragEnd(true)
+                            dragStarted = false
+                        } else {
+                            latestOnLongPressReadyChanged(false)
+                            longPressTriggered = false
+                            latestOnLongPressEdit(downPos)
+                        }
+                        break
+                    }
+
+                    change.consume()
+                    val pos = change.position
+                    val deltaY = pos.y - lastPos.y
+
+                    if (!dragStarted) {
+                        if (latestCanDrag && (pos - downPos).getDistance() > touchSlop) {
+                            dragStarted = true
+                            latestOnLongPressReadyChanged(false)
+                            longPressTriggered = false
+                            latestOnDragStart(downPos)
+                            latestOnDragMove(pos, pos.y - downPos.y)
+                        }
+                    } else {
+                        latestOnDragMove(pos, deltaY)
+                    }
+                    lastPos = pos
+                }
+            } finally {
+                if (longPressTriggered) {
+                    latestOnLongPressReadyChanged(false)
+                }
+                if (dragStarted) {
+                    latestOnDragEnd(false)
+                }
+            }
+        }
+    }
+}
+
 /**
  * 单条子弹笔记组件
  */
@@ -1435,6 +1596,7 @@ fun BulletNoteRow(
     note: NoteEntity,
     isEditing: Boolean,
     isExpanded: Boolean,
+    canDrag: Boolean,
     listState: LazyListState,
     listViewportBounds: Rect?,
     keywordHintIndex: KeywordHintIndex,
@@ -1442,11 +1604,14 @@ fun BulletNoteRow(
     modifier: Modifier = Modifier,
     onBulletClick: () -> Unit,
     onBulletLongClick: () -> Unit,
-    onContentClick: (Boolean) -> Unit,
+    onToggleExpand: (Boolean) -> Unit,
+    onSingleLineTap: () -> Unit,
+    onEnterEdit: () -> Unit,
+    onCloseEdit: () -> Unit,
     onContentChange: (String) -> Unit,
     onTaskToggle: (String) -> Unit,
     onEnterPressed: () -> Unit,
-    onDragStart: () -> Unit,
+    onDragStart: (downLocalY: Float, wasExpanded: Boolean) -> Unit,
     onDragDelta: (Float, Offset) -> Unit,
     onDragFinish: (Offset?) -> Unit,
     onHintBulletClick: (NoteEntity) -> Unit,
@@ -1456,6 +1621,7 @@ fun BulletNoteRow(
     allowAlarm: Boolean = true,
     onAlarmClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
 
@@ -1468,6 +1634,7 @@ fun BulletNoteRow(
     var isFirstLineEllipsized by remember(note.id, note.content) { mutableStateOf(false) }
     val hasMoreParagraphs = note.content.contains('\n')
     val isCollapsedMultiLine = !isExpanded && (hasMoreParagraphs || isFirstLineEllipsized)
+    var isLongPressReady by remember(note.id, isEditing) { mutableStateOf(false) }
     var textFieldCoordinates by remember {
         mutableStateOf<LayoutCoordinates?>(null)
     }
@@ -1490,12 +1657,13 @@ fun BulletNoteRow(
         0.dp
     }
 
-    // 浏览态排版结果与点击定位光标偏移量，确保点击进入编辑时把光标精确插在点击位置。
-    var browseTextLayout by remember(note.id, isExpanded) { mutableStateOf<TextLayoutResult?>(null) }
+    // 浏览态 Markdown 坐标命中器与长按落光标偏移量，确保长按原地松手进入编辑时把光标精准插在长按处。
+    val markdownHitTester = remember(note.id, isExpanded, note.content) { MarkdownHitTester() }
     var pendingTapCursorOffset by remember(note.id) { mutableStateOf<Int?>(null) }
+    val latestIsExpanded = rememberUpdatedState(isExpanded)
     val latestIsCollapsedMultiLine = rememberUpdatedState(isCollapsedMultiLine)
     val latestNoteContent = rememberUpdatedState(note.content)
-    val latestOnContentClick = rememberUpdatedState(onContentClick)
+    val latestHitTester = rememberUpdatedState(markdownHitTester)
 
     var editValue by remember(note.id, isEditing) {
         val initialCursor = if (isEditing) {
@@ -1713,10 +1881,10 @@ fun BulletNoteRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
             .background(
-                if (isEditing) {
-                    MaterialTheme.colorScheme.surface
-                } else {
-                    Color.Transparent
+                when {
+                    isEditing -> MaterialTheme.colorScheme.surface
+                    isLongPressReady -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
+                    else -> Color.Transparent
                 }
             )
             .padding(horizontal = 6.dp, vertical = 6.dp)
@@ -1751,33 +1919,78 @@ fun BulletNoteRow(
                                 .onGloballyPositioned {
                                     dragCoordinates = it
                                 }
-                                .pointerInput(note.id) {
-                                    detectDragGesturesAfterLongPress(
-                                        onDragStart = { point ->
-                                            lastDragRoot =
-                                                dragCoordinates?.localToRoot(point)
-                                            onDragStart()
-                                        },
-                                        onDrag = { change, amount ->
-                                            change.consume()
-
-                                            dragCoordinates
-                                                ?.localToRoot(change.position)
-                                                ?.let { root ->
-                                                    lastDragRoot = root
-                                                    onDragDelta(amount.y, root)
-                                                }
-                                        },
-                                        onDragEnd = {
-                                            onDragFinish(lastDragRoot)
-                                            lastDragRoot = null
-                                        },
-                                        onDragCancel = {
-                                            onDragFinish(null)
-                                            lastDragRoot = null
+                                .noteBrowseGestures(
+                                    key = note.id,
+                                    canDrag = canDrag,
+                                    onLongPressReadyChanged = { ready ->
+                                        isLongPressReady = ready
+                                    },
+                                    onTap = { tapLocalOffset ->
+                                        val expanded = latestIsExpanded.value
+                                        if (expanded) {
+                                            val url = latestHitTester.value.findLinkAt(
+                                                dragCoordinates,
+                                                tapLocalOffset
+                                            )
+                                            if (url != null) {
+                                                openSafeMarkdownUrl(context, url)
+                                            } else {
+                                                onToggleExpand(false)
+                                            }
+                                        } else if (latestIsCollapsedMultiLine.value) {
+                                            onToggleExpand(true)
+                                        } else {
+                                            val url = latestHitTester.value.findLinkAt(
+                                                dragCoordinates,
+                                                tapLocalOffset
+                                            )
+                                            if (url != null) {
+                                                openSafeMarkdownUrl(context, url)
+                                            } else {
+                                                onSingleLineTap()
+                                            }
                                         }
-                                    )
-                                }
+                                    },
+                                    onLongPressEdit = { pressLocalOffset ->
+                                        val rawOffset = latestHitTester.value.findRawOffsetAt(
+                                            containerCoords = dragCoordinates,
+                                            localInContainer = pressLocalOffset,
+                                            fallbackLength = latestNoteContent.value.length
+                                        )
+                                        pendingTapCursorOffset = rawOffset
+                                        onEnterEdit()
+                                    },
+                                    onDragStart = { downLocalOffset ->
+                                        lastDragRoot = dragCoordinates
+                                            ?.takeIf { it.isAttached }
+                                            ?.localToRoot(downLocalOffset)
+                                        onDragStart(downLocalOffset.y, latestIsExpanded.value)
+                                    },
+                                    onDragMove = { currentLocalOffset, fallbackDeltaY ->
+                                        val coords = dragCoordinates?.takeIf { it.isAttached }
+                                        val root = coords?.localToRoot(currentLocalOffset)
+                                        if (root != null) {
+                                            val prevRoot = lastDragRoot
+                                            val deltaY = if (prevRoot != null) {
+                                                root.y - prevRoot.y
+                                            } else {
+                                                fallbackDeltaY
+                                            }
+                                            lastDragRoot = root
+                                            onDragDelta(deltaY, root)
+                                        } else if (fallbackDeltaY != 0f) {
+                                            lastDragRoot?.let { prev ->
+                                                val updated = Offset(prev.x, prev.y + fallbackDeltaY)
+                                                lastDragRoot = updated
+                                                onDragDelta(fallbackDeltaY, updated)
+                                            }
+                                        }
+                                    },
+                                    onDragEnd = { completedNormally ->
+                                        onDragFinish(if (completedNormally) lastDragRoot else null)
+                                        lastDragRoot = null
+                                    }
+                                )
                         } else {
                             Modifier
                         }
@@ -1789,36 +2002,24 @@ fun BulletNoteRow(
                         lineHeight = bodyLineHeight
                     )
                     if (isExpanded) {
-                        // 展开浏览模式：完整 Markdown 块级渲染，点击链接打开网页、点击任务框切换状态、点击文字按映射光标进入编辑。
+                        // 展开浏览模式：完整 Markdown 块级渲染；单击收起（链接/任务框优先响应），长按移动拖动排序，长按原地松手于长按处落光标进入编辑。
                         MarkdownExpandedContent(
                             noteId = note.id,
                             content = note.content,
                             baseTextStyle = paragraphStyle,
                             onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
-                            onTapToEdit = { rawOffset ->
-                                pendingTapCursorOffset = rawOffset.coerceIn(0, latestNoteContent.value.length)
-                                latestOnContentClick.value(false)
-                            },
+                            hitTester = markdownHitTester,
                             onToggleTask = onTaskToggle
                         )
                     } else {
-                        // 收起浏览模式：单行行内 Markdown 渲染（保持正文正常字号、无序列表保留圆点），防止行高与符号对齐跳动。
+                        // 收起浏览模式：单行行内 Markdown 渲染（多行笔记单击展开，单行笔记单击无反应，长按移动拖动排序，长按原地松手落光标进入编辑）。
                         MarkdownCollapsedLine(
                             noteId = note.id,
                             content = note.content,
                             textStyle = paragraphStyle,
-                            isCollapsedMultiLine = isCollapsedMultiLine,
                             onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
                             onEllipsizedChanged = { ellipsized -> isFirstLineEllipsized = ellipsized },
-                            onTap = { rawOffset ->
-                                val collapsed = latestIsCollapsedMultiLine.value
-                                pendingTapCursorOffset = if (!collapsed && rawOffset != null) {
-                                    rawOffset.coerceIn(0, latestNoteContent.value.length)
-                                } else {
-                                    null
-                                }
-                                latestOnContentClick.value(collapsed)
-                            }
+                            hitTester = markdownHitTester
                         )
                     }
                 } else {
@@ -1945,7 +2146,7 @@ fun BulletNoteRow(
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                         onClick = {
                                             finishHintCardEditing(restoreMainFocus = false)
-                                            onContentClick(false)
+                                            onCloseEdit()
                                         }
                                     )
                                 }
@@ -2043,16 +2244,13 @@ fun BulletNoteRow(
                 onBulletLongClick = {
                     onHintBulletLongClick(currentHintNote)
                 },
-                onContentClick = { isTruncatedPreview ->
-                    if (editingHintNoteId == currentHintNote.id) {
-                        finishHintCardEditing(restoreMainFocus = true)
-                    } else if (isTruncatedPreview && expandedHintNoteId != currentHintNote.id) {
-                        expandedHintNoteId = currentHintNote.id
-                    } else {
-                        expandedHintNoteId = null
-                        pinnedEditingHintNote = currentHintNote
-                        editingHintNoteId = currentHintNote.id
-                    }
+                onToggleExpand = { shouldExpand ->
+                    expandedHintNoteId = if (shouldExpand) currentHintNote.id else null
+                },
+                onEnterEdit = {
+                    expandedHintNoteId = null
+                    pinnedEditingHintNote = currentHintNote
+                    editingHintNoteId = currentHintNote.id
                 },
                 onContentChange = { newText ->
                     if (pinnedEditingHintNote?.id == currentHintNote.id) {
@@ -2127,7 +2325,7 @@ private fun NoteBulletGlyph(
  * 笔记编辑态下内联展示的关键字即时提示卡片：
  * - 紧贴当前编辑笔记的工具栏下方，不抢焦点；
  * - 多条命中时支持右上角 ‹ 1/N › 循环翻页与卡片区域左右滑动切页；
- * - 默认最多展开 3 行并带省略号提示，点击展开全文，再次点击（或 3 行以内直接点击）原地进入编辑模式。
+ * - 与主界面操作逻辑统一：多行提示单击在 3 行预览与展开态间切换，长按原地松手于长按处落光标原地编辑。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -2142,11 +2340,13 @@ private fun KeywordHintCard(
     onDismiss: () -> Unit,
     onBulletClick: () -> Unit,
     onBulletLongClick: () -> Unit,
-    onContentClick: (Boolean) -> Unit,
+    onToggleExpand: (Boolean) -> Unit,
+    onEnterEdit: () -> Unit,
     onContentChange: (String) -> Unit,
     onTaskToggle: (String) -> Unit,
     onCollapseHintEdit: () -> Unit
 ) {
+    val context = LocalContext.current
     val density = LocalDensity.current
     val bulletColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     val bodyLineHeight = MaterialTheme.typography.bodyLarge.lineHeight
@@ -2158,13 +2358,6 @@ private fun KeywordHintCard(
 
     val lines = remember(hintNote.content) { hintNote.content.split('\n') }
     val hasMoreThan3Paragraphs = lines.size > 3
-    val previewText = remember(hintNote.content, hasMoreThan3Paragraphs) {
-        if (hasMoreThan3Paragraphs) {
-            lines.take(3).joinToString("\n") + "…"
-        } else {
-            hintNote.content.ifEmpty { " " }
-        }
-    }
     val isTruncatedPreview = !isExpanded && (hasMoreThan3Paragraphs || isPreviewOverflow)
 
     val firstLineHeightDp = with(density) { firstLineHeightPx.toDp() }
@@ -2174,13 +2367,14 @@ private fun KeywordHintCard(
         0.dp
     }
 
-    var hintBrowseTextLayout by remember(hintNote.id, isExpanded) {
-        mutableStateOf<TextLayoutResult?>(null)
-    }
+    val hintHitTester = remember(hintNote.id, isExpanded, hintNote.content) { MarkdownHitTester() }
+    var hintContentCoords by remember(hintNote.id) { mutableStateOf<LayoutCoordinates?>(null) }
+    var isHintLongPressReady by remember(hintNote.id, isEditingHint) { mutableStateOf(false) }
     var pendingHintTapCursorOffset by remember(hintNote.id) { mutableStateOf<Int?>(null) }
+    val latestHintExpanded = rememberUpdatedState(isExpanded)
     val latestHintTruncated = rememberUpdatedState(isTruncatedPreview)
     val latestHintContent = rememberUpdatedState(hintNote.content)
-    val latestHintOnContentClick = rememberUpdatedState(onContentClick)
+    val latestHintHitTester = rememberUpdatedState(hintHitTester)
 
     var hintEditValue by remember(hintNote.id, isEditingHint) {
         val initialCursor = if (isEditingHint) {
@@ -2388,7 +2582,63 @@ private fun KeywordHintCard(
             Spacer(modifier = Modifier.width(8.dp))
 
             Box(
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        if (!isEditingHint && isHintLongPressReady) {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
+                        } else {
+                            Color.Transparent
+                        }
+                    )
+                    .then(
+                        if (!isEditingHint) {
+                            Modifier
+                                .onGloballyPositioned { hintContentCoords = it }
+                                .noteBrowseGestures(
+                                    key = hintNote.id,
+                                    canDrag = false,
+                                    onLongPressReadyChanged = { ready ->
+                                        isHintLongPressReady = ready
+                                    },
+                                    onTap = { tapLocalOffset ->
+                                        if (latestHintExpanded.value) {
+                                            val url = latestHintHitTester.value.findLinkAt(
+                                                hintContentCoords,
+                                                tapLocalOffset
+                                            )
+                                            if (url != null) {
+                                                openSafeMarkdownUrl(context, url)
+                                            } else {
+                                                onToggleExpand(false)
+                                            }
+                                        } else if (latestHintTruncated.value) {
+                                            onToggleExpand(true)
+                                        } else {
+                                            val url = latestHintHitTester.value.findLinkAt(
+                                                hintContentCoords,
+                                                tapLocalOffset
+                                            )
+                                            if (url != null) {
+                                                openSafeMarkdownUrl(context, url)
+                                            }
+                                        }
+                                    },
+                                    onLongPressEdit = { pressLocalOffset ->
+                                        val rawOffset = latestHintHitTester.value.findRawOffsetAt(
+                                            containerCoords = hintContentCoords,
+                                            localInContainer = pressLocalOffset,
+                                            fallbackLength = latestHintContent.value.length
+                                        )
+                                        pendingHintTapCursorOffset = rawOffset
+                                        onEnterEdit()
+                                    }
+                                )
+                        } else {
+                            Modifier
+                        }
+                    )
             ) {
                 if (!isEditingHint) {
                     val paragraphStyle = MaterialTheme.typography.bodyLarge.copy(
@@ -2408,10 +2658,7 @@ private fun KeywordHintCard(
                                 content = hintNote.content,
                                 baseTextStyle = paragraphStyle,
                                 onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
-                                onTapToEdit = { rawOffset ->
-                                    pendingHintTapCursorOffset = rawOffset.coerceIn(0, latestHintContent.value.length)
-                                    latestHintOnContentClick.value(false)
-                                },
+                                hitTester = hintHitTester,
                                 onToggleTask = onTaskToggle
                             )
                         }
@@ -2421,19 +2668,10 @@ private fun KeywordHintCard(
                             content = hintNote.content,
                             maxLines = 3,
                             textStyle = paragraphStyle,
-                            isTruncated = isTruncatedPreview,
                             modifier = Modifier.padding(end = 10.dp),
                             onFirstLineHeightMeasured = { h -> firstLineHeightPx = h },
                             onOverflowChanged = { overflow -> isPreviewOverflow = overflow },
-                            onTap = { rawOffset ->
-                                val truncated = latestHintTruncated.value
-                                pendingHintTapCursorOffset = if (!truncated && rawOffset != null) {
-                                    rawOffset.coerceIn(0, latestHintContent.value.length)
-                                } else {
-                                    null
-                                }
-                                latestHintOnContentClick.value(truncated)
-                            }
+                            hitTester = hintHitTester
                         )
                     }
                 } else {
