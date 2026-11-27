@@ -1,10 +1,14 @@
 package com.feiji.bulletnotes.ui
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Color as AndroidColor
 import android.net.Uri
+import android.os.SystemClock
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -129,6 +133,21 @@ private data class LookupHistoryItem(
 private class MdxWebViewController {
     var webView: WebView? = null
     var lastScrollY: Int = 0
+    @Volatile
+    var isEditingOrImeVisible: Boolean = false
+    @Volatile
+    var suppressPagingUntilUptimeMs: Long = 0L
+
+    fun isPagingBlockedNow(): Boolean {
+        return isEditingOrImeVisible || SystemClock.uptimeMillis() < suppressPagingUntilUptimeMs
+    }
+
+    fun extendPagingCooldown(durationMs: Long = 300L) {
+        val target = SystemClock.uptimeMillis() + durationMs
+        if (target > suppressPagingUntilUptimeMs) {
+            suppressPagingUntilUptimeMs = target
+        }
+    }
 
     fun pageUp(): Boolean {
         val wv = webView ?: return false
@@ -204,8 +223,10 @@ fun DictionaryLookupDialog(
     // 编辑态与键盘高度追踪
     var isEditing by remember { mutableStateOf(false) }
     var imeShownDuringEdit by remember { mutableStateOf(false) }
+    var wasImeVisible by remember { mutableStateOf(false) }
     val inputFocusRequester = remember { FocusRequester() }
     val webController = remember { MdxWebViewController() }
+    val hostView = LocalView.current
 
     // 预先记录完整屏幕高度（避免 adjustResize 模式下被软键盘压扁后二次缩水）
     val displayHeightPx = remember(context) { context.resources.displayMetrics.heightPixels }
@@ -217,11 +238,31 @@ fun DictionaryLookupDialog(
     var measuredContentHeightDp by remember { mutableStateOf<Float?>(null) }
     var measuredContentToken by remember { mutableStateOf("") }
 
+    fun hideSoftKeyboardNow() {
+        keyboardController?.hide()
+        runCatching {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            val token = hostView.windowToken ?: webController.webView?.windowToken
+            if (token != null) {
+                imm?.hideSoftInputFromWindow(token, 0)
+            }
+        }
+    }
+
+    // 从笔记编辑态选词点“翻译”进入查词时，主动收起笔记遗留软键盘，让查词弹窗干净展开
+    LaunchedEffect(initialQuery) {
+        if (!isEditing) {
+            webController.extendPagingCooldown(260L)
+            hideSoftKeyboardNow()
+        }
+    }
+
     fun exitEditModeAndExpand() {
         isEditing = false
         imeShownDuringEdit = false
+        webController.extendPagingCooldown(320L)
         focusManager.clearFocus(force = true)
-        keyboardController?.hide()
+        hideSoftKeyboardNow()
         webController.setEditing(false)
     }
 
@@ -282,18 +323,10 @@ fun DictionaryLookupDialog(
         exitEditModeAndExpand()
     }
 
-    // 同步编辑态给 WebView（控制点击释义区时是否拦截翻页）
-    LaunchedEffect(isEditing) {
-        webController.setEditing(isEditing)
-        // 高度切换后通知 WebView 重算上下边缘遮罩与末页占位
-        delay(80L)
-        webController.refreshLayout()
-    }
-
     // 注册全局音量键翻页接管
     DisposableEffect(webController) {
         DictionaryVolumeKeyDispatcher.onVolumePage = { direction ->
-            if (isEditing) {
+            if (webController.isPagingBlockedNow()) {
                 exitEditModeAndExpand()
                 true
             } else if (direction < 0) {
@@ -402,8 +435,18 @@ fun DictionaryLookupDialog(
         val statusTopPx = WindowInsets.statusBars.getTop(density)
         val navBottomPx = WindowInsets.navigationBars.getBottom(density)
         val imeBottomPx = WindowInsets.ime.getBottom(density)
+        val dialogRootView = LocalView.current
 
-        // 退出编辑态时机 3：用户手动收起系统软键盘时，立即失焦并直接拉长弹窗
+        // 确保在 Dialog 窗口内调用键盘隐藏时也使用当前 Dialog 的 windowToken
+        fun dismissDialogKeyboard() {
+            keyboardController?.hide()
+            runCatching {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(dialogRootView.windowToken, 0)
+            }
+        }
+
+        // 退出编辑态时机 3：用户手动收起系统软键盘时，立即失焦并直接拉长弹窗（同时附加防误翻保护）
         LaunchedEffect(isEditing, imeBottomPx) {
             if (!isEditing) {
                 imeShownDuringEdit = false
@@ -411,6 +454,7 @@ fun DictionaryLookupDialog(
                 imeShownDuringEdit = true
             } else if (imeShownDuringEdit && imeBottomPx == 0) {
                 exitEditModeAndExpand()
+                dismissDialogKeyboard()
             }
         }
 
@@ -443,9 +487,41 @@ fun DictionaryLookupDialog(
                 )
         ) {
             val currentViewportHeightPx = with(density) { maxHeight.toPx().toInt() }
+            val imeShrinkThresholdPx = with(density) { 120.dp.toPx().toInt() }
+            val viewportShrunkByIme = currentViewportHeightPx > 0 &&
+                (fullScreenHeightPx - currentViewportHeightPx) > imeShrinkThresholdPx
+            val isImeVisible = imeBottomPx > 0 || viewportShrunkByIme
+
             LaunchedEffect(currentViewportHeightPx, imeBottomPx) {
                 if (imeBottomPx == 0 && currentViewportHeightPx > 0) {
                     fullScreenHeightPx = maxOf(fullScreenHeightPx, currentViewportHeightPx)
+                }
+            }
+
+            // 同步“编辑态或软键盘可见”状态至控制器与 WebView；键盘刚收起时开启 300ms 防误翻冷却并重算布局
+            val blockingPaging = isEditing || isImeVisible
+            SideEffect {
+                webController.isEditingOrImeVisible = blockingPaging
+            }
+            LaunchedEffect(blockingPaging) {
+                webController.isEditingOrImeVisible = blockingPaging
+                webController.setEditing(blockingPaging)
+                if (!blockingPaging && wasImeVisible) {
+                    webController.extendPagingCooldown(300L)
+                }
+                wasImeVisible = blockingPaging
+                // 等 120ms 高度过渡动画完成后，重算完整可视高度下的视觉行与上下半行遮罩（保持 scrollTop 不变）
+                delay(160L)
+                webController.refreshLayout()
+            }
+
+            // 兼容部分机型在 adjustResize 模式下仅压缩窗口高度而不触发 imeBottomPx 的键盘收起检测
+            LaunchedEffect(isEditing, isImeVisible) {
+                if (isEditing && isImeVisible) {
+                    imeShownDuringEdit = true
+                } else if (isEditing && imeShownDuringEdit && !isImeVisible) {
+                    exitEditModeAndExpand()
+                    dismissDialogKeyboard()
                 }
             }
 
@@ -499,11 +575,20 @@ fun DictionaryLookupDialog(
                 }
             }
 
-            // 兼容 adjustResize：若容器本身已被系统压缩，取二者中准确的键盘上方剩余空间
-            val effectiveAvailableAboveImePx = if (imeBottomPx > 0) {
-                val fromFull = fullScreenHeightPx - imeBottomPx - topMarginPx - with(density) { 8.dp.toPx() }
-                val fromCurrent = currentViewportHeightPx - topMarginPx - with(density) { 8.dp.toPx() }
-                minOf(fromFull, if (currentViewportHeightPx < fullScreenHeightPx - 100) fromCurrent else fromFull)
+            // 兼容 adjustResize：只要软键盘处于弹出状态，严格以键盘上方剩余空间为上限，彻底杜绝释义被键盘遮挡
+            val effectiveAvailableAboveImePx = if (isImeVisible) {
+                val gapPx = with(density) { 8.dp.toPx() }
+                val fromFull = if (imeBottomPx > 0) {
+                    fullScreenHeightPx - imeBottomPx - topMarginPx - gapPx
+                } else {
+                    maxExpandedHeightPx
+                }
+                val fromCurrent = if (viewportShrunkByIme) {
+                    currentViewportHeightPx - topMarginPx - gapPx
+                } else {
+                    fromFull
+                }
+                minOf(fromFull, fromCurrent)
             } else {
                 maxExpandedHeightPx
             }.coerceAtLeast(minEditCardPx)
@@ -511,8 +596,15 @@ fun DictionaryLookupDialog(
             val editHeightPx = minOf(fullScreenHeightPx * 0.50f, effectiveAvailableAboveImePx)
                 .coerceAtLeast(minEditCardPx)
 
+            // 非编辑态若软键盘仍在弹出（如刚切换词或键盘尚未完全收回），也强制避让键盘上方空间
+            val clampedExpandedHeightPx = if (isImeVisible) {
+                minOf(desiredExpandedHeightPx, effectiveAvailableAboveImePx).coerceAtLeast(minContentCardPx)
+            } else {
+                desiredExpandedHeightPx
+            }
+
             val targetCardHeightDp = with(density) {
-                (if (isEditing) editHeightPx else desiredExpandedHeightPx).toDp()
+                (if (isEditing) editHeightPx else clampedExpandedHeightPx).toDp()
             }
             val animatedCardHeightDp by animateDpAsState(
                 targetValue = targetCardHeightDp,
@@ -891,7 +983,7 @@ fun DictionaryLookupDialog(
                                         borderHex = borderHex,
                                         initialScrollY = initialScroll,
                                         initialAnchor = initialAnchor,
-                                        initialEditing = isEditing,
+                                        initialEditing = blockingPaging,
                                         renderToken = currentContentToken
                                     )
                                 }
@@ -905,6 +997,7 @@ fun DictionaryLookupDialog(
                                     },
                                     onTapWhileEditing = {
                                         exitEditModeAndExpand()
+                                        dismissDialogKeyboard()
                                     },
                                     onContentHeightMeasured = { token, heightCssPx ->
                                         if (token == currentContentToken && heightCssPx > 0) {
@@ -923,7 +1016,7 @@ fun DictionaryLookupDialog(
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "ClickableViewAccessibility")
 @Composable
 private fun MdxPagedShadowWebView(
     controller: MdxWebViewController,
@@ -961,6 +1054,16 @@ private fun MdxPagedShadowWebView(
                     defaultTextEncodingName = "UTF-8"
                 }
 
+                // 原生触摸层按下瞬间立即锁存“编辑/键盘态”冷却，彻底消除手指触碰 WebView 抢走焦点导致收键盘与翻页竞态的问题
+                setOnTouchListener { _, event ->
+                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                        if (controller.isPagingBlockedNow()) {
+                            controller.extendPagingCooldown(360L)
+                        }
+                    }
+                    false
+                }
+
                 addJavascriptInterface(
                     object {
                         @JavascriptInterface
@@ -974,7 +1077,13 @@ private fun MdxPagedShadowWebView(
                         }
 
                         @JavascriptInterface
+                        fun isPagingBlocked(): Boolean {
+                            return controller.isPagingBlockedNow()
+                        }
+
+                        @JavascriptInterface
                         fun onTapWhileEditing() {
+                            controller.extendPagingCooldown(320L)
                             post { latestOnTapWhileEditing() }
                         }
 
@@ -1606,13 +1715,24 @@ private fun buildIsolatedMdxDocument(
                 updateClipMasks();
             });
 
-            // 点击左右半屏翻页（拖拽滚动、划词、点击链接/按钮时不翻页；编辑态下点击仅退出编辑并拉长，不翻页）
-            let downX = 0, downY = 0, downTime = 0, moved = false;
+            // 点击左右半屏翻页（拖拽滚动、划词、点击链接/按钮时不翻页；编辑态/键盘弹出/收起冷却期内点击仅退出编辑并拉长，绝不翻页）
+            let downX = 0, downY = 0, downTime = 0, moved = false, downBlockedByIme = false;
+            function checkPagingBlocked() {
+                if (window.__mdxEditing) return true;
+                try {
+                    if (typeof AndroidBridge !== 'undefined' && AndroidBridge.isPagingBlocked && AndroidBridge.isPagingBlocked()) {
+                        return true;
+                    }
+                } catch (e) {}
+                return false;
+            }
+
             viewport.addEventListener('pointerdown', function(ev) {
                 downX = ev.clientX;
                 downY = ev.clientY;
                 downTime = Date.now();
                 moved = false;
+                downBlockedByIme = checkPagingBlocked();
             }, { passive: true });
 
             viewport.addEventListener('pointermove', function(ev) {
@@ -1643,8 +1763,8 @@ private fun buildIsolatedMdxDocument(
                     }
                 }
 
-                // 退出编辑态时机 4：编辑态点击释义区只退出编辑并拉长，停留在当前页绝不翻页
-                if (window.__mdxEditing) {
+                // 退出编辑态时机 4：按下或抬手时处于编辑态/键盘显示/收起冷却期，仅退出编辑收起键盘并拉长，停留在当前页绝不翻页
+                if (downBlockedByIme || checkPagingBlocked()) {
                     try { AndroidBridge.onTapWhileEditing(); } catch (e) {}
                     return;
                 }
