@@ -77,6 +77,15 @@ class SmartSelectionController {
         previous: TextFieldValue,
         incoming: TextFieldValue
     ): TextFieldValue {
+        val resolved = resolveAdjustedValue(previous, incoming)
+        ActiveSelectionTracker.updateFromValue(resolved)
+        return resolved
+    }
+
+    private fun resolveAdjustedValue(
+        previous: TextFieldValue,
+        incoming: TextFieldValue
+    ): TextFieldValue {
         // 文本或输入法组词状态发生变化时，立即退出长按选区会话并原样放行。
         if (incoming.text != previous.text || incoming.composition != previous.composition) {
             isSmartSelecting = false
@@ -177,6 +186,9 @@ fun Modifier.smartSelectionObserver(
                                 currentValue = latestValue
                             )
                             if (updatedSelection != null && updatedSelection != latestValue.selection) {
+                                ActiveSelectionTracker.updateFromValue(
+                                    latestValue.copy(selection = updatedSelection)
+                                )
                                 latestOnSelectionChange(updatedSelection)
                             }
                         }

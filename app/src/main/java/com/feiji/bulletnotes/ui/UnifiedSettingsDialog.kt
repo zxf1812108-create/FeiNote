@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -42,9 +44,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +70,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.feiji.bulletnotes.data.BackupManager
 import com.feiji.bulletnotes.data.LanWebServer
+import com.feiji.bulletnotes.data.MdxDictionaryManager
 import com.feiji.bulletnotes.data.MemoryCurveConfig
 import com.feiji.bulletnotes.data.ReviewFamiliarity
 import com.feiji.bulletnotes.data.SpacedRepetitionEngine
@@ -74,15 +79,17 @@ import com.feiji.bulletnotes.ui.theme.DarkOnlineGreen
 import com.feiji.bulletnotes.ui.theme.LightOnlineGreen
 import com.feiji.bulletnotes.ui.theme.LocalIsDarkTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
 
 private enum class SettingsTab(val label: String) {
-    LAN("电脑直连"),
-    SYNC("同步设置"),
-    RESTORE("备份恢复"),
-    CURVE("记忆曲线")
+    LAN("直连"),
+    SYNC("同步"),
+    RESTORE("备份"),
+    CURVE("曲线"),
+    DICTIONARY("词典")
 }
 
 /**
@@ -126,23 +133,30 @@ fun UnifiedSettingsDialog(
         }
     }
 
+    var settingsLookupWord by remember { mutableStateOf<String?>(null) }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
+        MinimalTextToolbarHost(
+            onTranslateRequest = { word -> settingsLookupWord = word },
             modifier = Modifier
                 .fillMaxWidth(0.92f)
                 .fillMaxHeight(0.84f)
-                .border(
-                    width = 1.dp,
-                    color = hairlineBorder,
-                    shape = RoundedCornerShape(18.dp)
-                ),
-            shape = RoundedCornerShape(18.dp),
-            color = dialogSurfaceColor,
-            tonalElevation = 0.dp
         ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(
+                        width = 1.dp,
+                        color = hairlineBorder,
+                        shape = RoundedCornerShape(18.dp)
+                    ),
+                shape = RoundedCornerShape(18.dp),
+                color = dialogSurfaceColor,
+                tonalElevation = 0.dp
+            ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -286,10 +300,20 @@ fun UnifiedSettingsDialog(
                             initialConfig = memoryCurveConfig,
                             onSave = onSaveMemoryCurveConfig
                         )
+
+                        SettingsTab.DICTIONARY -> DictionarySettingsTabContent()
                     }
                 }
             }
         }
+        }
+    }
+
+    settingsLookupWord?.let { word ->
+        DictionaryLookupDialog(
+            initialQuery = word,
+            onDismiss = { settingsLookupWord = null }
+        )
     }
 }
 
@@ -1323,3 +1347,303 @@ private fun CurveParameterStepperRow(
 
 private fun formatCurveDecimal(value: Float, digits: Int): String =
     String.format(Locale.US, "%.${digits}f", value).trimEnd('0').trimEnd('.')
+
+@Composable
+private fun DictionarySettingsTabContent() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val contentColor = MaterialTheme.colorScheme.onSurface
+    val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
+    val hairlineBorder = MaterialTheme.colorScheme.outlineVariant
+
+    LaunchedEffect(Unit) {
+        MdxDictionaryManager.ensureLoaded(context)
+    }
+
+    val dictionaries by MdxDictionaryManager.dictionaries.collectAsState()
+    val defaultCssName by MdxDictionaryManager.defaultCssName.collectAsState()
+    var isImporting by remember { mutableStateOf(false) }
+    var pendingCssTargetDictId by remember { mutableStateOf<String?>(null) }
+
+    val mdxPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            isImporting = true
+            scope.launch {
+                val res = MdxDictionaryManager.importMdx(context, uri)
+                isImporting = false
+                res.onSuccess { entry ->
+                    Toast.makeText(
+                        context,
+                        "已导入「${entry.title}」（${entry.entryCount} 词条）",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }.onFailure { err ->
+                    Toast.makeText(
+                        context,
+                        err.message ?: "导入 MDX 词典失败",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    val cssPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val targetId = pendingCssTargetDictId
+        pendingCssTargetDictId = null
+        if (uri != null) {
+            isImporting = true
+            scope.launch {
+                val res = MdxDictionaryManager.importCss(
+                    context = context,
+                    uri = uri,
+                    targetDictionaryId = targetId
+                )
+                isImporting = false
+                res.onSuccess { msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }.onFailure { err ->
+                    Toast.makeText(
+                        context,
+                        err.message ?: "导入 CSS 样式失败",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // 顶部导入操作行：导入 MDX 词典 + 导入 CSS 样式
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(9.dp))
+                    .clickable(enabled = !isImporting) {
+                        mdxPicker.launch(arrayOf("*/*"))
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (isImporting) "导入中…" else "导入 MDX 词典",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = contentColor
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(38.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(9.dp))
+                    .clickable(enabled = !isImporting) {
+                        pendingCssTargetDictId = null
+                        cssPicker.launch(arrayOf("*/*"))
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "导入 CSS 样式",
+                    fontSize = 13.sp,
+                    color = contentColor
+                )
+            }
+        }
+
+        if (defaultCssName != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(9.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "默认样式：$defaultCssName",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = mutedText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "清除",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = mutedText,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { MdxDictionaryManager.clearDefaultCss(context) }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+
+        if (dictionaries.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, hairlineBorder, RoundedCornerShape(12.dp))
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "暂无本地词典",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = contentColor
+                    )
+                    Text(
+                        text = "导入 .mdx 字典文件（可配同名 .css 样式）后，在编辑时选中文字点击「翻译」即可离线查词。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = mutedText,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(dictionaries, key = { it.id }) { dict ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(1.dp, hairlineBorder, RoundedCornerShape(11.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = dict.enabled,
+                                onCheckedChange = { checked ->
+                                    MdxDictionaryManager.setDictionaryEnabled(context, dict.id, checked)
+                                },
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = dict.title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (dict.enabled) contentColor else mutedText,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${dict.entryCount} 词条 · ${formatFileSize(dict.fileSizeBytes)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = mutedText,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = dict.cssFileName?.let { "样式：$it" }
+                                    ?: defaultCssName?.let { "样式：默认（$it）" }
+                                    ?: "样式：内置默认",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = mutedText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (dict.cssFileName != null) "换CSS" else "配CSS",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = contentColor,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable(enabled = !isImporting) {
+                                            pendingCssTargetDictId = dict.id
+                                            cssPicker.launch(arrayOf("*/*"))
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                                )
+                                if (dict.cssFileName != null) {
+                                    Text(
+                                        text = "清CSS",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = mutedText,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                MdxDictionaryManager.clearDictionaryCss(context, dict.id)
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    )
+                                }
+                                Text(
+                                    text = "删除",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            MdxDictionaryManager.deleteDictionary(context, dict.id)
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatFileSize(bytes: Long): String {
+    return when {
+        bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+        bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
+        else -> "$bytes B"
+    }
+}
+

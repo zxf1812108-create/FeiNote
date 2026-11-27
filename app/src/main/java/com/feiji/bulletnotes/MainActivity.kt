@@ -18,8 +18,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import com.feiji.bulletnotes.alarm.NoteAlarmScheduler
+import com.feiji.bulletnotes.data.MdxDictionaryManager
 import com.feiji.bulletnotes.ui.BulletNotesScreen
+import com.feiji.bulletnotes.ui.DictionaryLookupDialog
+import com.feiji.bulletnotes.ui.MinimalTextToolbarHost
 import com.feiji.bulletnotes.ui.NoteViewModel
 import com.feiji.bulletnotes.ui.theme.FeiJiTheme
 import com.feiji.bulletnotes.ui.theme.ThemePreferences
@@ -29,6 +33,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: NoteViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        MdxDictionaryManager.ensureLoaded(this)
         handleAlarmOpenIntent(intent)
         setContent {
             // Compose 专用函数必须在 Composable 上下文中先求值，再用于 rememberSaveable 初始化。
@@ -36,14 +41,25 @@ class MainActivity : ComponentActivity() {
             var darkTheme by rememberSaveable {
                 mutableStateOf(ThemePreferences.resolveDarkTheme(this@MainActivity, systemDarkTheme))
             }
+            var lookupWord by remember { mutableStateOf<String?>(null) }
             FeiJiTheme(darkTheme = darkTheme) {
-                BackupSetupPrompt(
-                    viewModel = viewModel,
-                    onToggleTheme = {
-                        darkTheme = !darkTheme
-                        ThemePreferences.saveDarkTheme(this@MainActivity, darkTheme)
-                    }
-                )
+                MinimalTextToolbarHost(
+                    onTranslateRequest = { word -> lookupWord = word }
+                ) {
+                    BackupSetupPrompt(
+                        viewModel = viewModel,
+                        onToggleTheme = {
+                            darkTheme = !darkTheme
+                            ThemePreferences.saveDarkTheme(this@MainActivity, darkTheme)
+                        }
+                    )
+                }
+                lookupWord?.let { word ->
+                    DictionaryLookupDialog(
+                        initialQuery = word,
+                        onDismiss = { lookupWord = null }
+                    )
+                }
             }
         }
     }
