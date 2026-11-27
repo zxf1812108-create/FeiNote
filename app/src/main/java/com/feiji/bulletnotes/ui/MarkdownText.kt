@@ -309,6 +309,11 @@ fun MarkdownExpandedContent(
         return
     }
 
+    fun MarkdownParser.MarkdownBlock.isListItem(): Boolean =
+        this is MarkdownParser.MarkdownBlock.UnorderedListItem ||
+            this is MarkdownParser.MarkdownBlock.OrderedListItem ||
+            this is MarkdownParser.MarkdownBlock.TaskListItem
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -316,10 +321,24 @@ fun MarkdownExpandedContent(
                 detectTapGestures(
                     onTap = { latestOnTapToEdit.value(latestContent.value.length) }
                 )
-            },
-        verticalArrangement = Arrangement.spacedBy(3.dp)
+            }
     ) {
         blocks.forEachIndexed { index, block ->
+            if (index > 0) {
+                val prev = blocks[index - 1]
+                val gapDp = when {
+                    prev is MarkdownParser.MarkdownBlock.BlankLine ||
+                        block is MarkdownParser.MarkdownBlock.BlankLine -> 0.dp
+                    block is MarkdownParser.MarkdownBlock.Heading -> 14.dp
+                    prev is MarkdownParser.MarkdownBlock.Heading -> 6.dp
+                    prev.isListItem() && block.isListItem() -> 5.dp
+                    else -> 10.dp
+                }
+                if (gapDp > 0.dp) {
+                    Spacer(modifier = Modifier.height(gapDp))
+                }
+            }
+
             val measureFirst: ((TextLayoutResult) -> Unit)? = if (index == 0) {
                 { layout ->
                     if (layout.lineCount > 0) {
@@ -332,14 +351,14 @@ fun MarkdownExpandedContent(
 
             when (block) {
                 is MarkdownParser.MarkdownBlock.BlankLine -> {
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
                 }
 
                 is MarkdownParser.MarkdownBlock.HorizontalRule -> {
                     HorizontalDivider(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 6.dp),
+                            .padding(vertical = 4.dp),
                         thickness = 1.dp,
                         color = palette.ruleColor
                     )
@@ -363,8 +382,7 @@ fun MarkdownExpandedContent(
                         palette = palette,
                         onOpenUrl = ::openSafeUrl,
                         onTapCursor = { rawOffset -> latestOnTapToEdit.value(rawOffset) },
-                        onFirstLineLayout = measureFirst,
-                        modifier = Modifier.padding(top = if (index == 0) 0.dp else 4.dp, bottom = 1.dp)
+                        onFirstLineLayout = measureFirst
                     )
                 }
 
@@ -373,7 +391,6 @@ fun MarkdownExpandedContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(IntrinsicSize.Min)
-                            .padding(vertical = 2.dp)
                     ) {
                         Box(
                             modifier = Modifier
@@ -385,7 +402,7 @@ fun MarkdownExpandedContent(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column(
                             modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             block.lines.forEachIndexed { lineIdx, lineInline ->
                                 MarkdownInlineText(
@@ -410,7 +427,6 @@ fun MarkdownExpandedContent(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 3.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(palette.codeBlockBg)
                             .border(1.dp, palette.codeBlockBorder, RoundedCornerShape(8.dp))
