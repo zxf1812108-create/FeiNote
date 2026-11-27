@@ -12,6 +12,8 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -82,6 +84,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -207,6 +210,12 @@ fun DictionaryLookupDialog(
     // 预先记录完整屏幕高度（避免 adjustResize 模式下被软键盘压扁后二次缩水）
     val displayHeightPx = remember(context) { context.resources.displayMetrics.heightPixels }
     var fullScreenHeightPx by remember { mutableIntStateOf(displayHeightPx) }
+
+    // 动态内容高度追踪（用于拉长态按实际词条内容自适应高度，消除底部大片空白）
+    var headerHeightPx by remember { mutableIntStateOf(0) }
+    var relatedBarHeightPx by remember { mutableIntStateOf(0) }
+    var measuredContentHeightDp by remember { mutableStateOf<Float?>(null) }
+    var measuredContentToken by remember { mutableStateOf("") }
 
     fun exitEditModeAndExpand() {
         isEditing = false
@@ -442,10 +451,53 @@ fun DictionaryLookupDialog(
 
             val topMarginPx = statusTopPx + with(density) { 10.dp.toPx() }
             val toolbarClearancePx = navBottomPx + with(density) { 58.dp.toPx() }
-            val minCardPx = with(density) { 200.dp.toPx() }
+            val minEditCardPx = with(density) { 200.dp.toPx() }
+            val minContentCardPx = with(density) { 132.dp.toPx() }
 
-            val expandedHeightPx = (fullScreenHeightPx - topMarginPx - toolbarClearancePx)
-                .coerceAtLeast(minCardPx)
+            val maxExpandedHeightPx = (fullScreenHeightPx - topMarginPx - toolbarClearancePx)
+                .coerceAtLeast(minEditCardPx)
+
+            val effectiveHeaderPx = if (headerHeightPx > 0) headerHeightPx.toFloat() else with(density) { 48.dp.toPx() }
+            val effectiveRelatedPx = if (activeResult != null && relatedWords.isNotEmpty()) {
+                if (relatedBarHeightPx > 0) relatedBarHeightPx.toFloat() else with(density) { 32.dp.toPx() }
+            } else {
+                0f
+            }
+            val chromeHeightPx = effectiveHeaderPx + effectiveRelatedPx + with(density) { 4.dp.toPx() }
+
+            // 拉长态根据实际显示内容自适应高度（不超过最大拉长上限，避免短词条底部大片空白）
+            val currentContentToken = activeResult?.let {
+                "${it.dictionaryId}|${it.matchedWord}|${it.html.hashCode()}"
+            }.orEmpty()
+            val validMeasuredDp = if (activeResult != null && measuredContentToken == currentContentToken) {
+                measuredContentHeightDp
+            } else {
+                null
+            }
+
+            val desiredExpandedHeightPx = when {
+                activeResult != null -> {
+                    if (validMeasuredDp != null) {
+                        val contentPx = with(density) { (validMeasuredDp + 4f).dp.toPx() }
+                        (chromeHeightPx + contentPx).coerceIn(minContentCardPx, maxExpandedHeightPx)
+                    } else {
+                        // 尚未测量出新词条高度时，沿用上一次高度或温和默认高度，避免闪烁大片空白
+                        val fallbackDp = measuredContentHeightDp ?: 220f
+                        val contentPx = with(density) { (fallbackDp + 4f).dp.toPx() }
+                        (chromeHeightPx + contentPx).coerceIn(minContentCardPx, maxExpandedHeightPx)
+                    }
+                }
+                enabledDicts.isEmpty() -> {
+                    minOf(maxExpandedHeightPx, with(density) { 248.dp.toPx() })
+                }
+                suggestions.isNotEmpty() -> {
+                    val listPx = with(density) { (suggestions.size * 44f + 8f).dp.toPx() }
+                    (chromeHeightPx + listPx).coerceIn(minContentCardPx, maxExpandedHeightPx)
+                }
+                else -> {
+                    minOf(maxExpandedHeightPx, with(density) { 196.dp.toPx() })
+                }
+            }
 
             // 兼容 adjustResize：若容器本身已被系统压缩，取二者中准确的键盘上方剩余空间
             val effectiveAvailableAboveImePx = if (imeBottomPx > 0) {
@@ -453,15 +505,20 @@ fun DictionaryLookupDialog(
                 val fromCurrent = currentViewportHeightPx - topMarginPx - with(density) { 8.dp.toPx() }
                 minOf(fromFull, if (currentViewportHeightPx < fullScreenHeightPx - 100) fromCurrent else fromFull)
             } else {
-                expandedHeightPx
-            }.coerceAtLeast(minCardPx)
+                maxExpandedHeightPx
+            }.coerceAtLeast(minEditCardPx)
 
             val editHeightPx = minOf(fullScreenHeightPx * 0.50f, effectiveAvailableAboveImePx)
-                .coerceAtLeast(minCardPx)
+                .coerceAtLeast(minEditCardPx)
 
-            val cardHeightDp = with(density) {
-                (if (isEditing) editHeightPx else expandedHeightPx).toDp()
+            val targetCardHeightDp = with(density) {
+                (if (isEditing) editHeightPx else desiredExpandedHeightPx).toDp()
             }
+            val animatedCardHeightDp by animateDpAsState(
+                targetValue = targetCardHeightDp,
+                animationSpec = tween(durationMillis = 120),
+                label = "dictCardHeight"
+            )
             val topPaddingDp = with(density) { topMarginPx.toDp() }
 
             Surface(
@@ -469,7 +526,7 @@ fun DictionaryLookupDialog(
                     .align(Alignment.TopCenter)
                     .padding(top = topPaddingDp)
                     .fillMaxWidth(0.94f)
-                    .height(cardHeightDp)
+                    .height(animatedCardHeightDp)
                     .border(1.dp, hairlineBorder, RoundedCornerShape(16.dp))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
@@ -486,6 +543,7 @@ fun DictionaryLookupDialog(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .onSizeChanged { headerHeightPx = it.height }
                             .background(headerSurfaceColor)
                             .padding(start = 10.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -623,32 +681,38 @@ fun DictionaryLookupDialog(
 
                     // 2. 命中释义顶部的相关候选词单行横向条
                     if (activeResult != null && relatedWords.isNotEmpty()) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(cardSurfaceColor)
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .onSizeChanged { relatedBarHeightPx = it.height }
                         ) {
-                            relatedWords.forEach { candidate ->
-                                Text(
-                                    text = candidate,
-                                    fontSize = 12.sp,
-                                    color = mutedText,
-                                    maxLines = 1,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable { jumpToWord(candidate, pushHistory = true) }
-                                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                                )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(cardSurfaceColor)
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                relatedWords.forEach { candidate ->
+                                    Text(
+                                        text = candidate,
+                                        fontSize = 12.sp,
+                                        color = mutedText,
+                                        maxLines = 1,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable { jumpToWord(candidate, pushHistory = true) }
+                                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
+                            HorizontalDivider(
+                                thickness = 0.5.dp,
+                                color = hairlineBorder.copy(alpha = 0.65f)
+                            )
                         }
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = hairlineBorder.copy(alpha = 0.65f)
-                        )
                     }
 
                     // 3. 释义正文 / 候选列表 / 空状态区域
@@ -811,7 +875,8 @@ fun DictionaryLookupDialog(
                                     bgHex,
                                     fgHex,
                                     initialScroll,
-                                    initialAnchor
+                                    initialAnchor,
+                                    currentContentToken
                                 ) {
                                     buildIsolatedMdxDocument(
                                         rawBodyHtml = activeResult.html,
@@ -824,7 +889,8 @@ fun DictionaryLookupDialog(
                                         borderHex = borderHex,
                                         initialScrollY = initialScroll,
                                         initialAnchor = initialAnchor,
-                                        initialEditing = isEditing
+                                        initialEditing = isEditing,
+                                        renderToken = currentContentToken
                                     )
                                 }
 
@@ -837,6 +903,12 @@ fun DictionaryLookupDialog(
                                     },
                                     onTapWhileEditing = {
                                         exitEditModeAndExpand()
+                                    },
+                                    onContentHeightMeasured = { token, heightCssPx ->
+                                        if (token == currentContentToken && heightCssPx > 0) {
+                                            measuredContentToken = token
+                                            measuredContentHeightDp = heightCssPx.toFloat()
+                                        }
                                     },
                                     modifier = Modifier.fillMaxSize()
                                 )
@@ -857,10 +929,12 @@ private fun MdxPagedShadowWebView(
     backgroundArgb: Int,
     onNavigateEntry: (word: String, anchor: String?) -> Unit,
     onTapWhileEditing: () -> Unit,
+    onContentHeightMeasured: (token: String, heightCssPx: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val latestOnNavigate by rememberUpdatedState(onNavigateEntry)
     val latestOnTapWhileEditing by rememberUpdatedState(onTapWhileEditing)
+    val latestOnContentHeight by rememberUpdatedState(onContentHeightMeasured)
 
     AndroidView(
         modifier = modifier,
@@ -905,6 +979,13 @@ private fun MdxPagedShadowWebView(
                         @JavascriptInterface
                         fun onScrollChanged(scrollY: Int) {
                             controller.lastScrollY = scrollY.coerceAtLeast(0)
+                        }
+
+                        @JavascriptInterface
+                        fun onContentHeightChanged(token: String?, heightCssPx: Int) {
+                            if (!token.isNullOrEmpty() && heightCssPx > 0) {
+                                post { latestOnContentHeight(token, heightCssPx) }
+                            }
                         }
                     },
                     "AndroidBridge"
@@ -1008,17 +1089,24 @@ private fun sanitizeMdxHtml(rawHtml: String): String {
         ""
     )
 
-    // 4. 自动清除词典内冗余的“回到顶部”按钮/链接
+    // 4. 彻底清除词典内冗余的“回到顶部 / 返回顶部 / 回顶部 / 返回页首”链接与块元素
     html = html.replace(
         Regex(
-            """<a\b[^>]*href\s*=\s*["']#(?:top|_top|header|page_top)?["'][^>]*>(?:[^<]{0,16}|<[^>]+>)*?(?:回到顶部|返回顶部|回顶部|top|▲|↑)(?:[^<]{0,12}|<[^>]+>)*?</a>""",
+            """<a\b[^>]*>(?:[^<]{0,16}|<[^>]+>)*?(?:回到顶部|返回顶部|回顶部|回到页首|返回页首|回到顶端|返回顶端|back\s*to\s*top)(?:[^<]{0,12}|<[^>]+>)*?</a>""",
             RegexOption.IGNORE_CASE
         ),
         ""
     )
     html = html.replace(
         Regex(
-            """<(?:div|span|button)\b[^>]*class\s*=\s*["'][^"']*(?:back[-_]?to[-_]?top|go[-_]?top|scroll[-_]?top|to[-_]?top)[^"']*["'][^>]*>[\s\S]*?</(?:div|span|button)>""",
+            """<a\b[^>]*href\s*=\s*["']#(?:top|_top|header|page_top)?["'][^>]*>(?:[^<]{0,16}|<[^>]+>)*?(?:top|▲|↑)(?:[^<]{0,12}|<[^>]+>)*?</a>""",
+            RegexOption.IGNORE_CASE
+        ),
+        ""
+    )
+    html = html.replace(
+        Regex(
+            """<(?:div|span|p|button|center|small)\b[^>]*class\s*=\s*["'][^"']*(?:back[-_]?to[-_]?top|go[-_]?top|scroll[-_]?top|to[-_]?top)[^"']*["'][^>]*>[\s\S]*?</(?:div|span|p|button|center|small)>""",
             RegexOption.IGNORE_CASE
         ),
         ""
@@ -1061,7 +1149,8 @@ private fun buildIsolatedMdxDocument(
     borderHex: String,
     initialScrollY: Int,
     initialAnchor: String?,
-    initialEditing: Boolean
+    initialEditing: Boolean,
+    renderToken: String
 ): String {
     val cleanBody = sanitizeMdxHtml(rawBodyHtml)
     val cleanUserCss = sanitizeMdxCss(rawUserCss)
@@ -1107,6 +1196,7 @@ private fun buildIsolatedMdxDocument(
     val userCssJson = JSONObject.quote(cleanUserCss)
     val overrideCssJson = JSONObject.quote(uniformOverrideCss)
     val anchorJson = JSONObject.quote(initialAnchor ?: "")
+    val tokenJson = JSONObject.quote(renderToken)
     val hostFilterCss = if (useDarkInvert) {
         "filter: invert(0.91) hue-rotate(180deg); background: #FFFFFF;"
     } else {
@@ -1195,27 +1285,98 @@ private fun buildIsolatedMdxDocument(
             container.id = 'mdx-root';
             container.innerHTML = $bodyJson;
 
-            // 隐藏加载失败的离线图片与空白占位图，清理无用回到顶部元素
+            // 隐藏加载失败的离线图片与空白占位图，彻底清理任何形式的“回到顶部”元素及残留空容器
             container.querySelectorAll('img').forEach(function(img) {
-                img.addEventListener('error', function() { img.style.display = 'none'; });
+                img.addEventListener('error', function() { img.style.display = 'none'; reportContentHeight(); });
                 const s = (img.getAttribute('src') || '').trim();
                 if (!s || /^https?:/i.test(s) || /^\/\//.test(s) || /^sound:/i.test(s)) {
                     img.style.display = 'none';
                 }
             });
-            container.querySelectorAll('a, button').forEach(function(el) {
-                const txt = (el.textContent || '').trim().toLowerCase();
-                const href = (el.getAttribute('href') || '').trim().toLowerCase();
-                if ((href === '#' || href === '#top' || href === '#_top') &&
-                    (txt === 'top' || txt === '回到顶部' || txt === '返回顶部' || txt === '回顶部' || txt === '▲' || txt === '↑')) {
+
+            const backTopLabels = new Set([
+                '回到顶部', '返回顶部', '回顶部', '回到页首', '返回页首', '回页首',
+                '回到顶端', '返回顶端', '回顶端', 'backtotop', 'totop'
+            ]);
+            function normalizeTopLabel(text) {
+                return (text || '')
+                    .replace(/[\s▲△↑⬆⇧【】\[\]()（）<>《》·\-_=]+/g, '')
+                    .toLowerCase();
+            }
+
+            // 自底向上移除所有“回到顶部”节点及其变为全空的包装元素
+            Array.from(container.querySelectorAll('*')).reverse().forEach(function(el) {
+                const tag = (el.tagName || '').toUpperCase();
+                if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'IMG') return;
+                const norm = normalizeTopLabel(el.textContent);
+                const isBackTopText = backTopLabels.has(norm) ||
+                    ((tag === 'A' || tag === 'BUTTON') && (norm === 'top' || norm === ''));
+                if (isBackTopText && el.querySelectorAll('p, div, table, ul, ol').length <= 1) {
+                    const href = (el.getAttribute && el.getAttribute('href')) || '';
+                    if (backTopLabels.has(norm) || href === '#' || /^#(?:top|_top)/i.test(href)) {
+                        el.remove();
+                        return;
+                    }
+                }
+                if ((tag === 'DIV' || tag === 'P' || tag === 'CENTER' || tag === 'FOOTER') &&
+                    !(el.textContent || '').trim() &&
+                    !el.querySelector('img, svg, table, hr')) {
                     el.remove();
                 }
             });
+
+            // 清除孤立的裸文本“回到顶部”节点
+            const textWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+            const textsToRemove = [];
+            let tn;
+            while ((tn = textWalker.nextNode())) {
+                if (backTopLabels.has(normalizeTopLabel(tn.nodeValue))) {
+                    textsToRemove.push(tn);
+                }
+            }
+            textsToRemove.forEach(function(n) { n.remove(); });
+
+            // 清理词条最末尾多余的 <br> / <hr> / 空块，避免底部多余留白
+            while (container.lastChild) {
+                const last = container.lastChild;
+                if (last.nodeType === 3 && !(last.nodeValue || '').trim()) {
+                    last.remove();
+                } else if (last.nodeType === 1) {
+                    const t = (last.tagName || '').toUpperCase();
+                    if (t === 'BR' || t === 'HR' || (!(last.textContent || '').trim() && !last.querySelector('img, svg, table'))) {
+                        last.remove();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
 
             shadow.appendChild(baseStyle);
             shadow.appendChild(userStyle);
             shadow.appendChild(overrideStyle);
             shadow.appendChild(container);
+
+            const renderToken = $tokenJson;
+            let lastReportedHeight = 0;
+            function reportContentHeight() {
+                const h = Math.ceil(host.getBoundingClientRect().height);
+                if (h > 0 && Math.abs(h - lastReportedHeight) >= 2) {
+                    lastReportedHeight = h;
+                    try { AndroidBridge.onContentHeightChanged(renderToken, h); } catch (e) {}
+                }
+            }
+            if (typeof ResizeObserver !== 'undefined') {
+                try {
+                    const ro = new ResizeObserver(function() {
+                        reportContentHeight();
+                        collectVisualLines();
+                        updateClipMasks();
+                    });
+                    ro.observe(host);
+                } catch (e) {}
+            }
 
             function scrollToAnchor(anchorName) {
                 if (!anchorName) return false;
@@ -1324,8 +1485,8 @@ private fun buildIsolatedMdxDocument(
             function updateDynamicSpacer() {
                 const vh = viewport.clientHeight;
                 if (vh <= 0) return;
-                const contentH = host.scrollHeight;
-                if (contentH <= vh) {
+                const contentH = Math.ceil(host.getBoundingClientRect().height);
+                if (contentH <= vh + 4) {
                     spacer.style.height = '0px';
                 } else {
                     const lastLineH = cachedLines.length > 0
@@ -1494,6 +1655,7 @@ private fun buildIsolatedMdxDocument(
             });
 
             requestAnimationFrame(function() {
+                reportContentHeight();
                 collectVisualLines();
                 const initAnchor = $anchorJson;
                 const initScroll = $initialScrollY;
@@ -1503,6 +1665,11 @@ private fun buildIsolatedMdxDocument(
                     viewport.scrollTop = initScroll;
                 }
                 updateClipMasks();
+                setTimeout(function() {
+                    reportContentHeight();
+                    collectVisualLines();
+                    updateClipMasks();
+                }, 120);
             });
         })();
         </script>

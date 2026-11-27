@@ -7,6 +7,7 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.Charset
+import java.text.Collator
 import java.util.Locale
 import java.util.zip.Inflater
 
@@ -33,6 +34,15 @@ class MdxDictionaryEngine private constructor(
     private val stripKey: Boolean
 ) : Closeable {
 
+    private enum class BlockSortOrder {
+        UNICODE_STRIPPED,
+        UNICODE_LOWER,
+        CHARSET_BYTES,
+        UTF8_BYTES,
+        ZH_PINYIN,
+        UNKNOWN
+    }
+
     data class LookupMatch(
         val queriedWord: String,
         val matchedWord: String,
@@ -50,7 +60,11 @@ class MdxDictionaryEngine private constructor(
         val firstLower: String,
         val lastLower: String,
         val firstStripped: String,
-        val lastStripped: String
+        val lastStripped: String,
+        val firstRawBytes: ByteArray,
+        val lastRawBytes: ByteArray,
+        val firstUtf8Bytes: ByteArray,
+        val lastUtf8Bytes: ByteArray
     )
 
     private data class RecordBlockMeta(
@@ -65,13 +79,34 @@ class MdxDictionaryEngine private constructor(
         val word: String
     )
 
+    private class FullKeyIndex(
+        val lowerToBlocks: HashMap<String, IntArray>,
+        val strippedToBlocks: HashMap<String, IntArray>,
+        val sortedHeadwords: Array<String>,
+        val sortedHeadwordsLower: Array<String>
+    )
+
     private val lock = Any()
     private var raf: RandomAccessFile? = RandomAccessFile(file, "r")
+    private val zhCollator: Collator = Collator.getInstance(Locale.CHINA).apply {
+        strength = Collator.PRIMARY
+    }
+
+    private val totalKeyDecompSize: Long = keyBlocks.sumOf { it.decompSize }
+    private val hasCjkHeadwords: Boolean = keyBlocks.any {
+        containsCjk(it.firstWord) || containsCjk(it.lastWord)
+    }
+    private val sortOrderInfo: Pair<BlockSortOrder, List<Int>> = detectSortOrder(keyBlocks, zhCollator)
+    private val primarySortOrder: BlockSortOrder = sortOrderInfo.first
+    private val outOfOrderBlocks: List<Int> = sortOrderInfo.second
+
+    @Volatile
+    private var fullKeyIndex: FullKeyIndex? = null
 
     // 最近访问的少量词头块缓存，避免连续查词重复解压
     private val keyBlockCache = object : LinkedHashMap<Int, List<KeyEntry>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, List<KeyEntry>>?): Boolean {
-            return size > 12
+            return size > 16
         }
     }
 
@@ -80,6 +115,7 @@ class MdxDictionaryEngine private constructor(
             runCatching { raf?.close() }
             raf = null
             keyBlockCache.clear()
+            fullKeyIndex = null
         }
     }
 
@@ -102,7 +138,9 @@ class MdxDictionaryEngine private constructor(
     }
 
     /**
-     * 前缀联想搜索：按词头索引块快速定位起始位置并按需扫描邻近块，返回最多 limit 个候选词头。
+     * 前缀联想搜索：
+     * - 若已建立全量词头索引（中文/非标准排序词典），直接 O(log N) 二分检索；
+     * - 否则按检测到的真实排序规则（GBK 字节序 / 拼音序 / UTF-8 / Unicode）定位起始块并扫描。
      */
     fun suggestPrefix(rawPrefix: String, limit: Int = 12): List<String> {
         val cleaned = cleanBasicQuery(rawPrefix)
@@ -110,14 +148,28 @@ class MdxDictionaryEngine private constructor(
 
         val prefixLower = cleaned.lowercase(Locale.ROOT)
         val prefixStripped = stripForKey(cleaned)
-        val startBlockIdx = findPrefixStartBlockIndex(prefixLower, prefixStripped)
+
+        // 若已构建全量索引，或当前为非单调排序/中文词典且索引体量适中，直接二分全量词头
+        val existingIdx = fullKeyIndex ?: if (
+            (primarySortOrder == BlockSortOrder.UNKNOWN || (containsCjk(cleaned) && hasCjkHeadwords)) &&
+            totalKeyDecompSize <= 24L * 1024 * 1024
+        ) {
+            ensureFullKeyIndex()
+        } else {
+            null
+        }
+
+        if (existingIdx != null) {
+            return suggestFromFullIndex(existingIdx, prefixLower, limit)
+        }
+
+        val startBlockIdx = findPrefixStartBlockIndex(cleaned, prefixLower, prefixStripped)
         if (startBlockIdx !in keyBlocks.indices) return emptyList()
 
         val exactPrefixHits = LinkedHashSet<String>(limit)
         val strippedPrefixHits = LinkedHashSet<String>(limit)
         val seenLower = HashSet<String>(limit * 2)
 
-        // 从命中的前一块开始最多扫描 6 个连续词头块，既覆盖跨块边界又保证毫秒级响应
         val firstScan = (startBlockIdx - 1).coerceAtLeast(0)
         val lastScan = (startBlockIdx + 5).coerceAtMost(keyBlocks.lastIndex)
 
@@ -149,7 +201,9 @@ class MdxDictionaryEngine private constructor(
                     val pastLower = wordLower > prefixLower && !wordLower.startsWith(prefixLower)
                     val pastStripped = prefixStripped.isEmpty() ||
                         (wordStripped > prefixStripped && !wordStripped.startsWith(prefixStripped))
-                    if (pastLower && pastStripped) {
+                    if (pastLower && pastStripped &&
+                        (primarySortOrder == BlockSortOrder.UNICODE_LOWER || primarySortOrder == BlockSortOrder.UNICODE_STRIPPED)
+                    ) {
                         passedBlock = true
                         break
                     }
@@ -168,86 +222,300 @@ class MdxDictionaryEngine private constructor(
         return combined
     }
 
-    private fun findPrefixStartBlockIndex(prefixLower: String, prefixStripped: String): Int {
-        if (keyBlocks.isEmpty()) return -1
-        // 先找首个可能包含此前缀的块
-        if (stripKey && prefixStripped.isNotEmpty()) {
-            for (i in keyBlocks.indices) {
-                val b = keyBlocks[i]
-                if (b.lastStripped >= prefixStripped || b.lastStripped.startsWith(prefixStripped)) {
-                    return i
-                }
+    private fun suggestFromFullIndex(
+        index: FullKeyIndex,
+        prefixLower: String,
+        limit: Int
+    ): List<String> {
+        val lowers = index.sortedHeadwordsLower
+        val words = index.sortedHeadwords
+        if (lowers.isEmpty()) return emptyList()
+
+        // 二分查找首个 >= prefixLower 的位置
+        var lo = 0
+        var hi = lowers.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (lowers[mid] < prefixLower) {
+                lo = mid + 1
+            } else {
+                hi = mid
             }
         }
-        for (i in keyBlocks.indices) {
-            val b = keyBlocks[i]
-            if (b.lastLower >= prefixLower || b.lastLower.startsWith(prefixLower)) {
-                return i
+
+        val out = ArrayList<String>(limit)
+        var i = lo
+        while (i < lowers.size && out.size < limit) {
+            if (!lowers[i].startsWith(prefixLower)) break
+            out.add(words[i])
+            i++
+        }
+        return out
+    }
+
+    private fun findPrefixStartBlockIndex(
+        rawPrefix: String,
+        prefixLower: String,
+        prefixStripped: String
+    ): Int {
+        if (keyBlocks.isEmpty()) return -1
+        val prefixCharsetBytes = runCatching { rawPrefix.toByteArray(charset) }.getOrNull()
+        val prefixUtf8Bytes = rawPrefix.toByteArray(Charsets.UTF_8)
+
+        when (primarySortOrder) {
+            BlockSortOrder.CHARSET_BYTES -> {
+                if (prefixCharsetBytes != null) {
+                    for (i in keyBlocks.indices) {
+                        val b = keyBlocks[i]
+                        if (compareUnsignedBytes(b.lastRawBytes, prefixCharsetBytes) >= 0 ||
+                            b.lastLower.startsWith(prefixLower)
+                        ) {
+                            return i
+                        }
+                    }
+                }
+            }
+            BlockSortOrder.UTF8_BYTES -> {
+                for (i in keyBlocks.indices) {
+                    val b = keyBlocks[i]
+                    if (compareUnsignedBytes(b.lastUtf8Bytes, prefixUtf8Bytes) >= 0 ||
+                        b.lastLower.startsWith(prefixLower)
+                    ) {
+                        return i
+                    }
+                }
+            }
+            BlockSortOrder.ZH_PINYIN -> {
+                synchronized(zhCollator) {
+                    for (i in keyBlocks.indices) {
+                        val b = keyBlocks[i]
+                        if (zhCollator.compare(b.lastWord, rawPrefix) >= 0 ||
+                            b.lastLower.startsWith(prefixLower)
+                        ) {
+                            return i
+                        }
+                    }
+                }
+            }
+            else -> {
+                if (stripKey && prefixStripped.isNotEmpty()) {
+                    for (i in keyBlocks.indices) {
+                        val b = keyBlocks[i]
+                        if (b.lastStripped >= prefixStripped || b.lastStripped.startsWith(prefixStripped)) {
+                            return i
+                        }
+                    }
+                }
+                for (i in keyBlocks.indices) {
+                    val b = keyBlocks[i]
+                    if (b.lastLower >= prefixLower || b.lastLower.startsWith(prefixLower)) {
+                        return i
+                    }
+                }
             }
         }
         return -1
     }
 
     private fun lookupExactWithRedirect(word: String, maxHops: Int): Pair<String, String>? {
-        var current = word
-        val visited = HashSet<String>()
-        repeat(maxHops) {
-            val norm = current.lowercase(Locale.ROOT)
-            if (!visited.add(norm)) return null
-            val hit = lookupSinglePass(current) ?: return null
-            val html = hit.second.trim()
-            if (html.startsWith("@@@LINK=", ignoreCase = true)) {
-                val target = html.substring(8)
-                    .lineSequence()
-                    .firstOrNull()
-                    ?.trim()
-                    ?.trimEnd('\u0000')
-                    .orEmpty()
-                if (target.isEmpty()) return null
-                current = target
-            } else {
-                return hit.first to html
+        val hits = lookupAllMatchingEntries(word)
+        if (hits.isEmpty()) return null
+
+        val primaryWord = hits.first().first
+        val resolvedHtmls = LinkedHashSet<String>()
+        for ((_, rawHtml) in hits) {
+            val resolved = resolveRedirectIfNeeded(rawHtml, word, maxHops)
+            if (!resolved.isNullOrBlank()) {
+                resolvedHtmls.add(resolved)
             }
         }
-        return null
+        if (resolvedHtmls.isEmpty()) return null
+        val combinedHtml = resolvedHtmls.joinToString("\n<hr class=\"mdx-multi-sep\"/>\n")
+        return primaryWord to combinedHtml
     }
 
-    private fun lookupSinglePass(word: String): Pair<String, String>? {
-        if (keyBlocks.isEmpty()) return null
+    private fun resolveRedirectIfNeeded(
+        initialHtml: String,
+        originWord: String,
+        maxHops: Int
+    ): String? {
+        var currentHtml = initialHtml.trim()
+        val visited = HashSet<String>()
+        visited.add(originWord.lowercase(Locale.ROOT))
+
+        repeat(maxHops) {
+            if (!currentHtml.startsWith("@@@LINK=", ignoreCase = true)) {
+                return currentHtml
+            }
+            val target = currentHtml.substring(8)
+                .lineSequence()
+                .firstOrNull()
+                ?.trim()
+                ?.trimEnd('\u0000', '\r', '\n', '\uFEFF')
+                .orEmpty()
+            if (target.isEmpty()) return null
+            val norm = target.lowercase(Locale.ROOT)
+            if (!visited.add(norm)) return null
+            val nextHits = lookupAllMatchingEntries(target)
+            if (nextHits.isEmpty()) return null
+            currentHtml = nextHits.first().second.trim()
+        }
+        return if (currentHtml.startsWith("@@@LINK=", ignoreCase = true)) null else currentHtml
+    }
+
+    private fun lookupAllMatchingEntries(word: String): List<Pair<String, String>> {
+        if (keyBlocks.isEmpty()) return emptyList()
         val targetLower = word.lowercase(Locale.ROOT)
         val targetStripped = stripForKey(word)
 
-        val candidateBlocks = findCandidateKeyBlocks(targetLower, targetStripped)
-        for (block in candidateBlocks) {
-            val entries = readKeyBlockEntries(block)
-            // 先精确匹配（区分大小写），再忽略大小写匹配，最后按 stripKey 匹配
-            var matchIdx = entries.indexOfFirst { it.word == word }
-            if (matchIdx < 0) {
-                matchIdx = entries.indexOfFirst { it.word.equals(word, ignoreCase = true) }
+        // 1. 若已存在全量索引，直接 O(1) 定位词头块
+        fullKeyIndex?.let { idx ->
+            val blockIds = idx.lowerToBlocks[targetLower]
+                ?: if (stripKey && targetStripped.isNotEmpty()) idx.strippedToBlocks[targetStripped] else null
+            if (blockIds != null) {
+                val found = extractMatchesFromBlocks(blockIds.map { keyBlocks[it] }, word, targetStripped)
+                if (found.isNotEmpty()) return found
             }
-            if (matchIdx < 0 && targetStripped.isNotEmpty() && stripKey) {
-                matchIdx = entries.indexOfFirst { stripForKey(it.word) == targetStripped }
-            }
-            if (matchIdx >= 0) {
-                val entry = entries[matchIdx]
-                val nextOffset = if (matchIdx + 1 < entries.size) {
-                    entries[matchIdx + 1].recordOffset
-                } else {
-                    resolveNextBlockStartRecordOffset(block.index)
-                }
-                val html = readRecordSlice(entry.recordOffset, nextOffset)
-                return entry.word to html
+            return emptyList()
+        }
+
+        // 2. 快速多排序通道（Unicode / stripKey / 原编码字节序[GBK等] / UTF-8字节序 / 中文拼音序）
+        val candidateBlocks = findCandidateKeyBlocks(word, targetLower, targetStripped)
+        val fastHits = extractMatchesFromBlocks(candidateBlocks, word, targetStripped)
+        if (fastHits.isNotEmpty()) return fastHits
+
+        // 3. 兜底：若该词典包含中文词头或属于非单调排序（如部首/笔画/多音字拼音差异/多分区词典），
+        //    懒加载构建一次 O(1) 全量词头索引，彻底保证任何中文单字与词语 100% 查得到！
+        val shouldBuildFallback = (primarySortOrder == BlockSortOrder.UNKNOWN ||
+            (containsCjk(word) && (hasCjkHeadwords || keyBlocks.size <= 32))) &&
+            totalKeyDecompSize <= 32L * 1024 * 1024
+
+        if (shouldBuildFallback) {
+            val idx = ensureFullKeyIndex() ?: return emptyList()
+            val blockIds = idx.lowerToBlocks[targetLower]
+                ?: if (stripKey && targetStripped.isNotEmpty()) idx.strippedToBlocks[targetStripped] else null
+            if (blockIds != null) {
+                return extractMatchesFromBlocks(blockIds.map { keyBlocks[it] }, word, targetStripped)
             }
         }
-        return null
+        return emptyList()
+    }
+
+    private fun extractMatchesFromBlocks(
+        blocks: List<KeyBlockMeta>,
+        word: String,
+        targetStripped: String
+    ): List<Pair<String, String>> {
+        val exactMatches = ArrayList<Pair<String, String>>(2)
+        val ciMatches = ArrayList<Pair<String, String>>(2)
+        val strippedMatches = ArrayList<Pair<String, String>>(2)
+
+        for (block in blocks) {
+            val entries = readKeyBlockEntries(block)
+            for (i in entries.indices) {
+                val entry = entries[i]
+                val w = entry.word
+                val matchTier = when {
+                    w == word -> 0
+                    w.equals(word, ignoreCase = true) -> 1
+                    stripKey && targetStripped.isNotEmpty() && stripForKey(w) == targetStripped -> 2
+                    else -> -1
+                }
+                if (matchTier >= 0) {
+                    val nextOffset = if (i + 1 < entries.size) {
+                        entries[i + 1].recordOffset
+                    } else {
+                        resolveNextBlockStartRecordOffset(block.index)
+                    }
+                    val html = readRecordSlice(entry.recordOffset, nextOffset)
+                    val pair = w to html
+                    when (matchTier) {
+                        0 -> if (exactMatches.size < 6) exactMatches.add(pair)
+                        1 -> if (ciMatches.size < 6) ciMatches.add(pair)
+                        2 -> if (strippedMatches.size < 6) strippedMatches.add(pair)
+                    }
+                }
+            }
+        }
+
+        return when {
+            exactMatches.isNotEmpty() -> exactMatches
+            ciMatches.isNotEmpty() -> ciMatches
+            else -> strippedMatches
+        }
+    }
+
+    private fun ensureFullKeyIndex(): FullKeyIndex? {
+        fullKeyIndex?.let { return it }
+        synchronized(lock) {
+            fullKeyIndex?.let { return it }
+            val reader = raf ?: return null
+            val lowerMap = HashMap<String, MutableList<Int>>(numEntries.toInt().coerceIn(1024, 200_000))
+            val strippedMap = HashMap<String, MutableList<Int>>()
+            val uniqueHeadwords = LinkedHashMap<String, String>(numEntries.toInt().coerceIn(1024, 200_000))
+
+            for (block in keyBlocks) {
+                val entries = keyBlockCache[block.index] ?: run {
+                    val compBytes = ByteArray(block.compSize.toInt())
+                    reader.seek(keyBlocksStartOffset + block.compOffset)
+                    reader.readFully(compBytes)
+                    val decomp = decompressBlock(compBytes, block.decompSize.toInt())
+                    parseKeyBlockEntries(decomp, numberWidth, charset)
+                }
+                for (entry in entries) {
+                    val w = entry.word
+                    if (w.isEmpty()) continue
+                    val low = w.lowercase(Locale.ROOT)
+                    val list = lowerMap.getOrPut(low) { ArrayList(1) }
+                    if (list.lastOrNull() != block.index && list.size < 4) {
+                        list.add(block.index)
+                    }
+                    if (!uniqueHeadwords.containsKey(low)) {
+                        uniqueHeadwords[low] = w
+                    }
+                    if (stripKey) {
+                        val stripped = stripForKey(w)
+                        if (stripped.isNotEmpty() && stripped != low) {
+                            val sList = strippedMap.getOrPut(stripped) { ArrayList(1) }
+                            if (sList.lastOrNull() != block.index && sList.size < 4) {
+                                sList.add(block.index)
+                            }
+                        }
+                    }
+                }
+            }
+
+            val lowerArrMap = HashMap<String, IntArray>(lowerMap.size)
+            for ((k, v) in lowerMap) {
+                lowerArrMap[k] = v.toIntArray()
+            }
+            val strippedArrMap = HashMap<String, IntArray>(strippedMap.size)
+            for ((k, v) in strippedMap) {
+                strippedArrMap[k] = v.toIntArray()
+            }
+
+            val pairs = uniqueHeadwords.entries.sortedBy { it.key }
+            val sortedWords = Array(pairs.size) { pairs[it].value }
+            val sortedLowers = Array(pairs.size) { pairs[it].key }
+
+            val built = FullKeyIndex(
+                lowerToBlocks = lowerArrMap,
+                strippedToBlocks = strippedArrMap,
+                sortedHeadwords = sortedWords,
+                sortedHeadwordsLower = sortedLowers
+            )
+            fullKeyIndex = built
+            return built
+        }
     }
 
     private fun findCandidateKeyBlocks(
+        rawWord: String,
         targetLower: String,
         targetStripped: String
     ): List<KeyBlockMeta> {
-        val result = ArrayList<KeyBlockMeta>(4)
-        val added = HashSet<Int>(8)
+        val result = ArrayList<KeyBlockMeta>(6)
+        val added = HashSet<Int>(12)
 
         fun addBlock(idx: Int) {
             if (idx in keyBlocks.indices && added.add(idx)) {
@@ -255,7 +523,7 @@ class MdxDictionaryEngine private constructor(
             }
         }
 
-        // 1. 按标准 stripKey 范围快速扫描（通常仅数百至两千块，耗时 < 0.5ms）
+        // 1. 按标准 stripKey 范围快速扫描
         if (targetStripped.isNotEmpty()) {
             for (block in keyBlocks) {
                 if (targetStripped >= block.firstStripped && targetStripped <= block.lastStripped) {
@@ -264,24 +532,84 @@ class MdxDictionaryEngine private constructor(
             }
         }
 
-        // 2. 按普通小写字典序范围匹配（覆盖未 stripKey 的词典）
+        // 2. 按普通小写 Unicode 范围匹配
         for (block in keyBlocks) {
             if (targetLower >= block.firstLower && targetLower <= block.lastLower) {
                 addBlock(block.index)
             }
         }
 
-        // 3. 若命中边界块，顺带检查紧邻前一块（兼容大小写/重音字母跨块边界）
-        if (result.isEmpty()) {
+        // 3. 按词典原生编码（GBK / Big5 / UTF-8 / UTF-16LE）无符号字节序匹配（修复 GBK 排序中文词典）
+        val targetCharsetBytes = runCatching { rawWord.toByteArray(charset) }.getOrNull()
+        val targetLowerCharsetBytes = runCatching { targetLower.toByteArray(charset) }.getOrNull()
+        if (targetCharsetBytes != null) {
+            for (block in keyBlocks) {
+                if (compareUnsignedBytes(targetCharsetBytes, block.firstRawBytes) >= 0 &&
+                    compareUnsignedBytes(targetCharsetBytes, block.lastRawBytes) <= 0
+                ) {
+                    addBlock(block.index)
+                } else if (
+                    targetLowerCharsetBytes != null &&
+                    compareUnsignedBytes(targetLowerCharsetBytes, block.firstRawBytes) >= 0 &&
+                    compareUnsignedBytes(targetLowerCharsetBytes, block.lastRawBytes) <= 0
+                ) {
+                    addBlock(block.index)
+                }
+            }
+        }
+
+        // 4. 按 UTF-8 无符号字节序匹配
+        val targetUtf8Bytes = rawWord.toByteArray(Charsets.UTF_8)
+        for (block in keyBlocks) {
+            if (compareUnsignedBytes(targetUtf8Bytes, block.firstUtf8Bytes) >= 0 &&
+                compareUnsignedBytes(targetUtf8Bytes, block.lastUtf8Bytes) <= 0
+            ) {
+                addBlock(block.index)
+            }
+        }
+
+        // 5. 若包含中文，按中文拼音 Collator 序匹配（修复 MdxBuilder 按拼音排序的中文词典）
+        if (containsCjk(rawWord) && hasCjkHeadwords) {
+            synchronized(zhCollator) {
+                for (block in keyBlocks) {
+                    if (zhCollator.compare(rawWord, block.firstWord) >= 0 &&
+                        zhCollator.compare(rawWord, block.lastWord) <= 0
+                    ) {
+                        addBlock(block.index)
+                    }
+                }
+            }
+        }
+
+        // 6. 顺带纳入少量分区边界/乱序块（如前言/凡例所在块）
+        if (outOfOrderBlocks.size <= 12) {
+            for (idx in outOfOrderBlocks) {
+                addBlock(idx)
+            }
+        }
+
+        // 7. 若仍未命中，按检测到的主排序规则做二分定位并检查邻近块
+        if (result.isEmpty() && primarySortOrder != BlockSortOrder.UNKNOWN) {
             var lo = 0
             var hi = keyBlocks.lastIndex
             while (lo <= hi) {
                 val mid = (lo + hi) ushr 1
                 val b = keyBlocks[mid]
-                val cmp = if (stripKey && targetStripped.isNotEmpty()) {
-                    targetStripped.compareTo(b.firstStripped)
-                } else {
-                    targetLower.compareTo(b.firstLower)
+                val cmp = when (primarySortOrder) {
+                    BlockSortOrder.UNICODE_STRIPPED -> targetStripped.compareTo(b.firstStripped)
+                    BlockSortOrder.UNICODE_LOWER -> targetLower.compareTo(b.firstLower)
+                    BlockSortOrder.CHARSET_BYTES -> {
+                        if (targetCharsetBytes != null) {
+                            compareUnsignedBytes(targetCharsetBytes, b.firstRawBytes)
+                        } else {
+                            targetLower.compareTo(b.firstLower)
+                        }
+                    }
+                    BlockSortOrder.UTF8_BYTES -> compareUnsignedBytes(targetUtf8Bytes, b.firstUtf8Bytes)
+                    BlockSortOrder.ZH_PINYIN -> synchronized(zhCollator) {
+                        zhCollator.compare(rawWord, b.firstWord)
+                    }
+                    BlockSortOrder.UNKNOWN -> 0
                 }
                 if (cmp < 0) {
                     hi = mid - 1
@@ -402,7 +730,7 @@ class MdxDictionaryEngine private constructor(
                 val charset = when {
                     encodingName.isEmpty() || encodingName == "UTF-8" || encodingName == "UTF8" -> Charsets.UTF_8
                     encodingName == "UTF-16" || encodingName == "UTF-16LE" || encodingName == "UTF16" -> Charsets.UTF_16LE
-                    encodingName == "GBK" || encodingName == "GB2312" || encodingName == "GB18030" -> {
+                    encodingName.startsWith("GB") || encodingName == "CP936" -> {
                         runCatching { Charset.forName("GB18030") }.getOrDefault(Charsets.UTF_8)
                     }
                     encodingName == "BIG5" -> {
@@ -568,13 +896,15 @@ class MdxDictionaryEngine private constructor(
                 val firstByteCount = (firstLen + textTerm) * charUnitWidth
                 val firstBytes = ByteArray(firstByteCount)
                 buf.get(firstBytes)
-                val firstWord = String(firstBytes, charset).trimEnd('\u0000')
+                val firstPayloadBytes = firstBytes.copyOf((firstLen * charUnitWidth).coerceAtMost(firstBytes.size))
+                val firstWord = String(firstPayloadBytes, charset).trimEnd('\u0000').trim('\uFEFF', '\r', '\n').trim()
 
                 val lastLen = if (isV2) (buf.short.toInt() and 0xFFFF) else (buf.get().toInt() and 0xFF)
                 val lastByteCount = (lastLen + textTerm) * charUnitWidth
                 val lastBytes = ByteArray(lastByteCount)
                 buf.get(lastBytes)
-                val lastWord = String(lastBytes, charset).trimEnd('\u0000')
+                val lastPayloadBytes = lastBytes.copyOf((lastLen * charUnitWidth).coerceAtMost(lastBytes.size))
+                val lastWord = String(lastPayloadBytes, charset).trimEnd('\u0000').trim('\uFEFF', '\r', '\n').trim()
 
                 val compSize = readNumber(buf, numberWidth)
                 val decompSize = readNumber(buf, numberWidth)
@@ -591,7 +921,11 @@ class MdxDictionaryEngine private constructor(
                         firstLower = firstWord.lowercase(Locale.ROOT),
                         lastLower = lastWord.lowercase(Locale.ROOT),
                         firstStripped = stripForKey(firstWord),
-                        lastStripped = stripForKey(lastWord)
+                        lastStripped = stripForKey(lastWord),
+                        firstRawBytes = firstPayloadBytes,
+                        lastRawBytes = lastPayloadBytes,
+                        firstUtf8Bytes = firstWord.toByteArray(Charsets.UTF_8),
+                        lastUtf8Bytes = lastWord.toByteArray(Charsets.UTF_8)
                     )
                 )
                 runningCompOffset += compSize
@@ -620,6 +954,8 @@ class MdxDictionaryEngine private constructor(
                         pos += 2
                     }
                     val word = String(raw, textStart, (pos - textStart).coerceAtLeast(0), charset)
+                        .trim('\u0000', '\uFEFF', '\r', '\n')
+                        .trim()
                     pos += 2
                     entries.add(KeyEntry(offset, word))
                 } else {
@@ -627,6 +963,8 @@ class MdxDictionaryEngine private constructor(
                         pos++
                     }
                     val word = String(raw, textStart, (pos - textStart).coerceAtLeast(0), charset)
+                        .trim('\u0000', '\uFEFF', '\r', '\n')
+                        .trim()
                     pos += 1
                     entries.add(KeyEntry(offset, word))
                 }
@@ -978,12 +1316,102 @@ class MdxDictionaryEngine private constructor(
                 .replace("&amp;", "&")
         }
 
+        private fun compareUnsignedBytes(a: ByteArray, b: ByteArray): Int {
+            val minLen = minOf(a.size, b.size)
+            for (i in 0 until minLen) {
+                val av = a[i].toInt() and 0xFF
+                val bv = b[i].toInt() and 0xFF
+                if (av != bv) return av - bv
+            }
+            return a.size - b.size
+        }
+
+        private fun containsCjk(text: String): Boolean {
+            var i = 0
+            while (i < text.length) {
+                val cp = text.codePointAt(i)
+                if (Character.isIdeographic(cp)) return true
+                i += Character.charCount(cp)
+            }
+            return false
+        }
+
+        private fun isCjkWord(text: String): Boolean {
+            if (text.isEmpty()) return false
+            var count = 0
+            var i = 0
+            while (i < text.length) {
+                val cp = text.codePointAt(i)
+                if (!Character.isIdeographic(cp)) return false
+                count++
+                if (count > 8) return false
+                i += Character.charCount(cp)
+            }
+            return count in 1..8
+        }
+
+        private fun detectSortOrder(
+            blocks: List<KeyBlockMeta>,
+            zhCollator: Collator
+        ): Pair<BlockSortOrder, List<Int>> {
+            if (blocks.size <= 1) return BlockSortOrder.UNICODE_LOWER to emptyList()
+
+            fun scoreOrder(compare: (KeyBlockMeta, KeyBlockMeta) -> Int, selfCompare: (KeyBlockMeta) -> Int): Pair<Int, List<Int>> {
+                var inversions = 0
+                val badBlocks = ArrayList<Int>()
+                for (i in blocks.indices) {
+                    val b = blocks[i]
+                    if (selfCompare(b) > 0) {
+                        inversions++
+                        badBlocks.add(i)
+                    }
+                    if (i > 0 && compare(blocks[i - 1], b) > 0) {
+                        inversions++
+                        if (badBlocks.lastOrNull() != i) badBlocks.add(i)
+                    }
+                }
+                return inversions to badBlocks
+            }
+
+            val candidates = listOf(
+                BlockSortOrder.UNICODE_STRIPPED to scoreOrder(
+                    compare = { a, b -> a.lastStripped.compareTo(b.firstStripped) },
+                    selfCompare = { b -> b.firstStripped.compareTo(b.lastStripped) }
+                ),
+                BlockSortOrder.UNICODE_LOWER to scoreOrder(
+                    compare = { a, b -> a.lastLower.compareTo(b.firstLower) },
+                    selfCompare = { b -> b.firstLower.compareTo(b.lastLower) }
+                ),
+                BlockSortOrder.CHARSET_BYTES to scoreOrder(
+                    compare = { a, b -> compareUnsignedBytes(a.lastRawBytes, b.firstRawBytes) },
+                    selfCompare = { b -> compareUnsignedBytes(b.firstRawBytes, b.lastRawBytes) }
+                ),
+                BlockSortOrder.UTF8_BYTES to scoreOrder(
+                    compare = { a, b -> compareUnsignedBytes(a.lastUtf8Bytes, b.firstUtf8Bytes) },
+                    selfCompare = { b -> compareUnsignedBytes(b.firstUtf8Bytes, b.lastUtf8Bytes) }
+                ),
+                BlockSortOrder.ZH_PINYIN to synchronized(zhCollator) {
+                    scoreOrder(
+                        compare = { a, b -> zhCollator.compare(a.lastWord, b.firstWord) },
+                        selfCompare = { b -> zhCollator.compare(b.firstWord, b.lastWord) }
+                    )
+                }
+            )
+
+            val best = candidates.minBy { it.second.first }
+            val maxAllowed = maxOf(2, (blocks.size * 0.03).toInt())
+            return if (best.second.first <= maxAllowed) {
+                best.first to best.second.second
+            } else {
+                BlockSortOrder.UNKNOWN to emptyList()
+            }
+        }
+
         private val edgePunctRegex = Regex(
             """^[\s\p{Punct}《》「」『』【】（）()、，。！？；：""''—–…·•·]+|[\s\p{Punct}《》「」『』【】（）()、，。！？；：""''—–…·•·]+$"""
         )
         private val softCharsRegex = Regex("""[\u00AD\u200B\u200C\u200D\uFEFF]""")
         private val multiSpaceRegex = Regex("""\s+""")
-        private val cjkWordRegex = Regex("""^[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]{1,8}$""")
         private val englishWordTokenRegex = Regex("""^[A-Za-z]+(?:[-'’][A-Za-z]+)*$""")
 
         fun cleanBasicQuery(raw: String): String {
@@ -997,7 +1425,7 @@ class MdxDictionaryEngine private constructor(
         /**
          * 选词过滤：
          * - 清理软连字符与首尾标点，拒绝换行或整句；
-         * - 支持 1~8 个汉字的中文单字/词语/成语；
+         * - 支持 1~8 个汉字的中文单字/词语/成语（含扩展区生僻字）；
          * - 支持英文单词、连字符词或最多 3 词短语。
          */
         fun sanitizeSelectionQuery(raw: String): String? {
@@ -1012,8 +1440,8 @@ class MdxDictionaryEngine private constructor(
                 .trim()
             if (cleaned.isEmpty() || cleaned.length > 64) return null
 
-            // 中文：1~8 个纯汉字
-            if (cjkWordRegex.matches(cleaned)) {
+            // 中文：1~8 个纯汉字（覆盖基本区与全部 CJK 扩展区）
+            if (isCjkWord(cleaned)) {
                 return cleaned
             }
 
