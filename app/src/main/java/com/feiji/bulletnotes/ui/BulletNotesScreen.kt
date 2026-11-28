@@ -2123,57 +2123,55 @@ fun BulletNoteRow(
 
                                 // 操作图标统一使用同一套矢量绘制与 IconButton 布局，
                                 // 不再依赖不同 Unicode 字符的字体基线，因此图形中心天然对齐。
-                                // 方式 A：仅日期浏览界面下在编辑工具栏最左侧显示闹钟入口，搜索界面不显示。
+                                // 方式 A：仅日期浏览界面下在编辑工具栏中显示闹钟入口，搜索界面不显示；与撤销、恢复、收起统一靠右排布。
                                 val activeAlarmMillis = note.alarmTimeMillis?.takeIf {
                                     it > System.currentTimeMillis()
                                 }
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = if (allowAlarm) Arrangement.Start else Arrangement.End,
+                                    horizontalArrangement = Arrangement.End,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     if (allowAlarm) {
-                                        Box(
-                                            modifier = Modifier.weight(1f),
-                                            contentAlignment = Alignment.CenterStart
+                                        Row(
+                                            modifier = Modifier
+                                                .weight(1f, fill = false)
+                                                .height(48.dp)
+                                                .widthIn(min = 48.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .focusProperties { canFocus = false }
+                                                .clickable(onClick = onAlarmClick)
+                                                .padding(horizontal = 10.dp),
+                                            horizontalArrangement = Arrangement.Center,
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Row(
-                                                modifier = Modifier
-                                                    .height(48.dp)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .focusProperties { canFocus = false }
-                                                    .clickable(onClick = onAlarmClick)
-                                                    .padding(horizontal = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                val alarmTint = if (activeAlarmMillis != null) {
-                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-                                                }
-                                                AlarmClockIcon(
+                                            val alarmTint = if (activeAlarmMillis != null) {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+                                            }
+                                            AlarmClockIcon(
+                                                color = alarmTint,
+                                                strokeWidthDp = 1.8f,
+                                                modifier = Modifier.size(19.dp)
+                                            )
+                                            if (activeAlarmMillis != null) {
+                                                Spacer(modifier = Modifier.width(5.dp))
+                                                Text(
+                                                    text = NoteAlarmScheduler.formatCompactAlarmTime(
+                                                        activeAlarmMillis,
+                                                        note.dateString
+                                                    ),
+                                                    style = MaterialTheme.typography.bodySmall,
                                                     color = alarmTint,
-                                                    strokeWidthDp = 1.8f,
-                                                    modifier = Modifier.size(19.dp)
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
-                                                if (activeAlarmMillis != null) {
-                                                    Spacer(modifier = Modifier.width(5.dp))
-                                                    Text(
-                                                        text = NoteAlarmScheduler.formatCompactAlarmTime(
-                                                            activeAlarmMillis,
-                                                            note.dateString
-                                                        ),
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = alarmTint,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
                                             }
                                         }
                                     }
 
-                                    // 撤销、恢复靠右排布，与最右侧的收起按钮之间空出一个按钮宽度（48.dp）。
+                                    // 闹钟、撤销、恢复靠右排布，与最右侧的收起按钮之间空出一个按钮宽度（48.dp）。
                                     EditorActionButton(
                                         symbol = EditorActionSymbol.Undo,
                                         contentDescription = "撤销",
